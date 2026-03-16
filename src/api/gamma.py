@@ -101,11 +101,13 @@ class GammaClient:
         min_volume: float | None = None,
         min_liquidity: float | None = None,
         fee_type: str | None = None,
+        closed_after: datetime | None = None,
     ) -> List[Market]:
         """Загружает закрытые рынки постранично.
 
         limit — максимальное количество рынков после парсинга (не сырых страниц).
         min_volume / min_liquidity — серверная фильтрация через Gamma API.
+        closed_after — брать только рынки закрытые после этой даты.
         """
         markets: List[Market] = []
         offset = 0
@@ -125,6 +127,8 @@ class GammaClient:
                 params["liquidityNum_min"] = min_liquidity
             if fee_type is not None:
                 params["feeType"] = fee_type
+            if closed_after is not None:
+                params["endDate_min"] = closed_after.strftime("%Y-%m-%dT%H:%M:%SZ")
 
             try:
                 resp = self._http.get(f"{self.base_url}/markets", params=params)

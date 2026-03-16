@@ -84,6 +84,7 @@ def cmd_fetch(args, ev_cfg, main_cfg):
         hours_before_expiry=args.hours,
         limit=args.limit,
         workers=args.workers,
+        closed_after_days=args.days,
     )
 
     if not markets:
@@ -225,6 +226,7 @@ def main():
     f = sub.add_parser("fetch", help="Загрузить данные: цена за T-N ч до экспирации, весь диапазон цен")
     f.add_argument("--limit", type=int, default=10000, help="Кол-во рынков (default: 10000)")
     f.add_argument("--hours", type=float, default=2.0, help="Часов до экспирации для точки входа (default: 2.0)")
+    f.add_argument("--days", type=float, default=30.0, help="Брать рынки закрытые за последние N дней (default: 30)")
     f.add_argument("--workers", type=int, default=20, help="Параллельных запросов (default: 20)")
     f.add_argument("--output", type=str, default=None, help="Файл для сохранения (default: из конфига)")
 

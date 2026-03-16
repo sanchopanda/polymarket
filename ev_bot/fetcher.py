@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 import httpx
@@ -121,6 +121,7 @@ def fetch_ev_markets(
     limit: int = 10000,
     min_volume: float = 0.0,
     workers: int = 20,
+    closed_after_days: float = 30.0,
 ) -> List[HistoricalMarket]:
     """Загружает закрытые рынки для EV-анализа.
 
@@ -128,16 +129,20 @@ def fetch_ev_markets(
     до экспирации. Оба исхода добавляются как отдельные записи — это удваивает
     выборку и даёт полный ценовой диапазон 0.05–0.95.
 
-    Не фильтрует по ценовому диапазону: EV-анализ сам найдёт где +EV.
+    closed_after_days — брать только рынки закрытые за последние N дней.
+    CLOB-история хранится ограниченное время, поэтому старые рынки бесполезны.
     """
+    closed_after = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=closed_after_days)
     print(
         f"[EV-Fetcher] Загружаем закрытые рынки "
-        f"(лимит {limit}, T-{hours_before_expiry}ч до экспирации)..."
+        f"(лимит {limit}, T-{hours_before_expiry}ч до экспирации, "
+        f"закрытые после {closed_after.strftime('%Y-%m-%d')})..."
     )
     raw_markets = gamma.fetch_closed_markets(
         limit=limit,
         min_volume=min_volume,
         min_liquidity=0.0,
+        closed_after=closed_after,
     )
     print(f"[EV-Fetcher] Получено {len(raw_markets)} рынков с API.")
 
@@ -200,9 +205,10 @@ def fetch_ev_markets(
                     end_date=m.end_date,
                 ))
 
+    hit_rate = len(candidates) - skipped
     print(
-        f"[EV-Fetcher] Готово: {len(result)} записей из {len(candidates)} рынков "
-        f"(~{len(result)//max(len(candidates),1)*100}% → 2 исхода × рынок). "
-        f"Пропущено (нет истории): {skipped}."
+        f"[EV-Fetcher] Готово: {len(result)} записей из {len(candidates)} рынков. "
+        f"С историей: {hit_rate} ({hit_rate*100//max(len(candidates),1)}%). "
+        f"Без истории: {skipped}."
     )
     return result
