@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Structure
 
-Two independent bots in one repo:
+Three independent bots in one repo:
 
 - `/` (root) — **Polymarket Paper Trading Bot** — simulated Martingale on Polymarket prediction markets
 - `bybit-bot/` — **Bybit Futures Bot** — live Martingale trading on Bybit perpetual futures (demo account)
+- `ev_bot/` — **EV-бот** — isolated paper trading bot with adaptive EV filtering (analyzes win rates per price×volume bucket)
 
 The codebase is in Russian (comments, CLI output, README). Keep new code and messages consistent with this.
 
@@ -106,6 +107,48 @@ Key modules:
 - UMA Oracle has ~2-hour dispute window after market expiry before `closed=True`.
 - If redeem fails (tx revert, RPC error), bet stays open and retries next cycle.
 - Nonce management: uses `confirmed_nonce` (not `pending_nonce`) to handle stuck transactions, with 30% gas boost for replacements.
+
+---
+
+## EV-бот (`ev_bot/`)
+
+Изолированный paper trading бот с адаптивным EV-фильтром. Анализирует win rate закрытых рынков
+по бакетам (цена шаг 0.05 × объём тиры 1k/5k/20k/100k), ставит только туда где EV > 0.
+**Не меняет основной бот** — отдельная DB, отдельный CLI, импортирует только API-клиенты из `src/`.
+
+### Commands
+
+```bash
+# EV-анализ (читает data/backtest_markets.json)
+python -m ev_bot analyze
+python -m ev_bot analyze --min-samples 100  # строже
+
+# Paper trading с EV-фильтром
+python -m ev_bot scan --dry
+python -m ev_bot scan
+python -m ev_bot resolve
+python -m ev_bot run --interval 0.033
+
+# Статистика
+python -m ev_bot dashboard
+```
+
+### Architecture
+
+- `ev_bot/filter.py` — `EVFilter` + `EVBucket`: бакетирование, EV = `wr/mid_price - 1 - fee`, `passes(price, volume)`
+- `ev_bot/engine.py` — `EVPaperEngine`: scan + check_resolutions + эскалация. После резолюции → `ev_filter.add_resolved()`
+- `ev_bot/db.py` — `EVStore`: SQLite `data/ev_bot.db`, таблицы `ev_series` + `ev_bets`
+- `ev_bot/report.py` — Rich-таблица EV-анализа по бакетам
+- `ev_bot/config.py` — `EVBotConfig` + `load_ev_config()`, читает `ev_bot/ev_config.yaml`
+- `ev_bot/__main__.py` — CLI: analyze / scan / resolve / run / dashboard
+
+**Переиспользует из `src/`:** `GammaClient`, `ClobClient`, `load_markets()`, `HistoricalMarket`
+
+**EV формула:** `ev = win_rate / mid_price - 1 - taker_fee`
+(win → pnl = 1/price - 1 - fee; loss → pnl = -(1+fee); EV = wr/price - 1 - fee)
+
+**Предупреждение:** EV на малых бакетах (<100 рынков) имеет широкий CI (±10-15%).
+Используй `--min-samples 50+` и оценивай критически.
 
 ---
 
