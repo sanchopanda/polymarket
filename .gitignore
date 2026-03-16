@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+bybit-bot/venv/
+bybit-bot/.venv/
+
+# Environment & secrets
+.env
+.env.*
+
+# Database files
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Backtest cache (большой файл — по умолчанию в git, раскомментировать если не нужен)
+# data/backtest_markets.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/

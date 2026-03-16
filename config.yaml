@@ -1,0 +1,47 @@
+strategy:
+  target_price: 0.50          # Используется если price_min/price_max не заданы
+  price_tolerance: 0.10
+  price_min: 0.35             # Диапазон цен: 0.35–0.50 (мульт. 2.0x–2.86x)
+  price_max: 0.50
+  fee_type: "crypto_fees"     # Только крипто-рынки (Bitcoin/Ethereum Up/Down)
+  min_volume_24h: 1000        # Мин. суточный объём ($)
+  min_liquidity: 1000         # Мин. ликвидность ($)
+  min_days_to_expiry: 0       # Без минимума
+  max_days_to_expiry: 0.083  # ~2 часа до экспирации
+  categories: []              # Пусто = все категории; или ["crypto", "politics"]
+
+martingale:
+  initial_bet_size: 1.0       # Начальная ставка серии (paper trading, $)
+  max_series_depth: 6         # Макс. удвоений
+  max_active_series: 5        # Параллельных серий (paper trading)
+  max_total_budget: 50.0      # Общий бюджет ($)
+
+real_martingale:
+  initial_bet_size: 1.0       # Мин. ставка Polymarket ($1)
+  max_series_depth: 6         # Макс. глубина
+  max_active_series: 4        # Параллельных серий (только 1 может быть depth≥2)
+  max_total_budget: 50.0      # Общий бюджет ($)
+  starting_balance: 61.67     # Начальный баланс (обновлять вручную)
+
+paper_trading:
+  starting_balance: 100.0     # Начальный виртуальный баланс ($)
+  check_liquidity: false      # Проверять orderbook перед ставкой
+  taker_fee: 0.02             # Комиссия Polymarket 2%
+
+api:
+  gamma_base_url: "https://gamma-api.polymarket.com"
+  clob_base_url: "https://clob.polymarket.com"
+  request_delay_ms: 100       # Задержка между запросами
+  page_size: 500              # Рынков за страницу
+
+db:
+  path: "data/bot.db"          # Paper trading база
+  real_path: "data/real.db"    # Real trading база
+
+reports:
+  max_rows: 50                # Макс. строк в таблицах
+
+telegram: {}
+
+wallet:
+  chain_id: 137  # Polygon mainnet
