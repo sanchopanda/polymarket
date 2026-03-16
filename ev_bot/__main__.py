@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
 EV-бот — изолированный paper trading бот с адаптивным EV-фильтром.
-Анализирует закрытые рынки по бакетам (цена × объём), ставит только туда где +EV.
+Анализирует закрытые рынки по ценовым бакетам, ставит только туда где +EV.
 
 Использование:
-  python -m ev-bot analyze                   # EV-анализ кэша
-  python -m ev-bot analyze --min-samples 100 # с большей выборкой
-  python -m ev-bot scan --dry                # кандидаты без сохранения
-  python -m ev-bot scan                      # один скан
-  python -m ev-bot resolve                   # проверить резолюции
-  python -m ev-bot run                       # непрерывный режим
-  python -m ev-bot dashboard                 # статистика
+  python -m ev_bot fetch                     # загрузить данные (T-2ч, весь диапазон цен)
+  python -m ev_bot fetch --limit 20000 --workers 50
+  python -m ev_bot analyze                   # EV-анализ кэша
+  python -m ev_bot analyze --min-samples 100
+  python -m ev_bot scan --dry                # кандидаты без сохранения
+  python -m ev_bot scan                      # один скан
+  python -m ev_bot resolve                   # проверить резолюции
+  python -m ev_bot run                       # непрерывный режим
+  python -m ev_bot dashboard                 # статистика
 """
 from __future__ import annotations
 
@@ -31,6 +33,7 @@ from src.config import load_config
 from ev_bot.config import load_ev_config
 from ev_bot.db import EVStore
 from ev_bot.engine import EVPaperEngine
+from ev_bot.fetcher import fetch_ev_markets
 from ev_bot.filter import EVFilter
 from ev_bot.report import show_ev_analysis
 
@@ -60,8 +63,35 @@ def _load_ev_filter(ev_cfg) -> EVFilter:
         print(f"[EV-Bot] Кэш загружен ({len(markets)} рынков). {ev_filter.summary()}")
     else:
         print(f"[EV-Bot] Кэш не найден: {cache}")
-        print("[EV-Bot] Загрузите данные: python -m src.main fetch --limit 10000")
+        print("[EV-Bot] Загрузите данные: python -m ev_bot fetch --limit 10000")
     return ev_filter
+
+
+def cmd_fetch(args, ev_cfg, main_cfg):
+    """Загрузить закрытые рынки: цена за T-N часов до экспирации, весь диапазон."""
+    from src.backtest.fetcher import save_markets
+
+    gamma = GammaClient(
+        base_url=main_cfg.api.gamma_base_url,
+        page_size=main_cfg.api.page_size,
+        delay_ms=main_cfg.api.request_delay_ms,
+    )
+    clob_base = main_cfg.api.clob_base_url
+
+    markets = fetch_ev_markets(
+        gamma=gamma,
+        clob_base_url=clob_base,
+        hours_before_expiry=args.hours,
+        limit=args.limit,
+        workers=args.workers,
+    )
+
+    if not markets:
+        print("[EV-Fetch] Нет данных.")
+        return
+
+    output = args.output or ev_cfg.ev_filter.cache_path
+    save_markets(markets, output)
 
 
 def cmd_analyze(args, ev_cfg):
@@ -73,7 +103,7 @@ def cmd_analyze(args, ev_cfg):
     cache = ev_cfg.ev_filter.cache_path
     if not Path(cache).exists():
         print(f"Кэш не найден: {cache}")
-        print("Загрузите: python -m src.main fetch --limit 10000")
+        print("Загрузите: python -m ev_bot fetch --limit 10000")
         return
     markets = load_markets(cache)
     ev_filter.load_history(markets)
@@ -186,14 +216,21 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--config", default="ev-bot/ev_config.yaml", help="Путь к ev_config.yaml")
+    parser.add_argument("--config", default="ev_bot/ev_config.yaml", help="Путь к ev_config.yaml")
     parser.add_argument("--main-config", default="config.yaml", help="Путь к основному config.yaml (для API URLs)")
 
     sub = parser.add_subparsers(dest="command", required=True)
 
+    # fetch
+    f = sub.add_parser("fetch", help="Загрузить данные: цена за T-N ч до экспирации, весь диапазон цен")
+    f.add_argument("--limit", type=int, default=10000, help="Кол-во рынков (default: 10000)")
+    f.add_argument("--hours", type=float, default=2.0, help="Часов до экспирации для точки входа (default: 2.0)")
+    f.add_argument("--workers", type=int, default=20, help="Параллельных запросов (default: 20)")
+    f.add_argument("--output", type=str, default=None, help="Файл для сохранения (default: из конфига)")
+
     # analyze
-    a = sub.add_parser("analyze", help="EV-анализ бакетов из кэша исторических рынков")
-    a.add_argument("--min-samples", type=int, default=None, help="Мин. рынков в бакете (override config)")
+    a = sub.add_parser("analyze", help="EV-анализ ценовых бакетов из кэша")
+    a.add_argument("--min-samples", type=int, default=None, help="Мин. записей в бакете (override конфига)")
 
     # scan
     s = sub.add_parser("scan", help="Один скан рынков")
@@ -213,11 +250,11 @@ def main():
     ev_cfg = load_ev_config(args.config)
     main_cfg = load_config(args.main_config)
 
-    # Переопределить min_samples если задан через CLI
     if args.command == "analyze" and args.min_samples is not None:
         ev_cfg.ev_filter.min_samples = args.min_samples
 
     dispatch = {
+        "fetch": lambda: cmd_fetch(args, ev_cfg, main_cfg),
         "analyze": lambda: cmd_analyze(args, ev_cfg),
         "scan": lambda: cmd_scan(args, ev_cfg, main_cfg),
         "resolve": lambda: cmd_resolve(args, ev_cfg, main_cfg),
