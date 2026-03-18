@@ -1,9 +1,10 @@
 """Фетчер для EV-бота.
 
-Отличие от src/backtest/fetcher.py:
-- Берёт цену каждого исхода за N часов до экспирации (реалистичная точка входа)
-- Не фильтрует по ценовому диапазону — полный спектр для EV-анализа
-- Добавляет ОБА исхода бинарного рынка как отдельные записи (удваивает выборку)
+Для каждого бинарного рынка берёт цену каждого исхода в момент T-N часов
+до экспирации (один снимок на исход). Обе стороны = 2 записи на рынок.
+
+Это избегает survivorship bias: мы не идём по траектории цены,
+а делаем снимок в конкретный момент времени до исхода.
 """
 from __future__ import annotations
 
@@ -17,64 +18,22 @@ from src.api.gamma import GammaClient, Market
 from src.backtest.fetcher import HistoricalMarket
 
 
-def _fetch_price_at_time(
-    base_url: str,
-    token_id: str,
-    target_ts: float,
-) -> Optional[float]:
-    """Возвращает цену токена в момент ближайший к target_ts (unix timestamp).
-
-    Если история пустая или разрыв > 6 часов — возвращает None.
-    """
-    with httpx.Client(timeout=15.0) as http:
-        try:
-            resp = http.get(
-                f"{base_url}/prices-history",
-                params={"market": token_id, "interval": "max", "fidelity": 10},
-            )
-            resp.raise_for_status()
-            history = resp.json().get("history", [])
-        except Exception:
-            return None
-
-    if not history:
-        return None
-
-    best_price: Optional[float] = None
-    best_diff = float("inf")
-
-    for point in history:
-        try:
-            t = float(point["t"])
-            p = float(point["p"])
-        except (KeyError, ValueError, TypeError):
-            continue
-        diff = abs(t - target_ts)
-        if diff < best_diff:
-            best_diff = diff
-            best_price = p
-
-    # Если ближайшая точка дальше 6 часов — данных нет
-    if best_diff > 6 * 3600:
-        return None
-
-    return best_price
-
-
-def _fetch_both_outcomes(
+def _fetch_entry_at_time(
     base_url: str,
     market: Market,
-    hours_before_expiry: float,
+    hours_before: float,
 ) -> Optional[list[tuple[int, float]]]:
-    """Для рынка возвращает список (outcome_idx, entry_price) для обоих исходов.
+    """Берёт цену каждого исхода в момент T-hours_before до экспирации.
 
-    Берёт цену за hours_before_expiry часов до end_date.
-    Возвращает None если не удалось получить цены.
+    Возвращает список (outcome_idx, price) или None если нет данных.
+    Исключает цены ближе 0.05 к границам (0 или 1) — рынок уже "решён".
     """
     if not market.end_date:
         return None
 
-    target_ts = market.end_date.timestamp() - hours_before_expiry * 3600
+    # Целевой Unix timestamp
+    target_ts = (market.end_date - timedelta(hours=hours_before)).timestamp()
+
     results = []
 
     with httpx.Client(timeout=15.0) as http:
@@ -94,22 +53,28 @@ def _fetch_both_outcomes(
             if not history:
                 continue
 
-            best_price: Optional[float] = None
-            best_diff = float("inf")
+            # Ищем точку ближайшую к target_ts
+            best_point = None
+            best_dist = float("inf")
             for point in history:
                 try:
                     t = float(point["t"])
                     p = float(point["p"])
                 except (KeyError, ValueError, TypeError):
                     continue
-                diff = abs(t - target_ts)
-                if diff < best_diff:
-                    best_diff = diff
-                    best_price = p
+                dist = abs(t - target_ts)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_point = p
 
-            # Ближайшая точка не дальше 6 часов
-            if best_price is not None and best_diff <= 6 * 3600:
-                results.append((i, best_price))
+            if best_point is None:
+                continue
+
+            # Исключаем уже решённые цены
+            if not (0.05 <= best_point <= 0.95):
+                continue
+
+            results.append((i, best_point))
 
     return results if results else None
 
@@ -117,7 +82,7 @@ def _fetch_both_outcomes(
 def fetch_ev_markets(
     gamma: GammaClient,
     clob_base_url: str,
-    hours_before_expiry: float = 2.0,
+    hours_before: float = 2.0,
     limit: int = 10000,
     min_volume: float = 0.0,
     workers: int = 20,
@@ -125,17 +90,17 @@ def fetch_ev_markets(
 ) -> List[HistoricalMarket]:
     """Загружает закрытые рынки для EV-анализа.
 
-    Для каждого бинарного рынка берёт цену ОБОИХ исходов за hours_before_expiry
-    до экспирации. Оба исхода добавляются как отдельные записи — это удваивает
-    выборку и даёт полный ценовой диапазон 0.05–0.95.
+    Для каждого бинарного рынка берёт цену каждого исхода в момент
+    T-hours_before до экспирации. Обе стороны бинарного рынка попадают
+    в датасет как независимые записи.
 
-    closed_after_days — брать только рынки закрытые за последние N дней.
-    CLOB-история хранится ограниченное время, поэтому старые рынки бесполезны.
+    closed_after_days — брать только рынки закрытые за последние N дней
+    (CLOB-история хранится ограниченное время).
     """
     closed_after = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=closed_after_days)
     print(
         f"[EV-Fetcher] Загружаем закрытые рынки "
-        f"(лимит {limit}, T-{hours_before_expiry}ч до экспирации, "
+        f"(лимит {limit}, снимок за T-{hours_before:.1f}ч до экспирации, "
         f"закрытые после {closed_after.strftime('%Y-%m-%d')})..."
     )
     raw_markets = gamma.fetch_closed_markets(
@@ -146,7 +111,7 @@ def fetch_ev_markets(
     )
     print(f"[EV-Fetcher] Получено {len(raw_markets)} рынков с API.")
 
-    # Оставляем только бинарные с чётким результатом
+    # Только бинарные с чётким результатом
     candidates: list[Market] = []
     winner_map: dict[str, int] = {}
 
@@ -172,7 +137,7 @@ def fetch_ev_markets(
     futures: dict = {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for m in candidates:
-            f = pool.submit(_fetch_both_outcomes, clob_base_url, m, hours_before_expiry)
+            f = pool.submit(_fetch_entry_at_time, clob_base_url, m, hours_before)
             futures[f] = m
 
         done = 0
@@ -182,16 +147,13 @@ def fetch_ev_markets(
                 print(f"  {done}/{len(candidates)} обработано...")
 
             m = futures[future]
-            outcomes_data = future.result()
-            if not outcomes_data:
+            samples = future.result()
+            if not samples:
                 skipped += 1
                 continue
 
             winner_idx = winner_map[m.id]
-            for idx, entry_price in outcomes_data:
-                # Игнорируем цены на границах (уже почти решено)
-                if entry_price < 0.02 or entry_price > 0.98:
-                    continue
+            for idx, entry_price in samples:
                 result.append(HistoricalMarket(
                     market_id=m.id,
                     question=m.question,
@@ -205,10 +167,10 @@ def fetch_ev_markets(
                     end_date=m.end_date,
                 ))
 
-    hit_rate = len(candidates) - skipped
+    hit = len(candidates) - skipped
     print(
         f"[EV-Fetcher] Готово: {len(result)} записей из {len(candidates)} рынков. "
-        f"С историей: {hit_rate} ({hit_rate*100//max(len(candidates),1)}%). "
+        f"С историей: {hit} ({hit * 100 // max(len(candidates), 1)}%). "
         f"Без истории: {skipped}."
     )
     return result

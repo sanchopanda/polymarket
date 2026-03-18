@@ -41,13 +41,17 @@ def _parse_json_field(raw) -> list:
 def _parse_end_date(raw: Optional[str]) -> Optional[datetime]:
     if not raw:
         return None
+    # Нормализуем: "+00" -> "+00:00", "Z" -> "+00:00"
+    s = raw.replace("Z", "+00:00")
+    if s.endswith("+00"):
+        s = s + ":00"
     for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%S"):
         try:
             return datetime.strptime(raw, fmt)
         except ValueError:
             continue
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00")).replace(tzinfo=None)
+        return datetime.fromisoformat(s).replace(tzinfo=None)
     except ValueError:
         return None
 
@@ -102,22 +106,30 @@ class GammaClient:
         min_liquidity: float | None = None,
         fee_type: str | None = None,
         closed_after: datetime | None = None,
+        end_date_max: datetime | None = None,
+        ascending: bool = False,
+        order_by: str = "endDate",
     ) -> List[Market]:
         """Загружает закрытые рынки постранично.
 
         limit — максимальное количество рынков после парсинга (не сырых страниц).
         min_volume / min_liquidity — серверная фильтрация через Gamma API.
-        closed_after — брать только рынки закрытые после этой даты.
+        closed_after — клиентская фильтрация: остановка когда closedTime < этой даты
+                       (API игнорирует endDate_min, поэтому фильтруем сами).
+        end_date_max — клиентская фильтрация по макс. end_date.
+        ascending — сортировка asc/desc.
+        order_by — поле сортировки (endDate, closedTime, volume24hr и т.д.).
         """
         markets: List[Market] = []
         offset = 0
+        stop = False
 
-        while len(markets) < limit:
+        while len(markets) < limit and not stop:
             params: dict = {
                 "closed": "true",
                 "resolved": "true",
-                "order": "endDate",
-                "ascending": "false",
+                "order": order_by,
+                "ascending": "true" if ascending else "false",
                 "limit": self.page_size,
                 "offset": offset,
             }
@@ -127,8 +139,6 @@ class GammaClient:
                 params["liquidityNum_min"] = min_liquidity
             if fee_type is not None:
                 params["feeType"] = fee_type
-            if closed_after is not None:
-                params["endDate_min"] = closed_after.strftime("%Y-%m-%dT%H:%M:%SZ")
 
             try:
                 resp = self._http.get(f"{self.base_url}/markets", params=params)
@@ -142,8 +152,18 @@ class GammaClient:
                 break
 
             for raw in batch:
+                # Ранняя остановка по closedTime (desc): если вышли за период — стоп
+                if closed_after is not None and not ascending:
+                    closed_time = _parse_end_date(raw.get("closedTime"))
+                    if closed_time is not None and closed_time < closed_after:
+                        stop = True
+                        break
+
                 m = self._parse_market(raw)
                 if m:
+                    # Клиентская фильтрация по end_date_max
+                    if end_date_max is not None and m.end_date and m.end_date > end_date_max:
+                        continue
                     markets.append(m)
                     if len(markets) >= limit:
                         break
@@ -152,6 +172,9 @@ class GammaClient:
                 break
 
             offset += self.page_size
+            last_ct = _parse_end_date(batch[-1].get("closedTime")) if batch else None
+            last_ct_str = last_ct.strftime("%Y-%m-%d %H:%M") if last_ct else "?"
+            print(f"  [Gamma] {len(markets)} рынков | offset={offset} | последний: {last_ct_str}")
             time.sleep(self.delay_s)
 
         return markets

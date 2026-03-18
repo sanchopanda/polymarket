@@ -68,7 +68,7 @@ def _load_ev_filter(ev_cfg) -> EVFilter:
 
 
 def cmd_fetch(args, ev_cfg, main_cfg):
-    """Загрузить закрытые рынки: цена за T-N часов до экспирации, весь диапазон."""
+    """Загрузить закрытые рынки: снимок цены каждого исхода за T-N часов до экспирации."""
     from src.backtest.fetcher import save_markets
 
     gamma = GammaClient(
@@ -81,7 +81,7 @@ def cmd_fetch(args, ev_cfg, main_cfg):
     markets = fetch_ev_markets(
         gamma=gamma,
         clob_base_url=clob_base,
-        hours_before_expiry=args.hours,
+        hours_before=args.hours,
         limit=args.limit,
         workers=args.workers,
         closed_after_days=args.days,
@@ -223,9 +223,9 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     # fetch
-    f = sub.add_parser("fetch", help="Загрузить данные: цена за T-N ч до экспирации, весь диапазон цен")
+    f = sub.add_parser("fetch", help="Загрузить данные: снимок цены за T-N ч до экспирации")
     f.add_argument("--limit", type=int, default=10000, help="Кол-во рынков (default: 10000)")
-    f.add_argument("--hours", type=float, default=2.0, help="Часов до экспирации для точки входа (default: 2.0)")
+    f.add_argument("--hours", type=float, default=2.0, help="Часов до экспирации для снимка цены (default: 2.0)")
     f.add_argument("--days", type=float, default=30.0, help="Брать рынки закрытые за последние N дней (default: 30)")
     f.add_argument("--workers", type=int, default=20, help="Параллельных запросов (default: 20)")
     f.add_argument("--output", type=str, default=None, help="Файл для сохранения (default: из конфига)")
