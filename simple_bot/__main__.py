@@ -21,8 +21,10 @@ import time
 from datetime import datetime, timezone
 
 import yaml
+from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+load_dotenv()
 
 from simple_bot.db import BotDB
 from simple_bot.engine import SimpleBotEngine
