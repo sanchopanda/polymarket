@@ -24,8 +24,9 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 
-# Backtest cache (большой файл — по умолчанию в git, раскомментировать если не нужен)
-# data/backtest_markets.json
+# Backtest cache
+data/markets_*.json
+data/backtest_markets.json
 
 # IDE
 .idea/
