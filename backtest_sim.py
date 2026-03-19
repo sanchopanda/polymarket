@@ -276,20 +276,22 @@ def fetch_opportunities_cached(
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     cutoff = now - timedelta(days=days)
     filtered = []
+    skipped_period = 0
     for m in markets:
         if not m.get("end_date"):
             continue
         try:
-            end_date = datetime.fromisoformat(m["end_date"])
+            end_date = datetime.fromisoformat(m["end_date"]).replace(tzinfo=None)
         except (ValueError, TypeError):
             continue
         if end_date < cutoff or end_date > now:
+            skipped_period += 1
             continue
         if min_volume > 0 and m.get("volume_num", 0) < min_volume:
             continue
         filtered.append(m)
 
-    print(f"После фильтрации (период {days:.0f}д, volume≥{min_volume}): {len(filtered)} рынков")
+    print(f"После фильтрации (период {days:.0f}д, volume≥{min_volume}): {len(filtered)} рынков (пропущено по дате: {skipped_period})")
     print(f"Сканирование истории цен (офлайн)...\n")
 
     all_events: list[OpportunityEvent] = []
@@ -305,6 +307,7 @@ def fetch_opportunities_cached(
 def simulate(
     events: list[OpportunityEvent],
     starting_balance: float = 100.0,
+    bet_size: float = 1.0,
 ) -> None:
     """Хронологическая симуляция портфеля."""
 
@@ -364,9 +367,6 @@ def simulate(
 
         day_key = datetime.fromtimestamp(ev.timestamp, tz=timezone.utc).strftime('%Y-%m-%d')
         daily_available[day_key] += 1
-
-        # Размер ставки — фиксированный $1
-        bet_size = 1.0
 
         # Проверяем баланс
         if free_balance < bet_size:
@@ -504,6 +504,7 @@ def main():
     parser.add_argument("--max-price", type=float, default=0.01, help="Макс. цена исхода")
     parser.add_argument("--min-volume", type=float, default=0, help="Мин. объём рынка")
     parser.add_argument("--deposit", type=float, default=100.0, help="Начальный депозит ($)")
+    parser.add_argument("--bet", type=float, default=1.0, help="Размер ставки ($)")
     parser.add_argument("--max-expiry", type=float, default=0, help="Макс. дней до экспирации (0=без ограничения)")
     parser.add_argument("--min-expiry", type=float, default=0, help="Мин. дней до экспирации")
     parser.add_argument("--workers", type=int, default=20, help="Потоков (только для онлайн)")
@@ -520,7 +521,7 @@ def main():
 
     source = f"кеш: {args.data}" if args.data else "API (онлайн)"
     print(f"=== Симуляция портфеля ===")
-    print(f"Депозит: ${args.deposit:.0f} | Цена: {args.min_price}–{args.max_price} | Период: {args.days:.0f} дней{expiry_label}")
+    print(f"Депозит: ${args.deposit:.0f} | Ставка: ${args.bet:.2f} | Цена: {args.min_price}–{args.max_price} | Период: {args.days:.0f} дней{expiry_label}")
     print(f"Источник: {source}\n")
 
     if args.data:
@@ -549,7 +550,7 @@ def main():
         print("\n❌ Не найдено возможностей для ставок.")
         return
 
-    simulate(events, starting_balance=args.deposit)
+    simulate(events, starting_balance=args.deposit, bet_size=args.bet)
 
 
 if __name__ == "__main__":

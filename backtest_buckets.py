@@ -176,7 +176,7 @@ def _load_cached_markets(data_path: str, days: float, min_volume: float) -> list
         if not m.get("end_date"):
             continue
         try:
-            end_date = datetime.fromisoformat(m["end_date"])
+            end_date = datetime.fromisoformat(m["end_date"]).replace(tzinfo=None)
         except (ValueError, TypeError):
             continue
         if end_date < cutoff:

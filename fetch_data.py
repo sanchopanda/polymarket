@@ -29,22 +29,21 @@ GAMMA_URL = "https://gamma-api.polymarket.com"
 CLOB_URL = "https://clob.polymarket.com"
 
 
-def _fetch_market_history(clob_base: str, market: Market) -> dict[str, list]:
+def _fetch_market_history(http: httpx.Client, clob_base: str, market: Market) -> dict[str, list]:
     """Загружает историю цен для всех исходов рынка."""
     history = {}
-    with httpx.Client(timeout=15.0) as http:
-        for token_id in market.clob_token_ids:
-            if not token_id:
-                continue
-            try:
-                resp = http.get(
-                    f"{clob_base}/prices-history",
-                    params={"market": token_id, "interval": "max", "fidelity": 10},
-                )
-                resp.raise_for_status()
-                history[token_id] = resp.json().get("history", [])
-            except Exception:
-                history[token_id] = []
+    for token_id in market.clob_token_ids:
+        if not token_id:
+            continue
+        try:
+            resp = http.get(
+                f"{clob_base}/prices-history",
+                params={"market": token_id, "interval": "max", "fidelity": 100},
+            )
+            resp.raise_for_status()
+            history[token_id] = resp.json().get("history", [])
+        except Exception:
+            history[token_id] = []
     return history
 
 
@@ -52,7 +51,7 @@ def main():
     parser = argparse.ArgumentParser(description="Загрузка рынков для офлайн-бэктестов")
     parser.add_argument("--days", type=float, default=180, help="Период (дней назад)")
     parser.add_argument("--min-volume", type=float, default=0, help="Мин. объём рынка")
-    parser.add_argument("--workers", type=int, default=20, help="Потоков для загрузки")
+    parser.add_argument("--workers", type=int, default=50, help="Потоков для загрузки")
     parser.add_argument("--output", type=str, default="", help="Путь для сохранения")
     args = parser.parse_args()
 
@@ -108,42 +107,51 @@ def main():
     processed = 0
     errors = 0
 
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {}
-        for m in candidates:
-            f = pool.submit(_fetch_market_history, CLOB_URL, m)
-            futures[f] = m
+    # Разбиваем кандидатов на чанки по воркерам, каждый воркер переиспользует соединение
+    import threading
+    results_lock = threading.Lock()
 
-        for future in as_completed(futures):
-            processed += 1
-            if processed % 200 == 0:
-                elapsed_h = time.time() - t_history
-                rate = processed / elapsed_h if elapsed_h > 0 else 0
-                remaining = (len(candidates) - processed) / rate if rate > 0 else 0
-                print(f"  {processed}/{len(candidates)} ({processed*100//len(candidates)}%) | "
-                      f"{rate:.0f} рынков/с | осталось ~{remaining:.0f}с")
+    def _worker(chunk: list[Market]):
+        nonlocal processed, errors
+        with httpx.Client(timeout=15.0) as http:
+            for m in chunk:
+                try:
+                    history = _fetch_market_history(http, CLOB_URL, m)
+                except Exception:
+                    history = {}
+                    with results_lock:
+                        errors += 1
 
-            m = futures[future]
-            try:
-                history = future.result()
-            except Exception:
-                errors += 1
-                history = {}
+                entry = {
+                    "id": m.id,
+                    "question": m.question,
+                    "outcomes": m.outcomes,
+                    "outcome_prices": m.outcome_prices,
+                    "clob_token_ids": m.clob_token_ids,
+                    "volume_num": m.volume_num,
+                    "liquidity_num": m.liquidity_num,
+                    "end_date": m.end_date.isoformat() if m.end_date else None,
+                    "category": m.category,
+                    "fee_type": m.fee_type,
+                    "winner_idx": winner_map[m.id],
+                    "history": history,
+                }
+                with results_lock:
+                    results.append(entry)
+                    processed += 1
+                    if processed % 200 == 0:
+                        elapsed_h = time.time() - t_history
+                        rate = processed / elapsed_h if elapsed_h > 0 else 0
+                        remaining = (len(candidates) - processed) / rate if rate > 0 else 0
+                        print(f"  {processed}/{len(candidates)} ({processed*100//len(candidates)}%) | "
+                              f"{rate:.0f} рынков/с | осталось ~{remaining:.0f}с")
 
-            results.append({
-                "id": m.id,
-                "question": m.question,
-                "outcomes": m.outcomes,
-                "outcome_prices": m.outcome_prices,
-                "clob_token_ids": m.clob_token_ids,
-                "volume_num": m.volume_num,
-                "liquidity_num": m.liquidity_num,
-                "end_date": m.end_date.isoformat() if m.end_date else None,
-                "category": m.category,
-                "fee_type": m.fee_type,
-                "winner_idx": winner_map[m.id],
-                "history": history,
-            })
+    # Распределяем рынки по воркерам
+    n_workers = args.workers
+    chunks = [candidates[i::n_workers] for i in range(n_workers)]
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        list(pool.map(lambda c: _worker(c), chunks))
 
     elapsed_h = time.time() - t_history
     print(f"  Загрузка историй завершена за {elapsed_h:.0f}с")
