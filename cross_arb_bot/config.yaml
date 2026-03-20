@@ -1,0 +1,43 @@
+trading:
+  starting_balance_polymarket: 250.0
+  starting_balance_kalshi: 250.0
+  stake_per_pair_usd: 100.0
+  min_lock_edge: 0.04
+  max_lock_edge: 0.12
+  max_open_pairs: 5
+  max_entries_per_pair: 3
+  rebalance_threshold_usd: 100.0
+
+market_filter:
+  symbol: ""
+  fee_type: "crypto_fees"
+  min_days_to_expiry: 0
+  max_days_to_expiry: 0.083
+  min_volume: 1000
+  min_liquidity: 1000
+  expiry_tolerance_seconds: 120
+
+runtime:
+  poll_interval_seconds: 20
+  recheck_delay_seconds: 1.0
+
+db:
+  path: "data/cross_arb_bot.db"
+
+polymarket:
+  gamma_base_url: "https://gamma-api.polymarket.com"
+  page_size: 500
+  request_delay_ms: 100
+
+kalshi:
+  base_url: "https://api.elections.kalshi.com/trade-api/v2"
+  page_size: 200
+  max_pages: 10
+  request_timeout_seconds: 20
+  series_tickers:
+    - "KXBTC15M"
+    - "KXETH15M"
+    - "KXSOL15M"
+    - "KXXRP15M"
+    - "KXDOGE15M"
+    - "KXBNB15M"

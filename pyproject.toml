@@ -12,6 +12,7 @@ dependencies = [
     "rich>=13.0",
     "py-clob-client>=0.15",
     "python-dotenv>=1.0",
+    "websockets>=12.0",
 ]
 
 [project.optional-dependencies]

@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+import re
+from datetime import datetime, timedelta, timezone
+
+from src.api.gamma import GammaClient, Market
+
+from cross_arb_bot.models import NormalizedMarket
+
+
+UPDOWN_RE = re.compile(r"^(?P<symbol>[A-Za-z]+)\s+Up or Down\s+-", re.IGNORECASE)
+
+SYMBOL_MAP = {
+    "BITCOIN": "BTC",
+    "ETHEREUM": "ETH",
+    "SOLANA": "SOL",
+    "DOGECOIN": "DOGE",
+    "HYPERLIQUID": "HYPE",
+}
+
+PRICE_TO_BEAT_RE = re.compile(r"Price to beat\s*\$([0-9,]+(?:\.[0-9]+)?)", re.IGNORECASE)
+
+
+class PolymarketFeed:
+    def __init__(
+        self,
+        base_url: str,
+        page_size: int,
+        request_delay_ms: int,
+        market_filter: dict,
+    ) -> None:
+        self.client = GammaClient(base_url=base_url, page_size=page_size, delay_ms=request_delay_ms)
+        self.market_filter = market_filter
+
+    def fetch_markets(self) -> list[NormalizedMarket]:
+        raw = self.client.fetch_all_active_markets()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        min_expiry = now + timedelta(days=self.market_filter["min_days_to_expiry"])
+        max_expiry = now + timedelta(days=self.market_filter["max_days_to_expiry"])
+        symbol_filter = (self.market_filter.get("symbol") or "").strip().lower()
+
+        result: list[NormalizedMarket] = []
+        for market in raw:
+            normalized = self._normalize_market(market)
+            if normalized is None:
+                continue
+            if normalized.expiry < min_expiry or normalized.expiry > max_expiry:
+                continue
+            if market.volume_num < self.market_filter["min_volume"]:
+                continue
+            if market.liquidity_num < self.market_filter["min_liquidity"]:
+                continue
+            fee_type = self.market_filter.get("fee_type") or ""
+            if fee_type and market.fee_type != fee_type:
+                continue
+            if symbol_filter and normalized.symbol.lower() != symbol_filter:
+                continue
+            result.append(normalized)
+        return result
+
+    def _normalize_market(self, market: Market) -> NormalizedMarket | None:
+        if len(market.outcomes) != 2 or len(market.outcome_prices) != 2:
+            return None
+        if not market.end_date:
+            return None
+
+        match = UPDOWN_RE.match(market.question)
+        if not match:
+            return None
+
+        symbol = SYMBOL_MAP.get(match.group("symbol").upper(), match.group("symbol").upper())
+        outcomes = {name.lower(): float(price) for name, price in zip(market.outcomes, market.outcome_prices)}
+        up_price = outcomes.get("up")
+        down_price = outcomes.get("down")
+        if up_price is None or down_price is None:
+            return None
+
+        return NormalizedMarket(
+            venue="polymarket",
+            market_id=market.id,
+            title=market.question,
+            symbol=symbol,
+            market_kind="updown",
+            expiry=market.end_date,
+            yes_label="Up",
+            no_label="Down",
+            yes_ask=up_price,
+            no_ask=down_price,
+            yes_bid=max(0.0, 1.0 - down_price),
+            no_bid=max(0.0, 1.0 - up_price),
+            yes_depth=market.liquidity_num,
+            no_depth=market.liquidity_num,
+            volume=market.volume_num,
+            liquidity=market.liquidity_num,
+            yes_token_id=market.clob_token_ids[0],
+            no_token_id=market.clob_token_ids[1],
+            reference_price=self._extract_reference_price(market.question),
+        )
+
+    def _extract_reference_price(self, question: str) -> float | None:
+        match = PRICE_TO_BEAT_RE.search(question)
+        if not match:
+            return None
+        try:
+            return float(match.group(1).replace(",", ""))
+        except ValueError:
+            return None

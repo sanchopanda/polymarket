@@ -20,12 +20,19 @@
 ## Установка
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+python3.10 -m venv venv
+source venv/bin/activate
+python -m pip install --upgrade pip setuptools wheel
 pip install -e ".[dev]"
 ```
 
 В текущем `pyproject.toml` описаны только зависимости основного Polymarket-бота. Для real trading и части диагностических скриптов дополнительно понадобятся пакеты вроде `web3`, `eth-account` и `py-clob-client`.
+
+Важно:
+
+- используй Python `>= 3.9.10`, иначе `py-clob-client` не установится
+- после активации `venv` запускай ботов через `python -m ...`
+- если `python3.10` у тебя не установлен, сначала проверь доступные версии: `python3.10 --version`, `python3.11 --version`
 
 ## Основной бот: `python -m src.main`
 
@@ -76,11 +83,11 @@ pip install -e ".[dev]"
 Примеры:
 
 ```bash
-python3 -m src.main scan --dry
-python3 -m src.main run --interval 0.05
-python3 -m src.main fetch --limit 5000 --workers 30
-python3 -m src.main backtest --cache data/backtest_markets.json --balance 200 --depth 6
-python3 -m src.main real scan --dry
+python -m src.main scan --dry
+python -m src.main run --interval 0.05
+python -m src.main fetch --limit 5000 --workers 30
+python -m src.main backtest --cache data/backtest_markets.json --balance 200 --depth 6
+python -m src.main real scan --dry
 ```
 
 ## Конфиг `config.yaml`
@@ -140,7 +147,7 @@ python3 -m src.main real scan --dry
 Запуск:
 
 ```bash
-python3 -m simple_bot <command>
+python -m simple_bot <command>
 ```
 
 Команды:
@@ -174,12 +181,78 @@ python3 -m simple_bot <command>
 
 - `SIMPLE_BOT_TOKEN` — переопределяет `telegram.token`.
 
+## `arb_bot`
+
+Изолированный paper-trading бот под парный арбитраж комплементарных исходов одного рынка.
+Он ищет активные short-term crypto markets, считает покупку одинакового числа акций по обеим ногам
+через CLOB ask-стакан и открывает виртуальную позицию, только если:
+
+- `gross_cost + fees < settlement payout`
+- хватает ликвидности по обеим ногам
+- хватает свободного paper-баланса
+
+Запуск:
+
+```bash
+python -m arb_bot scan --dry
+python -m arb_bot scan
+python -m arb_bot resolve
+python -m arb_bot status
+python -m arb_bot run --interval 1
+python -m arb_bot ws
+```
+
+Конфиг: `arb_bot/config.yaml`.
+
+Ключевые параметры:
+
+- `strategy.market_query` — подстрока в вопросе рынка; пусто = брать все подходящие рынки
+- `strategy.category` — категория рынка; пусто = без фильтра
+- `strategy.fee_type` — тип fee, по умолчанию `crypto_fees`
+- `strategy.min_edge` — минимальный ожидаемый профит на одну pair-position
+- `strategy.max_payout_per_trade` — максимальное число парных акций на сделку
+- `strategy.max_open_positions` — лимит одновременно открытых pair-position
+- `trading.starting_balance` — виртуальный депозит, по умолчанию `$200`
+- `trading.taker_fee` — fee-модель для paper расчёта
+- `db.path` — отдельная SQLite БД, по умолчанию `data/arb_bot.db`
+
+Режимы работы:
+
+- `scan` — одноразовый HTTP-скан через Gamma + CLOB REST
+- `run` — polling-цикл `resolve + scan`
+- `ws` — live paper-simulation: bootstrap universe через Gamma, подписка на Polymarket Market WebSocket, поиск арбитражных окон по live ask, виртуальные входы, периодический статус и отслеживание виртуального баланса
+
+## `cross_arb_bot`
+
+Изолированный live scanner для межплатформенного paper arbitrage между `Polymarket` и `Kalshi`.
+Первая фаза не ставит реальные ордера: бот нормализует short-term crypto markets, матчает эквивалентные рынки,
+ищет lock-арбитраж вида `YES на одной площадке + NO на другой < $1`, открывает виртуальные pair-позиции
+и ведёт отдельный paper-учёт по двум площадкам.
+
+Запуск:
+
+```bash
+python -m cross_arb_bot scan --dry
+python -m cross_arb_bot scan
+python -m cross_arb_bot status
+python -m cross_arb_bot resolve
+python -m cross_arb_bot run --interval 20
+```
+
+Конфиг: `cross_arb_bot/config.yaml`.
+
+Важно:
+
+- `Kalshi` API может быть геоблокирован в зависимости от страны; в этом случае бот продолжит работать, но будет писать ошибку `kalshi fetch failed`
+- в первой фазе matcher сфокусирован на short-term crypto `Up or Down` рынках
+- резолюция в paper-режиме сейчас моделируется как lock-позиция с выплатой `$1` на акцию после экспирации
+
 ## `ev_bot`
 
 Запуск:
 
 ```bash
-python3 -m ev_bot [--config ev_bot/ev_config.yaml] [--main-config config.yaml] <command>
+python -m ev_bot [--config ev_bot/ev_config.yaml] [--main-config config.yaml] <command>
 ```
 
 Глобальные параметры:

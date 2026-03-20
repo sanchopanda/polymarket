@@ -1,0 +1,26 @@
+strategy:
+  market_query: ""
+  category: ""
+  fee_type: "crypto_fees"
+  min_days_to_expiry: 0
+  max_days_to_expiry: 0.083
+  min_volume: 1000
+  min_liquidity: 1000
+  max_open_positions: 5
+  min_edge: 0.01
+  max_payout_per_trade: 15.0
+  min_top_book_shares: 5.0
+
+trading:
+  starting_balance: 200.0
+  taker_fee: 0.0
+
+db:
+  path: "data/arb_bot.db"
+
+api:
+  gamma_base_url: "https://gamma-api.polymarket.com"
+  clob_base_url: "https://clob.polymarket.com"
+  market_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+  page_size: 500
+  request_delay_ms: 100
