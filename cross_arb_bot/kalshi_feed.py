@@ -10,6 +10,7 @@ from src.api.clob import OrderBook, OrderLevel
 
 
 KALSHI_UPDOWN_RE = re.compile(r"^(?P<symbol>[A-Za-z]+)\s+price\s+up\s+in\s+next\s+(?P<minutes>\d+)\s+mins\?$", re.IGNORECASE)
+KALSHI_HOUR_RE = re.compile(r"^(?P<symbol>[A-Za-z]+)\s+price\s+up\s+this\s+hour\?$", re.IGNORECASE)
 
 
 def _parse_dt(raw: str | None) -> datetime | None:
@@ -158,10 +159,19 @@ class KalshiFeed:
             return None
 
         match = KALSHI_UPDOWN_RE.match(title)
-        if not match:
-            return None
+        interval_minutes: int | None = None
+        if match:
+            symbol = match.group("symbol").upper()
+            interval_minutes = int(match.group("minutes"))
+        else:
+            hour_match = KALSHI_HOUR_RE.match(title)
+            if not hour_match:
+                return None
+            symbol = hour_match.group("symbol").upper()
+            interval_minutes = 60
 
-        symbol = match.group("symbol").upper()
+        if interval_minutes is None:
+            return None
         yes_ask = _to_float(row.get("yes_ask_dollars"))
         no_ask = _to_float(row.get("no_ask_dollars"))
         if yes_ask <= 0 or no_ask <= 0:
@@ -184,6 +194,8 @@ class KalshiFeed:
             no_depth=_to_float(row.get("no_ask_size_fp")),
             volume=_to_float(row.get("volume")),
             liquidity=max(_to_float(row.get("yes_ask_size_fp")), _to_float(row.get("no_ask_size_fp"))),
+            interval_minutes=interval_minutes,
+            rule_family="price_direction",
             reference_price=_to_float(row.get("floor_strike"), default=None),
             rules_text=str(row.get("rules_primary") or ""),
         )

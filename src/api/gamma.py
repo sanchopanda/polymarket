@@ -13,6 +13,8 @@ import httpx
 class Market:
     id: str
     question: str
+    description: str
+    resolution_source: str
     outcomes: List[str]
     outcome_prices: List[float]   # [0.03, 0.97] — цены исходов
     clob_token_ids: List[str]     # token_id для каждого исхода
@@ -213,6 +215,8 @@ class GammaClient:
             return Market(
                 id=str(raw.get("id", "")),
                 question=raw.get("question", ""),
+                description=str(raw.get("description", "") or ""),
+                resolution_source=str(raw.get("resolutionSource", "") or ""),
                 outcomes=outcomes[:min_len],
                 outcome_prices=outcome_prices[:min_len],
                 clob_token_ids=clob_token_ids[:min_len],

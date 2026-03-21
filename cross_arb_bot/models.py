@@ -23,6 +23,8 @@ class NormalizedMarket:
     no_depth: float
     volume: float
     liquidity: float
+    interval_minutes: Optional[int] = None
+    rule_family: str = ""
     yes_token_id: Optional[str] = None
     no_token_id: Optional[str] = None
     reference_price: Optional[float] = None
@@ -69,6 +71,20 @@ class CrossVenueOpportunity:
 
 
 @dataclass
+class ExecutionLegInfo:
+    venue: str
+    market_id: str
+    side: str
+    requested_shares: float
+    filled_shares: float
+    available_shares: float
+    avg_price: float
+    total_cost: float
+    best_ask: float
+    remaining_shares_after_fill: float
+
+
+@dataclass
 class CrossPosition:
     id: str
     pair_key: str
@@ -86,6 +102,18 @@ class CrossPosition:
     total_cost: float
     expected_profit: float
     opened_at: datetime
+    yes_requested_shares: Optional[float] = None
+    yes_filled_shares: Optional[float] = None
+    yes_available_shares: Optional[float] = None
+    yes_avg_price: Optional[float] = None
+    yes_best_ask: Optional[float] = None
+    yes_remaining_shares_after_fill: Optional[float] = None
+    no_requested_shares: Optional[float] = None
+    no_filled_shares: Optional[float] = None
+    no_available_shares: Optional[float] = None
+    no_avg_price: Optional[float] = None
+    no_best_ask: Optional[float] = None
+    no_remaining_shares_after_fill: Optional[float] = None
     polymarket_title: Optional[str] = None
     kalshi_title: Optional[str] = None
     match_score: Optional[float] = None
@@ -94,6 +122,10 @@ class CrossPosition:
     kalshi_reference_price: Optional[float] = None
     polymarket_rules: Optional[str] = None
     kalshi_rules: Optional[str] = None
+    polymarket_snapshot_open: Optional[str] = None
+    kalshi_snapshot_open: Optional[str] = None
+    polymarket_snapshot_resolved: Optional[str] = None
+    kalshi_snapshot_resolved: Optional[str] = None
     status: str = "open"
     resolved_at: Optional[datetime] = None
     winning_side: Optional[str] = None
@@ -120,4 +152,6 @@ class OpportunityDecision:
     shares: float
     decision: str
     expected_profit: float
+    yes_leg_summary: str = ""
+    no_leg_summary: str = ""
     was_raw_opportunity: bool = True

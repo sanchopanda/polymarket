@@ -234,18 +234,96 @@ python -m arb_bot ws
 ```bash
 python -m cross_arb_bot scan --dry
 python -m cross_arb_bot scan
+python -m cross_arb_bot sim
+python -m cross_arb_bot watch
 python -m cross_arb_bot status
 python -m cross_arb_bot resolve
+python -m cross_arb_bot liquidity-report
+python -m cross_arb_bot rebalance --from polymarket --to kalshi --amount 50
+python -m cross_arb_bot live
 python -m cross_arb_bot run --interval 20
 ```
 
 Конфиг: `cross_arb_bot/config.yaml`.
 
+Текущие ключевые параметры `cross_arb_bot/config.yaml`:
+
+- `trading.starting_balance_polymarket`
+- `trading.starting_balance_kalshi`
+- `trading.stake_per_pair_usd`
+- `trading.min_lock_edge`
+- `trading.max_lock_edge`
+- `trading.max_open_pairs`
+- `trading.max_entries_per_pair`
+- `trading.rebalance_threshold_usd`
+- `market_filter.symbol`
+- `market_filter.fee_type`
+- `market_filter.min_days_to_expiry`
+- `market_filter.max_days_to_expiry`
+- `market_filter.min_volume`
+- `market_filter.min_liquidity`
+- `market_filter.expiry_tolerance_seconds`
+- `runtime.poll_interval_seconds`
+- `runtime.recheck_delay_seconds`
+
+Research notes:
+
+- hourly strike-based `Polymarket <-> Kalshi` research: [docs/hourly-above-arbitrage-research.md](/Users/sasha/Documents/code/polymarket/docs/hourly-above-arbitrage-research.md)
+- false-match / positive-EV research for `Polymarket 15m <-> Kalshi 15m`: [docs/false-match-positive-ev-research.md](/Users/sasha/Documents/code/polymarket/docs/false-match-positive-ev-research.md)
+
 Важно:
 
 - `Kalshi` API может быть геоблокирован в зависимости от страны; в этом случае бот продолжит работать, но будет писать ошибку `kalshi fetch failed`
+- сейчас бот работает только с `Polymarket + Kalshi`; код и CLI, связанные с `Myriad`, убраны
 - в первой фазе matcher сфокусирован на short-term crypto `Up or Down` рынках
-- резолюция в paper-режиме сейчас моделируется как lock-позиция с выплатой `$1` на акцию после экспирации
+- `matches` — это только количество пар рынков, которые совпали по `symbol`, `market_kind`, `rule_family`, `interval_minutes` и допуску по `expiry`; `matches` не означает наличие арбитража
+- `watch` — гибридный режим: universe discovery по HTTP, live `Polymarket` feed через WebSocket, финальная проверка входа по executable orderbook prices
+- `run`/`live` — polling-цикл `resolve + simulate_execution_cycle`; discovery по рынкам сейчас HTTP-based, а не полностью websocket-native
+- резолюция в paper-режиме идёт по фактическим исходам каждой площадки; если это ложное совпадение рынков, возможен убыток вплоть до полной стоимости входа
+- текущие `15m` рынки `Polymarket` и `Kalshi` не являются настоящими lock-arb эквивалентами:
+  - `Polymarket`: start vs end по `Chainlink`
+  - `Kalshi`: 60-second average vs 60-second average по `CF Benchmarks`
+- из-за этого возможны ложные матчи двух типов:
+  - обе ноги выигрывают
+  - обе ноги проигрывают
+- `rebalance` делает виртуальный перевод между paper-балансами и сохраняет его в отдельной ledger-таблице `transfers`
+- на входе бот проверяет исполнимость через реальный ask-стакан обеих ног; если нужный объём не помещается в стакан целиком, сделка не открывается
+- в live-логах бот теперь печатает человекочитаемую сводку по стакану:
+  - сколько акций нужно
+  - сколько есть в стакане
+  - сколько реально fill-ится
+  - best ask, avg fill, slippage
+  - сколько осталось бы в стакане после нашего fill
+- в БД по новым позициям сохраняются snapshots рынка на `open` и `resolve`, а также числовые метрики ликвидности по обеим ногам
+
+Что лежит в `data/cross_arb_bot.db`:
+
+- `positions`
+  - paper-позиции, их исходы, `lock_valid`, snapshots на `open/resolve`
+  - сохранённые liquidity-поля по обеим ногам: requested, filled, available, best ask, avg fill, remaining after fill
+- `transfers`
+  - история paper-ребалансировок между площадками
+
+Команды `cross_arb_bot` по смыслу:
+
+- `scan --dry`
+  - один HTTP-срез рынков и кандидатов без открытия позиций
+- `scan`
+  - один HTTP-срез с попыткой открыть paper-позиции
+- `sim`
+  - двухшаговая симуляция исполнения: срез `t0`, recheck `t1`, оценка исчезновения edge и реального fill по стакану
+- `watch`
+  - HTTP discovery + `Polymarket` market websocket + финальная проверка исполнимости по стакану
+- `status`
+  - текущие свободные балансы, locked funds, realized P&L, transfers, last snapshot
+- `resolve`
+  - резолюция истёкших paper-позиций по фактическим исходам площадок
+- `liquidity-report`
+  - аналитика по сохранённой глубине стакана новых сделок
+- `rebalance`
+  - виртуальный перевод между paper-балансами
+- `run` / `live`
+  - непрерывный цикл со статусом и live-решениями
 
 ## `ev_bot`
 

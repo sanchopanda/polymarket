@@ -29,6 +29,10 @@ def match_markets(
                 continue
             if pm.market_kind != kalshi.market_kind:
                 continue
+            if pm.rule_family != kalshi.rule_family:
+                continue
+            if pm.interval_minutes != kalshi.interval_minutes:
+                continue
 
             delta = abs((pm.expiry - kalshi.expiry).total_seconds())
             if delta > expiry_tolerance_seconds:

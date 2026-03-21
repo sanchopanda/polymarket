@@ -136,6 +136,66 @@
 - `python3 backtest_buckets.py --data PATH --limit INT --days FLOAT --bet-size FLOAT --min-volume FLOAT --workers INT`
 - `python3 scripts/compare_strategies.py --data PATH --balance FLOAT --bet FLOAT --depth INT --seed INT`
 
+## Команды: `python3 -m cross_arb_bot`
+
+- `scan`
+  - `--dry`
+- `sim`
+- `status`
+- `resolve`
+- `watch`
+- `liquidity-report`
+- `rebalance`
+  - `--from {polymarket,kalshi}`
+  - `--to {polymarket,kalshi}`
+  - `--amount FLOAT`
+  - `--note TEXT`
+- `run`
+  - `--interval INT`
+- `live`
+
+Ключевой конфиг: `cross_arb_bot/config.yaml`.
+
+Ключевые секции:
+
+- `trading`
+- `market_filter`
+- `runtime`
+- `db`
+- `polymarket`
+- `kalshi`
+
+База `cross_arb_bot`:
+
+- `data/cross_arb_bot.db`
+- таблица `positions`
+- таблица `transfers`
+
+Что важно про `cross_arb_bot`:
+
+- проект сейчас работает только с `Polymarket` и `Kalshi`; поддержку `Myriad` нужно считать удалённой
+- `matches` в статусе — это число логически сопоставленных пар рынков, а не число арбитражных окон
+- `opportunities` — это уже только matches с подходящим ценовым окном
+- `run/live` сейчас используют HTTP discovery по рынкам; websocket применяется в `watch` для live-feed `Polymarket`
+- вход в сделку проверяется по реальному ask-стакану, а не только по snapshot-ценам
+- в новых позициях сохраняются:
+  - snapshots рынков на `open` и `resolve`
+  - liquidity-метрики по обеим ногам: requested/fill/available/best/avg/remaining
+- `rebalance` — это paper-ledger перевод между площадками, который меняет свободный баланс через таблицу `transfers`
+
+Известные ограничения и риски `cross_arb_bot`:
+
+- `Polymarket 15m Up/Down` и `Kalshi 15m up in next 15 mins?` не являются строгими арбитражными комплементами
+- `Polymarket` использует `Chainlink` start-vs-end
+- `Kalshi` использует `CF Benchmarks` 60-second average-vs-average
+- поэтому возможны ложные матчи с `lock_valid = 0`, в том числе случаи:
+  - обе ноги выиграли
+  - обе ноги проиграли
+- для hourly research есть отдельный документ:
+  - [docs/hourly-above-arbitrage-research.md](/Users/sasha/Documents/code/polymarket/docs/hourly-above-arbitrage-research.md)
+- для false-match/positive-EV reasoning есть отдельный документ:
+  - [docs/false-match-positive-ev-research.md](/Users/sasha/Documents/code/polymarket/docs/false-match-positive-ev-research.md)
+
 Сервисные скрипты без argparse-параметров:
 
 - `python3 approve_usdc.py`

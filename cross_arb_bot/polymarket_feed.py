@@ -9,6 +9,7 @@ from cross_arb_bot.models import NormalizedMarket
 
 
 UPDOWN_RE = re.compile(r"^(?P<symbol>[A-Za-z]+)\s+Up or Down\s+-", re.IGNORECASE)
+MINUTE_WINDOW_RE = re.compile(r"(?P<start>\d{1,2}:\d{2}(?:AM|PM))-(?P<end>\d{1,2}:\d{2}(?:AM|PM))\s+ET", re.IGNORECASE)
 
 SYMBOL_MAP = {
     "BITCOIN": "BTC",
@@ -19,6 +20,8 @@ SYMBOL_MAP = {
 }
 
 PRICE_TO_BEAT_RE = re.compile(r"Price to beat\s*\$([0-9,]+(?:\.[0-9]+)?)", re.IGNORECASE)
+PRICE_ABOVE_RE = re.compile(r"price (?:of )?.*?(?:above|over|greater than)\s*\$([0-9,]+(?:\.[0-9]+)?)", re.IGNORECASE)
+PRICE_BELOW_RE = re.compile(r"price (?:of )?.*?(?:below|under|less than)\s*\$([0-9,]+(?:\.[0-9]+)?)", re.IGNORECASE)
 
 
 class PolymarketFeed:
@@ -74,6 +77,8 @@ class PolymarketFeed:
         down_price = outcomes.get("down")
         if up_price is None or down_price is None:
             return None
+        rule_family = self._detect_rule_family(market)
+        reference_price = self._extract_reference_price(market.question, market.description)
 
         return NormalizedMarket(
             venue="polymarket",
@@ -92,16 +97,51 @@ class PolymarketFeed:
             no_depth=market.liquidity_num,
             volume=market.volume_num,
             liquidity=market.liquidity_num,
+            interval_minutes=self._extract_interval_minutes(market.question),
+            rule_family=rule_family,
             yes_token_id=market.clob_token_ids[0],
             no_token_id=market.clob_token_ids[1],
-            reference_price=self._extract_reference_price(market.question),
+            reference_price=reference_price,
+            rules_text=self._build_rules_text(market),
         )
 
-    def _extract_reference_price(self, question: str) -> float | None:
-        match = PRICE_TO_BEAT_RE.search(question)
-        if not match:
-            return None
-        try:
-            return float(match.group(1).replace(",", ""))
-        except ValueError:
-            return None
+    def _extract_reference_price(self, question: str, description: str) -> float | None:
+        text = f"{question}\n{description}"
+        for pattern in (PRICE_TO_BEAT_RE, PRICE_ABOVE_RE, PRICE_BELOW_RE):
+            match = pattern.search(text)
+            if not match:
+                continue
+            try:
+                return float(match.group(1).replace(",", ""))
+            except ValueError:
+                continue
+        return None
+
+    def _extract_interval_minutes(self, question: str) -> int | None:
+        window_match = MINUTE_WINDOW_RE.search(question)
+        if window_match:
+            start = datetime.strptime(window_match.group("start").upper(), "%I:%M%p")
+            end = datetime.strptime(window_match.group("end").upper(), "%I:%M%p")
+            delta_minutes = int((end - start).total_seconds() // 60)
+            if delta_minutes <= 0:
+                delta_minutes += 24 * 60
+            return delta_minutes
+        if re.search(r"\b15\s*Minutes\b", question, re.IGNORECASE):
+            return 15
+        if re.search(r"\b5\s*Minutes\b", question, re.IGNORECASE):
+            return 5
+        if re.search(r"\b1\s*Hour\b|\b60\s*Minutes\b", question, re.IGNORECASE):
+            return 60
+        return None
+
+    def _detect_rule_family(self, market: Market) -> str:
+        text = f"{market.question}\n{market.description}\n{market.resolution_source}".lower()
+        if "more green" in text and "more red" in text:
+            return "candle_majority"
+        if "price to beat" in text or "up or down" in text or "above" in text or "below" in text:
+            return "price_direction"
+        return "binary_yes_no"
+
+    def _build_rules_text(self, market: Market) -> str:
+        parts = [part.strip() for part in [market.description, market.resolution_source] if part and part.strip()]
+        return "\n".join(parts)
