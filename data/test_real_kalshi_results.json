@@ -1,0 +1,207 @@
+[
+  {
+    "run_at": "2026-03-21T23:45:28.956432+00:00",
+    "market": {
+      "ticker": "KXBTC15M-26MAR211945-45",
+      "title": "BTC price up in next 15 mins?",
+      "symbol": "BTC",
+      "expiry": "2026-03-21T23:45:00",
+      "interval_minutes": 15,
+      "minutes_to_expiry": 10.7,
+      "side": "yes",
+      "probability": 0.62,
+      "yes_ask": 0.62,
+      "no_ask": 0.4,
+      "volume": 0.0,
+      "reference_price": 70116.56
+    },
+    "amount_usd": 2.0,
+    "balance_before": {
+      "balance_usd": 12.67,
+      "raw": {
+        "balance": 1267,
+        "portfolio_value": 0,
+        "updated_ts": 1774136057
+      },
+      "latency_ms": 5282.4
+    },
+    "orderbook": {
+      "latency_ms": 345.5,
+      "yes_asks": [
+        {
+          "price": 0.64,
+          "size": 904.0
+        },
+        {
+          "price": 0.65,
+          "size": 1007.0
+        },
+        {
+          "price": 0.66,
+          "size": 699.0
+        },
+        {
+          "price": 0.67,
+          "size": 127.0
+        },
+        {
+          "price": 0.68,
+          "size": 801.0
+        },
+        {
+          "price": 0.69,
+          "size": 162.0
+        },
+        {
+          "price": 0.7,
+          "size": 1275.0
+        },
+        {
+          "price": 0.71,
+          "size": 1090.0
+        },
+        {
+          "price": 0.72,
+          "size": 15150.0
+        },
+        {
+          "price": 0.73,
+          "size": 188.0
+        }
+      ],
+      "no_asks": [
+        {
+          "price": 0.38,
+          "size": 10.0
+        },
+        {
+          "price": 0.39,
+          "size": 208.0
+        },
+        {
+          "price": 0.4,
+          "size": 919.0
+        },
+        {
+          "price": 0.41,
+          "size": 54.0
+        },
+        {
+          "price": 0.42,
+          "size": 51.0
+        },
+        {
+          "price": 0.43,
+          "size": 552.0
+        },
+        {
+          "price": 0.44,
+          "size": 161.0
+        },
+        {
+          "price": 0.45,
+          "size": 155.0
+        },
+        {
+          "price": 0.46,
+          "size": 153.0
+        },
+        {
+          "price": 0.47,
+          "size": 1272.0
+        }
+      ],
+      "best_yes_ask": 0.64,
+      "best_no_ask": 0.38,
+      "yes_depth": 186501.0,
+      "no_depth": 153242.0
+    },
+    "decision": {
+      "side": "yes",
+      "scan_price": 0.62,
+      "book_best_ask": 0.64,
+      "price_cents": 64,
+      "contracts": 3,
+      "estimated_cost": 1.92,
+      "estimated_fee": 0.05,
+      "book_depth": 186501.0,
+      "signal_at": "2026-03-21T23:34:23.148865+00:00"
+    },
+    "order": {
+      "ticker": "KXBTC15M-26MAR211945-45",
+      "side": "yes",
+      "count": 3,
+      "price_cents": 64,
+      "client_order_id": "f6354f19-e2cd-4428-960f-a46480bd5e25",
+      "order_latency_ms": 513.5,
+      "status_code": 201,
+      "placed_at": "2026-03-21T23:34:23.662584+00:00",
+      "raw_response": {
+        "order": {
+          "action": "buy",
+          "client_order_id": "f6354f19-e2cd-4428-960f-a46480bd5e25",
+          "created_time": "2026-03-21T23:34:23.539237Z",
+          "expiration_time": null,
+          "fill_count_fp": "3.00",
+          "initial_count_fp": "3.00",
+          "last_update_time": "2026-03-21T23:34:23.539237Z",
+          "maker_fees_dollars": "0.0000",
+          "maker_fill_cost_dollars": "0.0000",
+          "no_price_dollars": "0.3600",
+          "order_group_id": null,
+          "order_id": "d1e91f76-8bd0-4ee3-9c0a-428f28e0c620",
+          "remaining_count_fp": "0.00",
+          "side": "yes",
+          "status": "executed",
+          "subaccount_number": 0,
+          "taker_fees_dollars": "0.0500",
+          "taker_fill_cost_dollars": "1.9200",
+          "ticker": "KXBTC15M-26MAR211945-45",
+          "type": "limit",
+          "user_id": "7b3e49f3-431c-4de4-894e-356a35742b68",
+          "yes_price_dollars": "0.6400"
+        }
+      },
+      "order_id": "d1e91f76-8bd0-4ee3-9c0a-428f28e0c620",
+      "status": "executed",
+      "fill_count": 0
+    },
+    "price_comparison": {
+      "scan_price": 0.62,
+      "book_best_ask": 0.64,
+      "order_price_cents": 64,
+      "order_status": "executed"
+    },
+    "resolution": {
+      "ticker": "KXBTC15M-26MAR211945-45",
+      "status": "finalized",
+      "result": "yes",
+      "settlement_value": "1.0000",
+      "resolved_at": "2026-03-21T23:45:22.811836+00:00",
+      "wait_total_seconds": 659.1,
+      "wait_after_expiry_seconds": 0.9
+    },
+    "result": {
+      "won": true,
+      "winner": "yes",
+      "bet_side": "yes",
+      "contracts": 3,
+      "price_cents": 64,
+      "fee": 0.05,
+      "cost": 1.97,
+      "payout": 3.0,
+      "pnl": 1.03,
+      "roi_percent": 52.28
+    },
+    "balance_after": {
+      "balance_usd": 13.7,
+      "raw": {
+        "balance": 1370,
+        "portfolio_value": 0,
+        "updated_ts": 1774136728
+      },
+      "latency_ms": 1139.5
+    },
+    "balance_diff_usd": 1.03
+  }
+]

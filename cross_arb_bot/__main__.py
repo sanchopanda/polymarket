@@ -140,6 +140,7 @@ def main() -> None:
         return
 
     if args.command == "watch":
+        print("[Watch] Starting watch mode...")
         runner = CrossArbWatchRunner(engine)
         runner.run()
         return

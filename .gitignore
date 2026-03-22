@@ -18,6 +18,7 @@ bybit-bot/.venv/
 # Environment & secrets
 .env
 .env.*
+data/*.key
 
 # Database files
 data/*.db

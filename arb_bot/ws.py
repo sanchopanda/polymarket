@@ -41,7 +41,7 @@ class MarketWebSocketClient:
     def _run(self) -> None:
         while not self._stop:
             try:
-                with connect(self.url, open_timeout=10, close_timeout=3) as ws:
+                with connect(self.url, open_timeout=10, close_timeout=3, ping_interval=None) as ws:
                     ws.send(
                         json.dumps(
                             {
@@ -57,7 +57,10 @@ class MarketWebSocketClient:
                             ws.send("PING")
                             last_ping = time.time()
 
-                        raw = ws.recv(timeout=1)
+                        try:
+                            raw = ws.recv(timeout=5)
+                        except TimeoutError:
+                            continue
                         if raw in ("PONG", "PING", None):
                             continue
                         payload = json.loads(raw)

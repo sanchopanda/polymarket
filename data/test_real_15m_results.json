@@ -1,0 +1,538 @@
+[
+  {
+    "run_at": "2026-03-21T22:03:41.154208+00:00",
+    "market": {
+      "market_id": "1666233",
+      "title": "Bitcoin Up or Down - March 21, 6:00PM-6:05PM ET",
+      "symbol": "BTC",
+      "expiry": "2026-03-21T22:05:00",
+      "interval_minutes": 5,
+      "minutes_to_expiry": 2.3,
+      "side": "Down",
+      "probability": 0.635,
+      "yes_ask": 0.365,
+      "no_ask": 0.635,
+      "ask_sum": 1.0,
+      "spread": 0.0,
+      "volume": 12179.551266999993,
+      "liquidity": 13509.0593,
+      "reference_price": null,
+      "rule_family": "price_direction",
+      "yes_token_id": "1024951294287060257288041142879762811764593790455445799677100529083926210989",
+      "no_token_id": "82585075246617596988363594247510222043769827015628628038672602319223467445991",
+      "bet_token_id": "82585075246617596988363594247510222043769827015628628038672602319223467445991"
+    },
+    "amount_usd": 2.0
+  },
+  {
+    "run_at": "2026-03-21T22:24:11.892662+00:00",
+    "market": {
+      "market_id": "1666414",
+      "title": "Dogecoin Up or Down - March 21, 6:15PM-6:20PM ET",
+      "symbol": "DOGE",
+      "expiry": "2026-03-21T22:20:00",
+      "interval_minutes": 5,
+      "minutes_to_expiry": 2.7,
+      "side": "Up",
+      "probability": 0.775,
+      "yes_ask": 0.775,
+      "no_ask": 0.225,
+      "ask_sum": 1.0,
+      "spread": 0.0,
+      "volume": 13.0,
+      "liquidity": 87.0874,
+      "reference_price": null,
+      "rule_family": "price_direction",
+      "yes_token_id": "92493824362585703954835580331937385069106320533790518297972170108321622870249",
+      "no_token_id": "42992847989579940861637300015707719307816155665604824382121382805683698649313",
+      "bet_token_id": "92493824362585703954835580331937385069106320533790518297972170108321622870249"
+    },
+    "amount_usd": 2.0,
+    "balance_before": {
+      "address": "0x84239792960F99C9ED45c49FfB994b1Da96aEd4d",
+      "usdc": 45.157434,
+      "pol": 9.535488725836771,
+      "rpc": "https://polygon-bor-rpc.publicnode.com"
+    },
+    "orderbook_target": {
+      "label": "Up",
+      "latency_ms": 91.2,
+      "best_ask": 0.99,
+      "best_bid": 0.01,
+      "total_ask_depth": 2683.93,
+      "total_bid_depth": 2683.93,
+      "ask_levels_count": 7,
+      "bid_levels_count": 7,
+      "ask_levels": [
+        {
+          "price": 0.99,
+          "size": 2505.0
+        },
+        {
+          "price": 0.97,
+          "size": 60.0
+        },
+        {
+          "price": 0.96,
+          "size": 20.0
+        },
+        {
+          "price": 0.95,
+          "size": 10.0
+        },
+        {
+          "price": 0.9,
+          "size": 20.0
+        },
+        {
+          "price": 0.89,
+          "size": 27.27
+        },
+        {
+          "price": 0.88,
+          "size": 41.66
+        }
+      ],
+      "bid_levels": [
+        {
+          "price": 0.01,
+          "size": 2505.0
+        },
+        {
+          "price": 0.03,
+          "size": 60.0
+        },
+        {
+          "price": 0.04,
+          "size": 20.0
+        },
+        {
+          "price": 0.05,
+          "size": 10.0
+        },
+        {
+          "price": 0.1,
+          "size": 20.0
+        },
+        {
+          "price": 0.11,
+          "size": 27.27
+        },
+        {
+          "price": 0.12,
+          "size": 41.66
+        }
+      ]
+    },
+    "orderbook_other": {
+      "label": "Down",
+      "latency_ms": 118.8,
+      "best_ask": 0.99,
+      "best_bid": 0.01,
+      "total_ask_depth": 2683.93,
+      "total_bid_depth": 2683.93,
+      "ask_levels_count": 7,
+      "bid_levels_count": 7,
+      "ask_levels": [
+        {
+          "price": 0.99,
+          "size": 2505.0
+        },
+        {
+          "price": 0.97,
+          "size": 60.0
+        },
+        {
+          "price": 0.96,
+          "size": 20.0
+        },
+        {
+          "price": 0.95,
+          "size": 10.0
+        },
+        {
+          "price": 0.9,
+          "size": 20.0
+        },
+        {
+          "price": 0.89,
+          "size": 27.27
+        },
+        {
+          "price": 0.88,
+          "size": 41.66
+        }
+      ],
+      "bid_levels": [
+        {
+          "price": 0.01,
+          "size": 2505.0
+        },
+        {
+          "price": 0.03,
+          "size": 60.0
+        },
+        {
+          "price": 0.04,
+          "size": 20.0
+        },
+        {
+          "price": 0.05,
+          "size": 10.0
+        },
+        {
+          "price": 0.1,
+          "size": 20.0
+        },
+        {
+          "price": 0.11,
+          "size": 27.27
+        },
+        {
+          "price": 0.12,
+          "size": 41.66
+        }
+      ]
+    },
+    "order": {
+      "side": "Up",
+      "amount_usd": 2.0,
+      "token_id": "92493824362585703954835580331937385069106320533790518297972170108321622870249",
+      "sign_ms": 271.1,
+      "post_ms": 380.8,
+      "total_order_ms": 652.0,
+      "status": "matched",
+      "order_id": "0xc78d07f1d40a8e57a908f791da7a45133da7d6c33d711b7db384847471f28862",
+      "raw_response": {
+        "errorMsg": "",
+        "orderID": "0xc78d07f1d40a8e57a908f791da7a45133da7d6c33d711b7db384847471f28862",
+        "takingAmount": "2.272725",
+        "makingAmount": "1.999998",
+        "status": "matched",
+        "transactionsHashes": [
+          "0xc18d7ec893427142eb8a42467a6bde161f5505e4f4fe29cb2871965d06cf5ef2"
+        ],
+        "success": true
+      },
+      "placed_at": "2026-03-21T22:18:04.879867+00:00",
+      "order_info": {
+        "id": "0xc78d07f1d40a8e57a908f791da7a45133da7d6c33d711b7db384847471f28862",
+        "status": "MATCHED",
+        "owner": "ff7a748b-04b4-06da-f81f-b5e20ef9cd71",
+        "maker_address": "0x84239792960F99C9ED45c49FfB994b1Da96aEd4d",
+        "market": "0xf15c0c54d947588ad0cbb4b70a697eb5c51cb873c6a52fc861040f2930299297",
+        "asset_id": "92493824362585703954835580331937385069106320533790518297972170108321622870249",
+        "side": "BUY",
+        "original_size": "2.2727",
+        "size_matched": "2.272725",
+        "price": "0.88",
+        "outcome": "Up",
+        "expiration": "0",
+        "order_type": "FOK",
+        "associate_trades": [
+          "b9e3e77c-fa64-4a30-885b-e7b010d4399b"
+        ],
+        "created_at": 1774131485
+      },
+      "fill_price": 0.88,
+      "shares_matched": 2.272725,
+      "shares_original": 2.2727,
+      "fill_percent": 100.0,
+      "estimated_fee": 0.005576,
+      "fee_percent": 0.28
+    },
+    "resolution": {
+      "market_id": "1666414",
+      "resolved_at": "2026-03-21T22:23:55.351596+00:00",
+      "wait_total_seconds": 348.8,
+      "wait_after_expiry_seconds": 234.5,
+      "outcomes": [
+        "Up",
+        "Down"
+      ],
+      "outcome_prices": [
+        1.0,
+        0.0
+      ],
+      "winner": "Up",
+      "winner_idx": 0
+    },
+    "result": {
+      "won": true,
+      "winner": "Up",
+      "bet_side": "Up",
+      "shares": 2.272725,
+      "fill_price": 0.88,
+      "fee": 0.005576,
+      "cost": 2.0056,
+      "payout": 2.2727,
+      "pnl": 0.2672,
+      "roi_percent": 13.32
+    },
+    "redeem": {
+      "success": true,
+      "tx_hash": "0x395f5a11d2481a4814ed4aeb94a0d337fe6921e8466b9cd06e6cbbb246297a5d",
+      "build_ms": 3.8,
+      "send_ms": 156.8,
+      "confirm_ms": 4699.5,
+      "total_redeem_ms": 4860.1,
+      "gas_used": 139167,
+      "gas_price_gwei": 128.4,
+      "gas_cost_pol": 0.01787,
+      "block_number": 84505905,
+      "rpc": "https://polygon-bor-rpc.publicnode.com",
+      "redeemed_at": "2026-03-21T22:24:04.238568+00:00"
+    },
+    "balance_after": {
+      "address": "0x84239792960F99C9ED45c49FfB994b1Da96aEd4d",
+      "usdc": 45.423831,
+      "pol": 9.517619048574975,
+      "rpc": "https://polygon-bor-rpc.publicnode.com"
+    },
+    "balance_diff_usdc": 0.2664
+  },
+  {
+    "run_at": "2026-03-21T23:02:50.017883+00:00",
+    "market": {
+      "market_id": "1666685",
+      "title": "Bitcoin Up or Down - March 21, 6:45PM-7:00PM ET",
+      "symbol": "BTC",
+      "expiry": "2026-03-21T23:00:00",
+      "interval_minutes": 15,
+      "minutes_to_expiry": 13.7,
+      "yes_ask_gamma": 0.52,
+      "no_ask_gamma": 0.48,
+      "volume": 2181.8706039999997,
+      "liquidity": 39231.2947,
+      "reference_price": null,
+      "rule_family": "price_direction",
+      "yes_token_id": "16537559021814590366848438103613331136803226023020118667419968295286572990986",
+      "no_token_id": "76934221164198431604107258540564502688678671312685947050877139646259179651657"
+    },
+    "amount_usd": 2.0,
+    "decision": {
+      "side": "Down",
+      "ws_price_at_signal": 0.64,
+      "ws_yes": 0.37,
+      "ws_no": 0.64,
+      "ws_sum": 1.01,
+      "gamma_yes": 0.52,
+      "gamma_no": 0.48,
+      "book_best_ask": 0.65,
+      "book_avg_fill": 0.65,
+      "book_slippage": 0.0,
+      "book_depth_shares": 36867.84,
+      "signal_at": "2026-03-21T22:46:21.905832+00:00"
+    },
+    "orderbook_target": {
+      "label": "Down",
+      "available": true,
+      "latency_ms": 180.6,
+      "best_ask": 0.65,
+      "avg_fill_price": 0.65,
+      "slippage": 0.0,
+      "total_depth_shares": 36867.84,
+      "simulated_shares": 3.076923,
+      "simulated_cost": 2.0,
+      "ask_levels": [
+        {
+          "price": 0.65,
+          "size": 113.74
+        },
+        {
+          "price": 0.66,
+          "size": 68.0
+        },
+        {
+          "price": 0.67,
+          "size": 771.56
+        },
+        {
+          "price": 0.68,
+          "size": 213.37
+        },
+        {
+          "price": 0.69,
+          "size": 354.1
+        },
+        {
+          "price": 0.7,
+          "size": 222.2
+        },
+        {
+          "price": 0.71,
+          "size": 198.3
+        },
+        {
+          "price": 0.72,
+          "size": 314.3
+        },
+        {
+          "price": 0.73,
+          "size": 204.5
+        },
+        {
+          "price": 0.74,
+          "size": 434.8
+        }
+      ]
+    },
+    "orderbook_other": {
+      "label": "Up",
+      "available": true,
+      "latency_ms": 185.3,
+      "best_ask": 0.36,
+      "avg_fill_price": 0.36,
+      "slippage": 0.0,
+      "total_depth_shares": 47675.9,
+      "simulated_shares": 5.555556,
+      "simulated_cost": 2.0,
+      "ask_levels": [
+        {
+          "price": 0.36,
+          "size": 496.0
+        },
+        {
+          "price": 0.37,
+          "size": 406.69
+        },
+        {
+          "price": 0.38,
+          "size": 318.62
+        },
+        {
+          "price": 0.39,
+          "size": 200.28
+        },
+        {
+          "price": 0.4,
+          "size": 174.67
+        },
+        {
+          "price": 0.41,
+          "size": 165.0
+        },
+        {
+          "price": 0.42,
+          "size": 359.0
+        },
+        {
+          "price": 0.43,
+          "size": 361.0
+        },
+        {
+          "price": 0.44,
+          "size": 333.0
+        },
+        {
+          "price": 0.45,
+          "size": 304.0
+        }
+      ]
+    },
+    "balance_before": {
+      "address": "0x84239792960F99C9ED45c49FfB994b1Da96aEd4d",
+      "usdc": 45.423831,
+      "pol": 9.517619048574975
+    },
+    "order": {
+      "side": "Down",
+      "amount_usd": 2.0,
+      "token_id": "76934221164198431604107258540564502688678671312685947050877139646259179651657",
+      "sign_ms": 514.6,
+      "post_ms": 414.6,
+      "total_order_ms": 929.2,
+      "status": "matched",
+      "order_id": "0xd9b91f2a297e6b498233dffe53d34d036f5db916c1346e913c8ab146df572689",
+      "raw_response": {
+        "errorMsg": "",
+        "orderID": "0xd9b91f2a297e6b498233dffe53d34d036f5db916c1346e913c8ab146df572689",
+        "takingAmount": "2.985072",
+        "makingAmount": "1.999998",
+        "status": "matched",
+        "transactionsHashes": [
+          "0x75dbbb3a752d5aa11d58d836ff9215292906cd578d24b66ae45c49625f85582e"
+        ],
+        "success": true
+      },
+      "placed_at": "2026-03-21T22:46:24.174108+00:00",
+      "order_info": {
+        "id": "0xd9b91f2a297e6b498233dffe53d34d036f5db916c1346e913c8ab146df572689",
+        "status": "MATCHED",
+        "owner": "ff7a748b-04b4-06da-f81f-b5e20ef9cd71",
+        "maker_address": "0x84239792960F99C9ED45c49FfB994b1Da96aEd4d",
+        "market": "0xfd85b80e3119b7daee29975ccdd772d5b6937f87f42c5b5710e731372d2ba916",
+        "asset_id": "76934221164198431604107258540564502688678671312685947050877139646259179651657",
+        "side": "BUY",
+        "original_size": "2.985",
+        "size_matched": "2.985072",
+        "price": "0.67",
+        "outcome": "Down",
+        "expiration": "0",
+        "order_type": "FOK",
+        "associate_trades": [
+          "8354c56c-fc6d-4359-8b3b-6d16c3aad27e"
+        ],
+        "created_at": 1774133184
+      },
+      "fill_price": 0.67,
+      "shares_matched": 2.985072,
+      "shares_original": 2.985,
+      "fill_percent": 100.0,
+      "estimated_fee": 0.024443,
+      "fee_percent": 1.22
+    },
+    "price_comparison": {
+      "gamma_snapshot": 0.48,
+      "ws_live_signal": 0.64,
+      "book_best_ask": 0.65,
+      "book_avg_fill_simulated": 0.65,
+      "actual_fill_price": 0.67,
+      "slippage_ws_to_fill": 0.03,
+      "slippage_book_to_fill": 0.02
+    },
+    "resolution": {
+      "market_id": "1666685",
+      "resolved_at": "2026-03-21T23:02:36.042720+00:00",
+      "wait_total_seconds": 970.2,
+      "wait_after_expiry_seconds": 145.8,
+      "outcomes": [
+        "Up",
+        "Down"
+      ],
+      "outcome_prices": [
+        0.0,
+        1.0
+      ],
+      "winner": "Down",
+      "winner_idx": 1
+    },
+    "result": {
+      "won": true,
+      "winner": "Down",
+      "bet_side": "Down",
+      "shares": 2.985072,
+      "fill_price": 0.67,
+      "fee": 0.024443,
+      "cost": 2.0244,
+      "payout": 2.9851,
+      "pnl": 0.9606,
+      "roi_percent": 47.45
+    },
+    "redeem": {
+      "success": true,
+      "tx_hash": "0xd8339de0347228292b5e0a04d6bb04ed47225453532f2a4512b33b197435054f",
+      "total_ms": 3498.5,
+      "gas_used": 124349,
+      "gas_price_gwei": 127.0,
+      "gas_cost_pol": 0.015794,
+      "redeemed_at": "2026-03-21T23:02:44.250314+00:00"
+    },
+    "balance_after": {
+      "address": "0x84239792960F99C9ED45c49FfB994b1Da96aEd4d",
+      "usdc": 46.372425,
+      "pol": 9.501825390869387
+    },
+    "balance_diff_usdc": 0.9486
+  }
+]

@@ -27,6 +27,8 @@ class CrossArbWatchRunner:
         self.watch_by_pair_key: dict[str, WatchedPair] = {}
         self.pairs_by_asset_id: dict[str, set[str]] = {}
         self._signal_lock = threading.Lock()
+        self._last_skip_log: dict[str, float] = {}
+        self._SKIP_LOG_INTERVAL = 30.0
 
     def run(self) -> None:
         ws: MarketWebSocketClient | None = None
@@ -37,9 +39,7 @@ class CrossArbWatchRunner:
             while True:
                 now = time.time()
                 if ws is None or (now - last_refresh) >= self.UNIVERSE_REFRESH_SECONDS:
-                    if ws is not None:
-                        ws.stop()
-                    ws = self._refresh_watchlist()
+                    ws = self._refresh_watchlist(prev_ws=ws)
                     last_refresh = now
 
                 if (now - last_status) >= self.STATUS_INTERVAL_SECONDS:
@@ -53,7 +53,8 @@ class CrossArbWatchRunner:
             if ws is not None:
                 ws.stop()
 
-    def _refresh_watchlist(self) -> MarketWebSocketClient | None:
+    def _refresh_watchlist(self, prev_ws: MarketWebSocketClient | None = None) -> MarketWebSocketClient | None:
+        print("[Watch] Scanning markets...")
         opportunities = self.engine.scan(open_positions=False)
         pm_markets, kalshi_markets, matches, _ = self.engine.last_snapshot
         match_index = {
@@ -82,17 +83,34 @@ class CrossArbWatchRunner:
 
         self.watch_by_pair_key = watched
         self.pairs_by_asset_id = pairs_by_asset
-        self.live_books = {}
 
-        if not asset_ids:
+        new_asset_ids = sorted(set(asset_ids))
+
+        if not new_asset_ids:
+            # Drop books for tokens no longer watched
+            self.live_books = {}
             print("[Watch] No Polymarket/Kalshi candidates for live monitoring.")
             return None
 
-        asset_ids = sorted(set(asset_ids))
-        print(f"[Watch] Tracking {len(watched)} candidate pairs via {len(asset_ids)} Polymarket tokens.")
+        # Keep books for tokens that remain, drop stale ones
+        kept = set(new_asset_ids)
+        self.live_books = {k: v for k, v in self.live_books.items() if k in kept}
+
+        # Reuse existing WS if token set unchanged
+        prev_asset_ids = getattr(self, "_current_asset_ids", [])
+        if new_asset_ids == prev_asset_ids and prev_ws is not None:
+            print(f"[Watch] Tracking {len(watched)} candidate pairs via {len(new_asset_ids)} Polymarket tokens (WS reused).")
+            self._current_asset_ids = new_asset_ids
+            return prev_ws
+
+        # Token set changed — recreate WS
+        if prev_ws is not None:
+            prev_ws.stop()
+        print(f"[Watch] Tracking {len(watched)} candidate pairs via {len(new_asset_ids)} Polymarket tokens.")
+        self._current_asset_ids = new_asset_ids
         ws = MarketWebSocketClient(
             url=self.MARKET_WS_URL,
-            asset_ids=asset_ids,
+            asset_ids=new_asset_ids,
             on_message=self.on_ws_message,
         )
         ws.start()
@@ -128,6 +146,13 @@ class CrossArbWatchRunner:
         for pair_key in self.pairs_by_asset_id.get(asset_id, set()):
             self._maybe_open_pair(pair_key)
 
+    def _skip_log(self, pair_key: str, msg: str) -> None:
+        now = time.time()
+        if now - self._last_skip_log.get(pair_key, 0.0) < self._SKIP_LOG_INTERVAL:
+            return
+        self._last_skip_log[pair_key] = now
+        print(msg)
+
     def _maybe_open_pair(self, pair_key: str) -> None:
         watched = self.watch_by_pair_key.get(pair_key)
         if watched is None:
@@ -137,39 +162,79 @@ class CrossArbWatchRunner:
 
         if self.engine.db.has_open_position(opp.pair_key, opp.buy_yes_venue, opp.buy_no_venue):
             return
-        if len(self.engine.db.get_open_positions()) >= self.engine.trading["max_open_pairs"]:
+        open_count = len(self.engine.db.get_open_positions())
+        if open_count >= self.engine.trading["max_open_pairs"]:
+            self._skip_log(pair_key, f"[Watch][SKIP] {opp.symbol} | reason=max_open_pairs ({open_count})")
             return
 
         yes_book = self.live_books.get(matched.polymarket.yes_token_id or "")
         no_book = self.live_books.get(matched.polymarket.no_token_id or "")
         if yes_book is None or no_book is None:
+            missing = []
+            if yes_book is None:
+                missing.append("YES")
+            if no_book is None:
+                missing.append("NO")
+            self._skip_log(pair_key, f"[Watch][SKIP] {opp.symbol} | reason=missing_ws_book ({', '.join(missing)})")
             return
         if yes_book.best_ask <= 0 or no_book.best_ask <= 0:
+            self._skip_log(pair_key, f"[Watch][SKIP] {opp.symbol} | reason=invalid_ask (yes={yes_book.best_ask}, no={no_book.best_ask})")
             return
 
         rough_yes = yes_book.best_ask if opp.buy_yes_venue == "polymarket" else matched.kalshi.yes_ask
         rough_no = no_book.best_ask if opp.buy_no_venue == "polymarket" else matched.kalshi.no_ask
         rough_edge = 1.0 - (rough_yes + rough_no)
         if rough_edge < self.engine.trading["min_lock_edge"]:
+            self._skip_log(
+                pair_key,
+                f"[Watch][SKIP] {opp.symbol} | reason=rough_edge_low ({rough_edge:.4f} < {self.engine.trading['min_lock_edge']})"
+                f" | yes={rough_yes:.4f} no={rough_no:.4f}",
+            )
             return
 
         with self._signal_lock:
             if self.engine.db.has_open_position(opp.pair_key, opp.buy_yes_venue, opp.buy_no_venue):
                 return
-            if self.engine._can_open(opp) != "ok":
+            can_open = self.engine._can_open(opp)
+            if can_open != "ok":
+                self._skip_log(pair_key, f"[Watch][SKIP] {opp.symbol} | reason={can_open}")
                 return
             executed, yes_leg, no_leg = self.engine._apply_execution_pricing(opp, matched)
             if executed is None:
+                self._skip_log(
+                    pair_key,
+                    f"[Watch][SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+                    f"              reason=insufficient_liquidity\n"
+                    f"              YES leg: {self.engine._format_leg_summary(yes_leg)}\n"
+                    f"              NO  leg: {self.engine._format_leg_summary(no_leg)}",
+                )
                 return
             if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
+                self._skip_log(
+                    pair_key,
+                    f"[Watch][SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+                    f"              reason=edge_disappeared ({executed.edge_per_share:.4f} < {self.engine.trading['min_lock_edge']})\n"
+                    f"              YES leg: {self.engine._format_leg_summary(yes_leg)}\n"
+                    f"              NO  leg: {self.engine._format_leg_summary(no_leg)}",
+                )
                 return
-            if self.engine._can_open(executed) != "ok":
+            can_open_exec = self.engine._can_open(executed)
+            if can_open_exec != "ok":
+                self._skip_log(
+                    pair_key,
+                    f"[Watch][SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+                    f"              reason={can_open_exec} (after execution pricing)\n"
+                    f"              YES leg: {self.engine._format_leg_summary(yes_leg)}\n"
+                    f"              NO  leg: {self.engine._format_leg_summary(no_leg)}",
+                )
                 return
 
             self.engine.db.open_position(
                 executed,
                 polymarket_snapshot_open=self.engine._polymarket_snapshot_for_market(matched.polymarket.market_id, stage="open"),
                 kalshi_snapshot_open=self.engine._kalshi_snapshot_for_market(matched.kalshi.market_id, stage="open"),
+                yes_leg=yes_leg,
+                no_leg=no_leg,
             )
             print(
                 f"[Watch][OPEN] {executed.symbol} | {executed.buy_yes_venue}:YES + {executed.buy_no_venue}:NO\n"
