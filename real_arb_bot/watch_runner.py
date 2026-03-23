@@ -84,6 +84,7 @@ class RealArbWatchRunner:
 
         # Логируем matched пары без немедленного trade-кандидата, но продолжаем их отслеживать.
         trade_candidate_keys = {c.pair_key for c in opportunities}
+        min_edge = float(self.engine.trading["min_lock_edge"])
         for m in matches:
             pair_key = f"{m.polymarket.market_id}:{m.kalshi.market_id}"
             if pair_key not in trade_candidate_keys:
@@ -91,6 +92,8 @@ class RealArbWatchRunner:
                 pm_yes_ka_no_edge = 1.0 - (pm.yes_ask + ka.no_ask)
                 ka_yes_pm_no_edge = 1.0 - (ka.yes_ask + pm.no_ask)
                 best_edge = max(pm_yes_ka_no_edge, ka_yes_pm_no_edge)
+                if best_edge < min_edge:
+                    continue
                 reasons = []
                 if pm.yes_ask > 0 and ka.yes_ask > 0:
                     pm_bullish = pm.yes_ask > 0.5
@@ -547,14 +550,6 @@ class RealArbWatchRunner:
         rough_edge = 1.0 - (rough_yes + rough_no)
         rough_summary = self._rough_side_summary(opp, rough_yes, rough_no, yes_book, no_book, kalshi_live)
         if rough_edge < self.engine.trading["min_lock_edge"]:
-            self._skip_log(
-                pair_key,
-                f"[Watch][SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
-                f"              reason=rough_edge_low ({rough_edge:.4f} < {self.engine.trading['min_lock_edge']:.4f})\n"
-                f"              {rough_summary}\n"
-                f"              обе стороны:\n"
-                f"              {self._pair_live_side_summaries(pair_key, yes_book, no_book, kalshi_live).replace(chr(10), chr(10) + '              ')}",
-            )
             return
         if rough_edge > self.engine.trading["max_lock_edge"]:
             rough_polarized = (rough_yes > 0.5) != (rough_no > 0.5)
