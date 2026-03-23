@@ -19,13 +19,16 @@ class WatchedPair:
 
 
 class RealArbWatchRunner:
-    UNIVERSE_REFRESH_SECONDS = 60
+    DEFAULT_UNIVERSE_REFRESH_SECONDS = 300
     STATUS_INTERVAL_SECONDS = 15
     MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     HIGH_EDGE_THRESHOLD = 0.15
 
     def __init__(self, engine: RealArbEngine) -> None:
         self.engine = engine
+        self.universe_refresh_seconds = float(
+            engine.runtime.get("watch_universe_refresh_seconds", self.DEFAULT_UNIVERSE_REFRESH_SECONDS)
+        )
         self.live_books: dict[str, TopOfBook] = {}
         self.live_books_kalshi: dict[str, KalshiTopOfBook] = {}
         self.watch_by_pair_key: dict[str, WatchedPair] = {}
@@ -44,7 +47,7 @@ class RealArbWatchRunner:
         try:
             while True:
                 now = time.time()
-                if ws is None or (now - last_refresh) >= self.UNIVERSE_REFRESH_SECONDS:
+                if ws is None or (now - last_refresh) >= self.universe_refresh_seconds:
                     ws = self._refresh_watchlist(prev_ws=ws)
                     last_refresh = now
 

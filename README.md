@@ -266,6 +266,7 @@ python -m cross_arb_bot run --interval 20
 - `market_filter.expiry_tolerance_seconds`
 - `runtime.poll_interval_seconds`
 - `runtime.recheck_delay_seconds`
+- `runtime.watch_universe_refresh_seconds` — как часто `watch` пересканирует universe рынков; live-цены между ресканами продолжают идти по WS
 
 Research notes:
 

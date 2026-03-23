@@ -32,6 +32,7 @@ market_filter:
 runtime:
   poll_interval_seconds: 20
   recheck_delay_seconds: 1.0
+  watch_universe_refresh_seconds: 120
 
 db:
   path: "data/real_arb_bot.db"

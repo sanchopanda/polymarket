@@ -104,6 +104,9 @@
 - `dry_run: false` — включить для режима без реальных ордеров
 - `cooldown_seconds` — пауза между сделками
 
+Практика для `real_arb_bot watch`:
+- universe refresh настраивается через `runtime.watch_universe_refresh_seconds`; частые price-update всё равно приходят через WS, так что discovery можно держать заметно реже
+
 Переменные `.env` для `real_arb_bot`:
 - `WALLET_PRIVATE_KEY` — Polymarket кошелёк
 - `WALLET_PROXY` — прокси (опционально)
