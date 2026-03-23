@@ -16,8 +16,17 @@ def _load_config(path: str) -> dict:
 
 
 def _make_engine(config: dict):
-    from real_arb_bot.db import RealArbDB
-    from real_arb_bot.engine import RealArbEngine
+    try:
+        from real_arb_bot.db import RealArbDB
+        from real_arb_bot.engine import RealArbEngine
+    except ModuleNotFoundError as exc:
+        missing = exc.name or "unknown"
+        raise SystemExit(
+            "[deps] Не хватает Python-пакета: "
+            f"{missing}\n"
+            "Установи зависимости в активированном venv:\n"
+            "  pip install -e \".[dev]\""
+        ) from exc
     db = RealArbDB(config["db"]["path"])
     return RealArbEngine(config, db)
 

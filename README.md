@@ -26,13 +26,14 @@ python -m pip install --upgrade pip setuptools wheel
 pip install -e ".[dev]"
 ```
 
-В текущем `pyproject.toml` описаны только зависимости основного Polymarket-бота. Для real trading и части диагностических скриптов дополнительно понадобятся пакеты вроде `web3`, `eth-account` и `py-clob-client`.
+`pip install -e ".[dev]"` теперь ставит и runtime-зависимости для `arb_bot`, `cross_arb_bot` и `real_arb_bot`, включая `cryptography`, `web3`, `eth-account`, `py-clob-client` и Telegram-клиент `pyTelegramBotAPI`.
 
 Важно:
 
-- используй Python `>= 3.9.10`, иначе `py-clob-client` не установится
+- используй Python `>= 3.9.10`; на `3.9.0-3.9.9` `py-clob-client` не установится и `real_arb_bot`/`cross_arb_bot` не стартуют
 - после активации `venv` запускай ботов через `python -m ...`
 - если `python3.10` у тебя не установлен, сначала проверь доступные версии: `python3.10 --version`, `python3.11 --version`
+- если до этого venv уже был создан, после обновления репозитория повторно выполни `pip install -e ".[dev]"`, иначе новые зависимости не подтянутся
 
 ## Основной бот: `python -m src.main`
 
