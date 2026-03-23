@@ -350,6 +350,19 @@ class RealArbWatchRunner:
     def _watch_key(self, opp: CrossVenueOpportunity) -> str:
         return f"{opp.pair_key}|{opp.buy_yes_venue}|{opp.buy_no_venue}"
 
+    def _paired_watch_items(self, pair_key: str) -> list[WatchedPair]:
+        watched = self.watch_by_pair_key.get(pair_key)
+        if watched is None:
+            return []
+        base_pair_key = watched.opportunity.pair_key
+        items = [
+            item
+            for item in self.watch_by_pair_key.values()
+            if item.opportunity.pair_key == base_pair_key
+        ]
+        items.sort(key=lambda item: (item.opportunity.buy_yes_venue, item.opportunity.buy_no_venue))
+        return items
+
     def _build_tracking_candidates(self, matches: list[MatchedMarketPair]) -> list[CrossVenueOpportunity]:
         candidates: list[CrossVenueOpportunity] = []
         stake_per_pair_usd = float(self.engine.trading["stake_per_pair_usd"])
@@ -446,6 +459,41 @@ class RealArbWatchRunner:
             f"              KA live: yes={kalshi_yes} no={kalshi_no}"
         )
 
+    def _pair_live_side_summaries(
+        self,
+        pair_key: str,
+        yes_book: TopOfBook,
+        no_book: TopOfBook,
+        kalshi_live: KalshiTopOfBook | None,
+    ) -> str:
+        lines: list[str] = []
+        for item in self._paired_watch_items(pair_key):
+            opp = item.opportunity
+            rough_yes = (
+                yes_book.best_ask if opp.buy_yes_venue == "polymarket"
+                else (kalshi_live.best_yes_ask if kalshi_live else item.matched.kalshi.yes_ask)
+            )
+            rough_no = (
+                no_book.best_ask if opp.buy_no_venue == "polymarket"
+                else (kalshi_live.best_no_ask if kalshi_live else item.matched.kalshi.no_ask)
+            )
+            lines.append(
+                f"{opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO -> "
+                f"rough_yes={rough_yes:.4f} rough_no={rough_no:.4f} rough_edge={1.0 - (rough_yes + rough_no):.4f}"
+            )
+        return "\n".join(lines)
+
+    def _pair_snapshot_side_summaries(self, pair_key: str) -> str:
+        lines: list[str] = []
+        for item in self._paired_watch_items(pair_key):
+            opp = item.opportunity
+            lines.append(
+                f"{opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO -> "
+                f"ask_sum={opp.ask_sum:.4f} edge={opp.edge_per_share:.4f} "
+                f"shares={opp.shares:.2f} cost=${opp.total_cost:.2f}"
+            )
+        return "\n".join(lines)
+
     def _passes_high_edge_price_filter(self, opp: CrossVenueOpportunity) -> bool:
         if opp.edge_per_share <= self.HIGH_EDGE_THRESHOLD:
             return True
@@ -503,7 +551,9 @@ class RealArbWatchRunner:
                 pair_key,
                 f"[Watch][SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
                 f"              reason=rough_edge_low ({rough_edge:.4f} < {self.engine.trading['min_lock_edge']:.4f})\n"
-                f"              {rough_summary}",
+                f"              {rough_summary}\n"
+                f"              обе стороны:\n"
+                f"              {self._pair_live_side_summaries(pair_key, yes_book, no_book, kalshi_live).replace(chr(10), chr(10) + '              ')}",
             )
             return
         if rough_edge > self.engine.trading["max_lock_edge"]:
@@ -514,7 +564,9 @@ class RealArbWatchRunner:
                     f"[Watch][SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
                     f"              reason=high_edge_same_side "
                     f"(edge={rough_edge:.4f}, yes={rough_yes:.4f}, no={rough_no:.4f})\n"
-                    f"              {rough_summary}",
+                    f"              {rough_summary}\n"
+                    f"              обе стороны:\n"
+                    f"              {self._pair_live_side_summaries(pair_key, yes_book, no_book, kalshi_live).replace(chr(10), chr(10) + '              ')}",
                 )
                 return
 
@@ -530,7 +582,9 @@ class RealArbWatchRunner:
                     f"[Watch][SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
                     f"              reason={reason}\n"
                     f"              snapshot: ask_sum={opp.ask_sum:.4f} edge={opp.edge_per_share:.4f} "
-                    f"shares={opp.shares:.2f} cost=${opp.total_cost:.2f}",
+                    f"shares={opp.shares:.2f} cost=${opp.total_cost:.2f}\n"
+                    f"              обе стороны:\n"
+                    f"              {self._pair_snapshot_side_summaries(pair_key).replace(chr(10), chr(10) + '              ')}",
                 )
                 return
 
