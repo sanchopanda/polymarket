@@ -102,8 +102,13 @@ class TelegramNotifier:
         execution_status: str,
         kalshi_fill: float = 0.0,
         pm_fill: float = 0.0,
+        is_paper: bool = False,
     ) -> None:
-        if execution_status == "both_filled":
+        paper_tag = " [PAPER]" if is_paper else ""
+        if is_paper:
+            icon = "📝"
+            fill_line = "paper-трейд (реальных ордеров нет)"
+        elif execution_status == "both_filled":
             icon = "✅"
             fill_line = f"Kalshi fill: {kalshi_fill:.4f} | PM fill: {pm_fill:.4f}"
         elif execution_status == "orphaned_kalshi":
@@ -114,7 +119,7 @@ class TelegramNotifier:
             fill_line = f"Статус: {execution_status}"
 
         text = (
-            f"{icon} <b>ОТКРЫТА: {symbol}</b>\n"
+            f"{icon} <b>ОТКРЫТА{paper_tag}: {symbol}</b>\n"
             f"{yes_venue}:YES @ {yes_ask:.4f} + {no_venue}:NO @ {no_ask:.4f}\n"
             f"ask_sum={ask_sum:.4f} | edge={edge:.4f}\n"
             f"cost=${cost:.2f} | ожид. прибыль=${expected_profit:.2f}\n"
@@ -129,7 +134,9 @@ class TelegramNotifier:
         kalshi_result: str,
         pnl: float,
         lock_valid: bool,
+        is_paper: bool = False,
     ) -> None:
+        paper_tag = " [PAPER]" if is_paper else ""
         if lock_valid:
             icon = "💰" if pnl > 0 else "📉"
             validity = "арбитраж ✓"
@@ -138,7 +145,7 @@ class TelegramNotifier:
             validity = "ложный матч!"
 
         text = (
-            f"{icon} <b>РЕЗОЛВ: {symbol}</b>\n"
+            f"{icon} <b>РЕЗОЛВ{paper_tag}: {symbol}</b>\n"
             f"PM={pm_result} | Kalshi={kalshi_result} | {validity}\n"
             f"P&L: <b>${pnl:+.2f}</b>"
         )

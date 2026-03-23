@@ -378,6 +378,7 @@ class RealArbDB:
             kalshi_result=d.get("kalshi_result"),
             lock_valid=bool(d["lock_valid"]) if d.get("lock_valid") is not None else None,
             winning_side=d.get("winning_side"),
+            is_paper=bool(d.get("is_paper", 0)),
             yes_filled_shares=d.get("yes_filled_shares"),
             yes_avg_price=d.get("yes_avg_price"),
             yes_best_ask=d.get("yes_best_ask"),
