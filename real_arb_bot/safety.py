@@ -12,6 +12,8 @@ class SafetyGuard:
         s = config["safety"]
         self.max_trade_size_usd: float = float(s["max_trade_size_usd"])
         self.min_total_balance_usd: float = float(s.get("min_total_balance_usd", 0.0))
+        self.min_leg_price: float = float(s.get("min_leg_price", 0.0))
+        self.max_leg_price: float = float(s.get("max_leg_price", 1.0))
         self.min_balance_polymarket: float = float(s["min_balance_polymarket"])
         self.min_balance_kalshi: float = float(s["min_balance_kalshi"])
         self.cooldown_seconds: float = float(s["cooldown_seconds"])
@@ -44,6 +46,17 @@ class SafetyGuard:
 
         if opp.total_cost > self.max_trade_size_usd:
             return False, f"trade_too_large (${opp.total_cost:.2f} > ${self.max_trade_size_usd})"
+
+        if opp.yes_ask < self.min_leg_price or opp.no_ask < self.min_leg_price:
+            return False, (
+                f"leg_price_too_low "
+                f"(yes={opp.yes_ask:.4f}, no={opp.no_ask:.4f}, min={self.min_leg_price:.4f})"
+            )
+        if opp.yes_ask > self.max_leg_price or opp.no_ask > self.max_leg_price:
+            return False, (
+                f"leg_price_too_high "
+                f"(yes={opp.yes_ask:.4f}, no={opp.no_ask:.4f}, max={self.max_leg_price:.4f})"
+            )
 
         total_balance = pm_balance + kalshi_balance
         if total_balance < self.min_total_balance_usd:

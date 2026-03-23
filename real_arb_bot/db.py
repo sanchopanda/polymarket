@@ -333,6 +333,50 @@ class RealArbDB:
         ).fetchall()
         return [self._row_to_position(r) for r in rows]
 
+    def get_positions_pending_redeem_retry(self) -> list[CrossPosition]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM positions
+            WHERE status='resolved'
+              AND is_paper=0
+              AND polymarket_redeem_tx IS NULL
+              AND (
+                    (venue_yes='polymarket' AND polymarket_result='yes')
+                 OR (venue_no='polymarket' AND polymarket_result='no')
+              )
+            ORDER BY resolved_at ASC
+            """
+        ).fetchall()
+        return [self._row_to_position(r) for r in rows]
+
+    def update_polymarket_redeem(
+        self,
+        position_id: str,
+        redeem_tx: str,
+        redeem_gas_cost: float | None,
+        redeem_ms: float | None,
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE positions
+            SET polymarket_redeem_tx=?,
+                polymarket_redeem_gas_cost=?,
+                polymarket_redeem_ms=?
+            WHERE id=?
+            """,
+            (redeem_tx, redeem_gas_cost, redeem_ms, position_id),
+        )
+        self.conn.commit()
+        self.audit(
+            "polymarket_redeem_recorded",
+            position_id,
+            {
+                "tx": redeem_tx,
+                "gas_cost": redeem_gas_cost,
+                "redeem_ms": redeem_ms,
+            },
+        )
+
     def get_orphaned_positions(self) -> list[dict]:
         rows = self.conn.execute(
             "SELECT * FROM positions WHERE execution_status IN ('orphaned_kalshi','orphaned_polymarket') ORDER BY opened_at DESC"

@@ -34,6 +34,8 @@ class PositionResolver:
             if position.expiry > now:
                 continue
             self._resolve_one(position)
+        for position in self.db.get_positions_pending_redeem_retry():
+            self._retry_redeem(position)
 
     def _resolve_one(self, position) -> None:
         # Проверяем paper позиции
@@ -98,12 +100,12 @@ class PositionResolver:
         pnl = (kalshi_payout + pm_payout) - (kalshi_cost + pm_cost)
         winning_side = "yes" if yes_wins and not no_wins else ("no" if no_wins and not yes_wins else "mismatch")
 
-        # Polymarket: нужен redeem
+        # Polymarket redeem нужен только если наша PM-ногa выиграла.
         redeem_tx = None
         redeem_gas = None
         redeem_ms = None
         pm_payout_real = 0.0
-        if position.venue_yes == "polymarket" or position.venue_no == "polymarket":
+        if pm_won and (position.venue_yes == "polymarket" or position.venue_no == "polymarket"):
             pm_market_id = position.market_yes if position.venue_yes == "polymarket" else position.market_no
             print(f"[resolve] Polymarket redeem: {pm_market_id}")
             redeem = self.pm.redeem(pm_market_id)
@@ -114,7 +116,22 @@ class PositionResolver:
                 pm_payout_real = redeem.payout_usdc
                 print(f"[resolve] PM payout: ${pm_payout_real:.2f}")
             else:
-                print(f"[resolve] redeem failed: {redeem.error}")
+                print(
+                    f"[resolve] redeem failed, will retry later: "
+                    f"{redeem.error or 'unknown_error'}"
+                )
+                self.db.audit(
+                    "redeem_retry_pending",
+                    position.id,
+                    {
+                        "symbol": position.symbol,
+                        "market_id": pm_market_id,
+                        "pm_result": pm_result,
+                        "kalshi_result": kalshi_result,
+                        "error": redeem.error or "unknown_error",
+                    },
+                )
+                return
 
         # actual_pnl из redeem ненадёжен: Polymarket часто авто-зачисляет до нашего redeem
         # Используем расчётный pnl как actual — он основан на реальных fills
@@ -190,6 +207,36 @@ class PositionResolver:
                 pnl=pnl,
                 lock_valid=lock_valid,
                 is_paper=True,
+            )
+
+    def _retry_redeem(self, position) -> None:
+        pm_market_id = position.market_yes if position.venue_yes == "polymarket" else position.market_no
+        print(f"[resolve][retry] Polymarket redeem: {pm_market_id} | pos={position.id[:8]}")
+        redeem = self.pm.redeem(pm_market_id)
+        if redeem.success:
+            self.db.update_polymarket_redeem(
+                position_id=position.id,
+                redeem_tx=redeem.tx_hash,
+                redeem_gas_cost=redeem.gas_cost_pol,
+                redeem_ms=redeem.total_ms,
+            )
+            print(
+                f"[resolve][retry] redeem OK | tx={redeem.tx_hash[:10]}... "
+                f"| payout=${redeem.payout_usdc:.2f}"
+            )
+        else:
+            print(
+                f"[resolve][retry] redeem still failing: "
+                f"{redeem.error or 'unknown_error'}"
+            )
+            self.db.audit(
+                "redeem_retry_failed",
+                position.id,
+                {
+                    "symbol": position.symbol,
+                    "market_id": pm_market_id,
+                    "error": redeem.error or "unknown_error",
+                },
             )
 
     def _check_polymarket(self, position) -> tuple[str | None, str | None]:

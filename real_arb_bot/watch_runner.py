@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from arb_bot.kalshi_ws import KalshiTopOfBook, KalshiWebSocketClient
 from arb_bot.ws import MarketWebSocketClient, TopOfBook
@@ -20,16 +21,13 @@ class WatchedPair:
 
 
 class RealArbWatchRunner:
-    DEFAULT_UNIVERSE_REFRESH_SECONDS = 300
     STATUS_INTERVAL_SECONDS = 15
     MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     HIGH_EDGE_THRESHOLD = 0.15
+    UNIVERSE_REFRESH_MINUTES = {1, 16, 31, 46}
 
     def __init__(self, engine: RealArbEngine) -> None:
         self.engine = engine
-        self.universe_refresh_seconds = float(
-            engine.runtime.get("watch_universe_refresh_seconds", self.DEFAULT_UNIVERSE_REFRESH_SECONDS)
-        )
         self.live_books: dict[str, TopOfBook] = {}
         self.live_books_kalshi: dict[str, KalshiTopOfBook] = {}
         self.watch_by_pair_key: dict[str, WatchedPair] = {}
@@ -39,18 +37,18 @@ class RealArbWatchRunner:
         self._signal_lock = threading.Lock()
         self._last_skip_log: dict[str, float] = {}
         self._SKIP_LOG_INTERVAL = 30.0
+        self._last_refresh_slot: tuple[int, int, int, int, int] | None = None
 
     def run(self) -> None:
         ws: MarketWebSocketClient | None = None
-        last_refresh = 0.0
         last_status = 0.0
 
         try:
             while True:
                 now = time.time()
-                if ws is None or (now - last_refresh) >= self.universe_refresh_seconds:
+                if ws is None or self._should_refresh_universe():
                     ws = self._refresh_watchlist(prev_ws=ws)
-                    last_refresh = now
+                    self._mark_refresh_slot()
 
                 if (now - last_status) >= self.STATUS_INTERVAL_SECONDS:
                     self._print_status()
@@ -64,6 +62,19 @@ class RealArbWatchRunner:
                 ws.stop()
             if self._kalshi_ws is not None:
                 self._kalshi_ws.stop()
+
+    def _current_refresh_slot(self) -> tuple[int, int, int, int, int] | None:
+        now = datetime.now(timezone.utc)
+        if now.minute not in self.UNIVERSE_REFRESH_MINUTES:
+            return None
+        return (now.year, now.month, now.day, now.hour, now.minute)
+
+    def _should_refresh_universe(self) -> bool:
+        slot = self._current_refresh_slot()
+        return slot is not None and slot != self._last_refresh_slot
+
+    def _mark_refresh_slot(self) -> None:
+        self._last_refresh_slot = self._current_refresh_slot()
 
     def _refresh_watchlist(self, prev_ws: MarketWebSocketClient | None = None) -> MarketWebSocketClient | None:
         from cross_arb_bot.matcher import build_opportunities
@@ -569,20 +580,6 @@ class RealArbWatchRunner:
             if self.engine.db.has_open_position(opp.pair_key, opp.buy_yes_venue, opp.buy_no_venue):
                 return
 
-            balances = self.engine.get_real_balances()
-            ok, reason = self.engine.safety.can_trade(opp, balances["polymarket"], balances["kalshi"])
-            if not ok:
-                self._skip_log(
-                    pair_key,
-                    f"[Watch][SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
-                    f"              reason={reason}\n"
-                    f"              snapshot: ask_sum={opp.ask_sum:.4f} edge={opp.edge_per_share:.4f} "
-                    f"shares={opp.shares:.2f} cost=${opp.total_cost:.2f}\n"
-                    f"              обе стороны:\n"
-                    f"              {self._pair_snapshot_side_summaries(pair_key).replace(chr(10), chr(10) + '              ')}",
-                )
-                return
-
             executed, yes_leg, no_leg = self.engine._apply_execution_pricing(opp, matched)
             if executed is None:
                 self._skip_log(
@@ -613,6 +610,7 @@ class RealArbWatchRunner:
                 )
                 return
 
+            balances = self.engine.get_real_balances()
             ok2, reason2 = self.engine.safety.can_trade(executed, balances["polymarket"], balances["kalshi"])
             if not ok2:
                 self._skip_log(
