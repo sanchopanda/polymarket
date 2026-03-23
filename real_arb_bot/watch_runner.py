@@ -22,6 +22,7 @@ class RealArbWatchRunner:
     UNIVERSE_REFRESH_SECONDS = 60
     STATUS_INTERVAL_SECONDS = 15
     MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    HIGH_EDGE_THRESHOLD = 0.15
 
     def __init__(self, engine: RealArbEngine) -> None:
         self.engine = engine
@@ -67,12 +68,13 @@ class RealArbWatchRunner:
         self.engine.scan(execute=False)
         pm_markets, kalshi_markets, matches, opportunities = self.engine.last_snapshot
 
-        # Подписываемся на ВСЕ сматченные рынки, а не только на текущие opportunity
+        # Для watch подписываемся на все сматченные пары с валидными ценами.
+        # Торговые фильтры применяем уже в момент входа, а не при построении подписки.
         max_edge = self.engine.trading["max_lock_edge"]
-        all_candidates = build_opportunities(
+        tracking_candidates = build_opportunities(
             matches=matches,
             min_lock_edge=-1.0,
-            max_lock_edge=max_edge,
+            max_lock_edge=999.0,
             stake_per_pair_usd=self.engine.trading["stake_per_pair_usd"],
         )
         match_index = {
@@ -81,16 +83,15 @@ class RealArbWatchRunner:
             if m.kalshi.venue == "kalshi"
         }
 
-        # Логируем matched пары без кандидатов
-        candidate_keys = {c.pair_key for c in all_candidates}
+        # Логируем matched пары без немедленного trade-кандидата, но продолжаем их отслеживать.
+        trade_candidate_keys = {c.pair_key for c in opportunities}
         for m in matches:
             pair_key = f"{m.polymarket.market_id}:{m.kalshi.market_id}"
-            if pair_key not in candidate_keys:
+            if pair_key not in trade_candidate_keys:
                 pm, ka = m.polymarket, m.kalshi
-                best_edge = max(
-                    1.0 - (pm.yes_ask + ka.no_ask),
-                    1.0 - (ka.yes_ask + pm.no_ask),
-                )
+                pm_yes_ka_no_edge = 1.0 - (pm.yes_ask + ka.no_ask)
+                ka_yes_pm_no_edge = 1.0 - (ka.yes_ask + pm.no_ask)
+                best_edge = max(pm_yes_ka_no_edge, ka_yes_pm_no_edge)
                 reasons = []
                 if pm.yes_ask > 0 and ka.yes_ask > 0:
                     pm_bullish = pm.yes_ask > 0.5
@@ -106,12 +107,17 @@ class RealArbWatchRunner:
                 if is_edge_too_high:
                     reasons.append(f"edge_too_high({best_edge:.4f}>{max_edge})")
                 if not reasons:
-                    reasons.append(f"edge_negative({best_edge:.4f})")
+                    reasons.append(
+                        "no_trade_candidate"
+                        f"(pm_yes+ka_no={pm_yes_ka_no_edge:.4f}, ka_yes+pm_no={ka_yes_pm_no_edge:.4f})"
+                    )
                 print(
-                    f"[Watch] Match не отслеживается: {pm.symbol}\n"
-                    f"        PM: {pm.title} | id={pm.market_id} | yes={pm.yes_ask:.4f} no={pm.no_ask:.4f}\n"
-                    f"        KA: {ka.title} | ticker={ka.market_id} | yes={ka.yes_ask:.4f} no={ka.no_ask:.4f}\n"
-                    f"        причина: {', '.join(reasons)}"
+                    f"[Watch] Match пока не торгуем: {pm.symbol}\n"
+                    f"        {self._snapshot_summary(m)}\n"
+                    f"        причина: {', '.join(reasons)}\n"
+                    f"        стороны: "
+                    f"{self._snapshot_side_summary('PM YES + KA NO', pm.yes_ask, ka.no_ask, min(pm.yes_depth, ka.no_depth))}; "
+                    f"{self._snapshot_side_summary('KA YES + PM NO', ka.yes_ask, pm.no_ask, min(ka.yes_depth, pm.no_depth))}"
                 )
                 # edge_too_high и нет других причин → записываем paper позицию для статистики
                 if is_edge_too_high and len(reasons) == 1:
@@ -145,23 +151,24 @@ class RealArbWatchRunner:
         pairs_by_kalshi: dict[str, set[str]] = {}
         asset_ids: list[str] = []
 
-        for opp in all_candidates:
+        for opp in tracking_candidates:
             matched = match_index.get(opp.pair_key)
             if matched is None:
                 continue
             if opp.buy_yes_venue not in {"polymarket", "kalshi"} or opp.buy_no_venue not in {"polymarket", "kalshi"}:
                 continue
 
-            watched[opp.pair_key] = WatchedPair(opportunity=opp, matched=matched)
+            watch_key = self._watch_key(opp)
+            watched[watch_key] = WatchedPair(opportunity=opp, matched=matched)
             for token_id in [matched.polymarket.yes_token_id, matched.polymarket.no_token_id]:
                 if not token_id:
                     continue
                 asset_ids.append(token_id)
-                pairs_by_asset.setdefault(token_id, set()).add(opp.pair_key)
+                pairs_by_asset.setdefault(token_id, set()).add(watch_key)
 
             kalshi_ticker = matched.kalshi.market_id
             if kalshi_ticker:
-                pairs_by_kalshi.setdefault(kalshi_ticker, set()).add(opp.pair_key)
+                pairs_by_kalshi.setdefault(kalshi_ticker, set()).add(watch_key)
 
         self.watch_by_pair_key = watched
         self.pairs_by_asset_id = pairs_by_asset
@@ -217,23 +224,60 @@ class RealArbWatchRunner:
 
             ok, reason = self.engine.safety.can_trade(opp, balances["polymarket"], balances["kalshi"])
             if not ok:
-                print(f"[Watch][IMM-SKIP] {opp.symbol} | {reason}")
+                print(
+                    f"[Watch][IMM-SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+                    f"                  reason={reason}\n"
+                    f"                  snapshot: ask_sum={opp.ask_sum:.4f} edge={opp.edge_per_share:.4f} "
+                    f"shares={opp.shares:.2f} cost=${opp.total_cost:.2f}"
+                )
                 continue
 
             executed, yes_leg, no_leg = self.engine._apply_execution_pricing(opp, matched)
             if executed is None:
+                print(
+                    f"[Watch][IMM-SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+                    f"                  reason=insufficient_liquidity\n"
+                    f"                  YES leg: {self.engine._format_leg_summary(yes_leg)}\n"
+                    f"                  NO  leg: {self.engine._format_leg_summary(no_leg)}"
+                )
                 continue
             if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
-                print(f"[Watch][IMM-SKIP] {opp.symbol} | edge_disappeared ({executed.edge_per_share:.4f})")
+                print(
+                    f"[Watch][IMM-SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+                    f"                  reason=edge_disappeared ({executed.edge_per_share:.4f} < {self.engine.trading['min_lock_edge']:.4f})\n"
+                    f"                  YES leg: {self.engine._format_leg_summary(yes_leg)}\n"
+                    f"                  NO  leg: {self.engine._format_leg_summary(no_leg)}"
+                )
+                continue
+            if not self._passes_high_edge_price_filter(executed):
+                print(
+                    f"[Watch][IMM-SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+                    f"                  reason=high_edge_same_side "
+                    f"(edge={executed.edge_per_share:.4f}, yes={executed.yes_ask:.4f}, no={executed.no_ask:.4f})\n"
+                    f"                  YES leg: {self.engine._format_leg_summary(yes_leg)}\n"
+                    f"                  NO  leg: {self.engine._format_leg_summary(no_leg)}"
+                )
                 continue
 
             ok2, reason2 = self.engine.safety.can_trade(executed, balances["polymarket"], balances["kalshi"])
             if not ok2:
-                print(f"[Watch][IMM-SKIP] {opp.symbol} | {reason2} (after exec pricing)")
+                print(
+                    f"[Watch][IMM-SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+                    f"                  reason={reason2} (after execution pricing)\n"
+                    f"                  executed: ask_sum={executed.ask_sum:.4f} edge={executed.edge_per_share:.4f} "
+                    f"shares={executed.shares:.2f} cost=${executed.total_cost:.2f}\n"
+                    f"                  YES leg: {self.engine._format_leg_summary(yes_leg)}\n"
+                    f"                  NO  leg: {self.engine._format_leg_summary(no_leg)}"
+                )
                 continue
 
             if not self.engine.safety.confirm_trade(executed):
-                print(f"[Watch][IMM-SKIP] {opp.symbol} | not_confirmed")
+                print(
+                    f"[Watch][IMM-SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+                    f"                  reason=not_confirmed\n"
+                    f"                  executed: ask_sum={executed.ask_sum:.4f} edge={executed.edge_per_share:.4f} "
+                    f"shares={executed.shares:.2f} cost=${executed.total_cost:.2f}"
+                )
                 continue
 
             self.engine._execute_and_record(executed, matched, yes_leg, no_leg)
@@ -304,6 +348,48 @@ class RealArbWatchRunner:
         self._last_skip_log[pair_key] = now
         print(msg)
 
+    def _watch_key(self, opp: CrossVenueOpportunity) -> str:
+        return f"{opp.pair_key}|{opp.buy_yes_venue}|{opp.buy_no_venue}"
+
+    def _snapshot_summary(self, matched: MatchedMarketPair) -> str:
+        pm = matched.polymarket
+        ka = matched.kalshi
+        return (
+            f"PM: {pm.title} | id={pm.market_id} | yes={pm.yes_ask:.4f} no={pm.no_ask:.4f} "
+            f"| depth_yes={pm.yes_depth:.2f} depth_no={pm.no_depth:.2f}\n"
+            f"        KA: {ka.title} | ticker={ka.market_id} | yes={ka.yes_ask:.4f} no={ka.no_ask:.4f} "
+            f"| depth_yes={ka.yes_depth:.2f} depth_no={ka.no_depth:.2f}"
+        )
+
+    def _snapshot_side_summary(self, label: str, yes_ask: float, no_ask: float, max_shares: float) -> str:
+        ask_sum = yes_ask + no_ask
+        edge = 1.0 - ask_sum
+        return f"{label}: yes={yes_ask:.4f} no={no_ask:.4f} ask_sum={ask_sum:.4f} edge={edge:.4f} max_shares={max_shares:.2f}"
+
+    def _rough_side_summary(
+        self,
+        opp: CrossVenueOpportunity,
+        rough_yes: float,
+        rough_no: float,
+        yes_book: TopOfBook,
+        no_book: TopOfBook,
+        kalshi_live: KalshiTopOfBook | None,
+    ) -> str:
+        rough_edge = 1.0 - (rough_yes + rough_no)
+        kalshi_yes = f"{kalshi_live.best_yes_ask:.4f}" if kalshi_live else "n/a"
+        kalshi_no = f"{kalshi_live.best_no_ask:.4f}" if kalshi_live else "n/a"
+        return (
+            f"{opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO | "
+            f"rough_yes={rough_yes:.4f} rough_no={rough_no:.4f} rough_edge={rough_edge:.4f}\n"
+            f"              PM live: yes={yes_book.best_ask:.4f} no={no_book.best_ask:.4f}\n"
+            f"              KA live: yes={kalshi_yes} no={kalshi_no}"
+        )
+
+    def _passes_high_edge_price_filter(self, opp: CrossVenueOpportunity) -> bool:
+        if opp.edge_per_share <= self.HIGH_EDGE_THRESHOLD:
+            return True
+        return (opp.yes_ask > 0.5) != (opp.no_ask > 0.5)
+
     def _maybe_open_pair(self, pair_key: str) -> None:
         watched = self.watch_by_pair_key.get(pair_key)
         if watched is None:
@@ -315,17 +401,29 @@ class RealArbWatchRunner:
             return
         open_count = len(self.engine.db.get_open_positions())
         if open_count >= self.engine.trading["max_open_pairs"]:
-            self._skip_log(pair_key, f"[Watch][SKIP] {opp.symbol} | reason=max_open_pairs ({open_count})")
+            self._skip_log(
+                pair_key,
+                f"[Watch][SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+                f"              reason=max_open_pairs ({open_count})",
+            )
             return
 
         yes_book = self.live_books.get(matched.polymarket.yes_token_id or "")
         no_book = self.live_books.get(matched.polymarket.no_token_id or "")
         if yes_book is None or no_book is None:
             missing = [s for s, b in [("YES", yes_book), ("NO", no_book)] if b is None]
-            self._skip_log(pair_key, f"[Watch][SKIP] {opp.symbol} | reason=missing_ws_book ({', '.join(missing)})")
+            self._skip_log(
+                pair_key,
+                f"[Watch][SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+                f"              reason=missing_ws_book ({', '.join(missing)})",
+            )
             return
         if yes_book.best_ask <= 0 or no_book.best_ask <= 0:
-            self._skip_log(pair_key, f"[Watch][SKIP] {opp.symbol} | reason=invalid_ask (yes={yes_book.best_ask}, no={no_book.best_ask})")
+            self._skip_log(
+                pair_key,
+                f"[Watch][SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+                f"              reason=invalid_pm_live_ask (yes={yes_book.best_ask}, no={no_book.best_ask})",
+            )
             return
 
         kalshi_live = self.live_books_kalshi.get(matched.kalshi.market_id or "")
@@ -338,13 +436,26 @@ class RealArbWatchRunner:
             else (kalshi_live.best_no_ask if kalshi_live else matched.kalshi.no_ask)
         )
         rough_edge = 1.0 - (rough_yes + rough_no)
+        rough_summary = self._rough_side_summary(opp, rough_yes, rough_no, yes_book, no_book, kalshi_live)
         if rough_edge < self.engine.trading["min_lock_edge"]:
             self._skip_log(
                 pair_key,
-                f"[Watch][SKIP] {opp.symbol} | reason=rough_edge_low ({rough_edge:.4f})"
-                f" | yes={rough_yes:.4f} no={rough_no:.4f}",
+                f"[Watch][SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+                f"              reason=rough_edge_low ({rough_edge:.4f} < {self.engine.trading['min_lock_edge']:.4f})\n"
+                f"              {rough_summary}",
             )
             return
+        if rough_edge > self.engine.trading["max_lock_edge"]:
+            rough_polarized = (rough_yes > 0.5) != (rough_no > 0.5)
+            if not rough_polarized:
+                self._skip_log(
+                    pair_key,
+                    f"[Watch][SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+                    f"              reason=high_edge_same_side "
+                    f"(edge={rough_edge:.4f}, yes={rough_yes:.4f}, no={rough_no:.4f})\n"
+                    f"              {rough_summary}",
+                )
+                return
 
         with self._signal_lock:
             if self.engine.db.has_open_position(opp.pair_key, opp.buy_yes_venue, opp.buy_no_venue):
@@ -353,7 +464,13 @@ class RealArbWatchRunner:
             balances = self.engine.get_real_balances()
             ok, reason = self.engine.safety.can_trade(opp, balances["polymarket"], balances["kalshi"])
             if not ok:
-                self._skip_log(pair_key, f"[Watch][SKIP] {opp.symbol} | reason={reason}")
+                self._skip_log(
+                    pair_key,
+                    f"[Watch][SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+                    f"              reason={reason}\n"
+                    f"              snapshot: ask_sum={opp.ask_sum:.4f} edge={opp.edge_per_share:.4f} "
+                    f"shares={opp.shares:.2f} cost=${opp.total_cost:.2f}",
+                )
                 return
 
             executed, yes_leg, no_leg = self.engine._apply_execution_pricing(opp, matched)
@@ -375,6 +492,16 @@ class RealArbWatchRunner:
                     f"              NO  leg: {self.engine._format_leg_summary(no_leg)}",
                 )
                 return
+            if not self._passes_high_edge_price_filter(executed):
+                self._skip_log(
+                    pair_key,
+                    f"[Watch][SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+                    f"              reason=high_edge_same_side "
+                    f"(edge={executed.edge_per_share:.4f}, yes={executed.yes_ask:.4f}, no={executed.no_ask:.4f})\n"
+                    f"              YES leg: {self.engine._format_leg_summary(yes_leg)}\n"
+                    f"              NO  leg: {self.engine._format_leg_summary(no_leg)}",
+                )
+                return
 
             ok2, reason2 = self.engine.safety.can_trade(executed, balances["polymarket"], balances["kalshi"])
             if not ok2:
@@ -388,7 +515,13 @@ class RealArbWatchRunner:
                 return
 
             if not self.engine.safety.confirm_trade(executed):
-                self._skip_log(pair_key, f"[Watch][SKIP] {opp.symbol} | reason=not_confirmed")
+                self._skip_log(
+                    pair_key,
+                    f"[Watch][SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+                    f"              reason=not_confirmed\n"
+                    f"              executed: ask_sum={executed.ask_sum:.4f} edge={executed.edge_per_share:.4f} "
+                    f"shares={executed.shares:.2f} cost=${executed.total_cost:.2f}",
+                )
                 return
 
             self.engine._execute_and_record(executed, matched, yes_leg, no_leg)

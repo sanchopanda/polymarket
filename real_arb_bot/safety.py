@@ -10,8 +10,8 @@ from real_arb_bot.db import RealArbDB
 class SafetyGuard:
     def __init__(self, config: dict, db: RealArbDB) -> None:
         s = config["safety"]
-        self.max_daily_loss_usd: float = float(s["max_daily_loss_usd"])
         self.max_trade_size_usd: float = float(s["max_trade_size_usd"])
+        self.min_total_balance_usd: float = float(s.get("min_total_balance_usd", 0.0))
         self.min_balance_polymarket: float = float(s["min_balance_polymarket"])
         self.min_balance_kalshi: float = float(s["min_balance_kalshi"])
         self.cooldown_seconds: float = float(s["cooldown_seconds"])
@@ -35,10 +35,6 @@ class SafetyGuard:
         if self.dry_run:
             return False, "dry_run"
 
-        daily_pnl = self.db.daily_realized_pnl()
-        if daily_pnl <= -self.max_daily_loss_usd:
-            return False, f"daily_loss_limit (${daily_pnl:.2f})"
-
         if opp.total_cost < 5.0:
             return False, f"trade_too_small (${opp.total_cost:.2f} < $5)"
 
@@ -48,6 +44,10 @@ class SafetyGuard:
 
         if opp.total_cost > self.max_trade_size_usd:
             return False, f"trade_too_large (${opp.total_cost:.2f} > ${self.max_trade_size_usd})"
+
+        total_balance = pm_balance + kalshi_balance
+        if total_balance < self.min_total_balance_usd:
+            return False, f"total_balance_low (${total_balance:.2f} < ${self.min_total_balance_usd:.2f})"
 
         pm_needed = (
             (opp.yes_ask * opp.shares if opp.buy_yes_venue == "polymarket" else 0.0)
