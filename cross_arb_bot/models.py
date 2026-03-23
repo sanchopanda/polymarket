@@ -134,6 +134,7 @@ class CrossPosition:
     polymarket_result: Optional[str] = None
     kalshi_result: Optional[str] = None
     lock_valid: Optional[bool] = None
+    is_paper: bool = False
 
 
 @dataclass

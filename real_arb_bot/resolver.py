@@ -182,6 +182,15 @@ class PositionResolver:
             f"[resolve][PAPER] {position.symbol} | pm={pm_result} kalshi={kalshi_result} "
             f"| lock_valid={lock_valid} | pnl=${pnl:+.2f} ({tag})"
         )
+        if self.notifier:
+            self.notifier.notify_resolve(
+                symbol=position.symbol,
+                pm_result=pm_result,
+                kalshi_result=kalshi_result,
+                pnl=pnl,
+                lock_valid=lock_valid,
+                is_paper=True,
+            )
 
     def _check_polymarket(self, position) -> tuple[str | None, str | None]:
         market_id = position.market_yes if position.venue_yes == "polymarket" else position.market_no

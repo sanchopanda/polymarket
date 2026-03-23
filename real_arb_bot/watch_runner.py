@@ -125,6 +125,20 @@ class RealArbWatchRunner:
                         if not self.engine.db.has_open_paper_position(p_opp.pair_key, p_opp.buy_yes_venue, p_opp.buy_no_venue):
                             self.engine.db.open_paper_position(p_opp)
                             print(f"[Watch][PAPER] {p_opp.symbol} | edge={p_opp.edge_per_share:.4f} | cost=${p_opp.total_cost:.2f} | exp_profit=${p_opp.expected_profit:.2f}")
+                            if self.engine.notifier:
+                                self.engine.notifier.notify_open(
+                                    symbol=p_opp.symbol,
+                                    yes_venue=p_opp.buy_yes_venue,
+                                    no_venue=p_opp.buy_no_venue,
+                                    yes_ask=p_opp.yes_ask,
+                                    no_ask=p_opp.no_ask,
+                                    ask_sum=p_opp.ask_sum,
+                                    edge=p_opp.edge_per_share,
+                                    cost=p_opp.total_cost,
+                                    expected_profit=p_opp.expected_profit,
+                                    execution_status="paper",
+                                    is_paper=True,
+                                )
 
         watched: dict[str, WatchedPair] = {}
         pairs_by_asset: dict[str, set[str]] = {}

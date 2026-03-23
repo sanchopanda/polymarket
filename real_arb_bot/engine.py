@@ -439,8 +439,9 @@ class RealArbEngine:
             lines.append("")
             lines.append("📌 <b>Открытые пары:</b>")
             for p in open_positions:
+                paper_tag = " [PAPER]" if p.is_paper else ""
                 lines.append(
-                    f"  {p.symbol} | {p.venue_yes}:YES + {p.venue_no}:NO"
+                    f"  {p.symbol}{paper_tag} | {p.venue_yes}:YES + {p.venue_no}:NO"
                     f" | ${p.total_cost:.2f} | открыта {p.opened_at.strftime('%m-%d %H:%M')}"
                 )
         if self.safety.dry_run:
