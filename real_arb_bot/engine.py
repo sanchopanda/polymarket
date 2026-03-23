@@ -175,19 +175,15 @@ class RealArbEngine:
             f"| cost=${opp.total_cost:.2f} | exp_profit=${opp.expected_profit:.2f}"
         )
 
-        # Передаём token_id через leg.market_id для Polymarket
-        pm_leg = yes_leg if opp.buy_yes_venue == "polymarket" else no_leg
-        kalshi_leg = yes_leg if opp.buy_yes_venue == "kalshi" else no_leg
+        # Прописываем правильный token_id в yes/no leg для Polymarket ноги
+        mapped_yes_leg = yes_leg
+        mapped_no_leg = no_leg
+        if opp.buy_yes_venue == "polymarket" and yes_leg and matched.polymarket.yes_token_id:
+            mapped_yes_leg = replace(yes_leg, market_id=matched.polymarket.yes_token_id)
+        if opp.buy_no_venue == "polymarket" and no_leg and matched.polymarket.no_token_id:
+            mapped_no_leg = replace(no_leg, market_id=matched.polymarket.no_token_id)
 
-        # Прописываем правильный token_id в market_id для Polymarket ноги
-        pm_token_id = (
-            matched.polymarket.yes_token_id if opp.buy_yes_venue == "polymarket"
-            else matched.polymarket.no_token_id
-        )
-        if pm_leg and pm_token_id:
-            pm_leg = replace(pm_leg, market_id=pm_token_id)
-
-        result: ExecutionResult = self.executor.execute_pair(opp, yes_leg if opp.buy_yes_venue == "kalshi" else no_leg, pm_leg)
+        result: ExecutionResult = self.executor.execute_pair(opp, mapped_yes_leg, mapped_no_leg)
 
         if result.execution_status == "both_filled":
             print(f"[OPEN] SUCCESS | kalshi={result.kalshi_order.shares_matched}@{result.kalshi_order.fill_price} | pm={result.polymarket_order.shares_matched}@{result.polymarket_order.fill_price}")
@@ -213,7 +209,9 @@ class RealArbEngine:
         if result.execution_status == "unwound_kalshi":
             buy_order = result.kalshi_order
             sell_order = result.unwind_order
-            if buy_order and sell_order and sell_order.shares_matched > 0:
+            if result.realized_pnl is not None:
+                unwind_pnl = result.realized_pnl
+            elif buy_order and sell_order and sell_order.shares_matched > 0:
                 # Реальная потеря = спред между покупкой и продажей + комиссии
                 buy_proceeds = buy_order.fill_price * sell_order.shares_matched
                 sell_proceeds = sell_order.fill_price * sell_order.shares_matched

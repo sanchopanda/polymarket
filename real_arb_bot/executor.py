@@ -18,6 +18,7 @@ class ExecutionResult:
     execution_status: str  # both_filled | orphaned_kalshi | failed
     reason: str = ""
     unwind_order: OrderResult | None = None  # заполняется при unwound_kalshi
+    realized_pnl: float | None = None
 
 
 class OrderExecutor:
@@ -68,6 +69,7 @@ class OrderExecutor:
         kalshi_price_cents = round(kalshi_leg.best_ask * 100) + self.kalshi_slippage_cents
         kalshi_price_cents = min(kalshi_price_cents, 99)  # не больше $0.99
         kalshi_count = max(1, math.floor(kalshi_leg.requested_shares))
+        kalshi_balance_before = self._safe_kalshi_balance()
 
         # Проверяем что edge всё ещё положительный с учётом slippage
         kalshi_price_with_slippage = kalshi_price_cents / 100.0
@@ -163,6 +165,7 @@ class OrderExecutor:
                 execution_status="unwound_kalshi" if unwind else "orphaned_kalshi",
                 reason=f"pm_amount_too_small (${pm_amount_usd:.2f})",
                 unwind_order=unwind,
+                realized_pnl=self._realized_unwind_pnl(kalshi_balance_before) if unwind else None,
             )
 
         self.db.audit("order_attempt", None, {
@@ -206,6 +209,7 @@ class OrderExecutor:
                 execution_status="unwound_kalshi" if unwind else "orphaned_kalshi",
                 reason=f"polymarket_exception: {e}" + (f" | kalshi_unwound" if unwind else ""),
                 unwind_order=unwind,
+                realized_pnl=self._realized_unwind_pnl(kalshi_balance_before) if unwind else None,
             )
 
         self.db.audit("order_result", None, {
@@ -236,6 +240,7 @@ class OrderExecutor:
                 execution_status="unwound_kalshi" if unwind else "orphaned_kalshi",
                 reason=f"polymarket_not_filled: {pm_order.status}" + (f" | kalshi_unwound" if unwind else ""),
                 unwind_order=unwind,
+                realized_pnl=self._realized_unwind_pnl(kalshi_balance_before) if unwind else None,
             )
 
         return ExecutionResult(
@@ -290,3 +295,17 @@ class OrderExecutor:
         except Exception as e:
             print(f"[executor] Unwind ERROR: {e}")
             return None
+
+    def _safe_kalshi_balance(self) -> float | None:
+        try:
+            return self.kalshi.get_balance()
+        except Exception:
+            return None
+
+    def _realized_unwind_pnl(self, balance_before: float | None) -> float | None:
+        if balance_before is None:
+            return None
+        balance_after = self._safe_kalshi_balance()
+        if balance_after is None:
+            return None
+        return round(balance_after - balance_before, 6)
