@@ -56,6 +56,7 @@ def build_opportunities(
         pm = item.polymarket
         kalshi = item.kalshi
 
+
         legs = [
             ("polymarket", "kalshi", pm.yes_ask, kalshi.no_ask, min(pm.yes_depth, kalshi.no_depth)),
             ("kalshi", "polymarket", kalshi.yes_ask, pm.no_ask, min(kalshi.yes_depth, pm.no_depth)),

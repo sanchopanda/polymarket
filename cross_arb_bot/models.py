@@ -77,11 +77,12 @@ class ExecutionLegInfo:
     side: str
     requested_shares: float
     filled_shares: float
-    available_shares: float
+    available_shares: float   # total book depth (all price levels)
     avg_price: float
     total_cost: float
     best_ask: float
     remaining_shares_after_fill: float
+    usable_shares: float = 0.0  # shares at price levels that preserve edge >= min_lock_edge
 
 
 @dataclass

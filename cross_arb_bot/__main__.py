@@ -6,6 +6,9 @@ import statistics
 import time
 
 import yaml
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from cross_arb_bot.db import CrossArbDB
 from cross_arb_bot.engine import CrossArbEngine

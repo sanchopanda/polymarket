@@ -6,7 +6,8 @@
 
 Репозиторий содержит:
 
-- `cross_arb_bot/` — кросс-маркет арбитражный бот (Polymarket ↔ Kalshi), paper trading;
+- `cross_arb_bot/` — кросс-маркет арбитражный бот (Polymarket ↔ Kalshi), **paper trading**;
+- `real_arb_bot/` — реальный арбитражный бот (Polymarket ↔ Kalshi), **real trading**;
 - `arb_bot/` — общий WebSocket клиент для Polymarket (зависимость `cross_arb_bot` и тестов);
 - `test_real_15m.py` — тестовый скрипт реальных ставок на Polymarket (сбор аналитики);
 - `test_real_kalshi.py` — тестовый скрипт реальных ставок на Kalshi (сбор аналитики);
@@ -85,6 +86,29 @@
   - [docs/hourly-above-arbitrage-research.md](docs/hourly-above-arbitrage-research.md)
 - для false-match/positive-EV reasoning есть отдельный документ:
   - [docs/false-match-positive-ev-research.md](docs/false-match-positive-ev-research.md)
+
+## Команды: `python3 -m real_arb_bot`
+
+- `status` — реальные балансы с обеих бирж + позиции + дневной P&L
+- `scan [--dry]` — найти арбитражные возможности, при `--dry` только показ без ордеров
+- `resolve` — резолюция/redeem истёкших позиций
+- `run [--interval INT]` — непрерывный цикл
+- `audit [--last N]` — аудит-лог всех API вызовов и решений
+- `orphans` — одноногие позиции, требующие ручного разбора
+
+Конфиг: `real_arb_bot/config.yaml`
+База: `data/real_arb_bot.db`
+
+Важные параметры `safety`:
+- `require_confirmation: true` — ручное подтверждение каждой сделки (рекомендуется на старте)
+- `dry_run: false` — включить для режима без реальных ордеров
+- `max_daily_loss_usd` — дневной лимит потерь
+- `cooldown_seconds` — пауза между сделками
+
+Переменные `.env` для `real_arb_bot`:
+- `WALLET_PRIVATE_KEY` — Polymarket кошелёк
+- `WALLET_PROXY` — прокси (опционально)
+- `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` — Kalshi API
 
 ## Тестовые скрипты
 

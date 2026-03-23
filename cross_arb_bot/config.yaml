@@ -3,7 +3,7 @@ trading:
   starting_balance_kalshi: 250.0
   stake_per_pair_usd: 100.0
   min_lock_edge: 0.04
-  max_lock_edge: 0.12
+  max_lock_edge: 0.30
   max_open_pairs: 5
   max_entries_per_pair: 3
   rebalance_threshold_usd: 120.0

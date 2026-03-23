@@ -76,6 +76,30 @@ class CrossArbEngine:
         threshold = float(self.trading["rebalance_threshold_usd"])
         return self.free_balance("polymarket") <= threshold and self.free_balance("kalshi") <= threshold
 
+    def auto_rebalance(self) -> None:
+        """Автоматическая ребалансировка: выравнивает балансы если разница > threshold."""
+        threshold = float(self.trading["rebalance_threshold_usd"])
+        pm_free = self.free_balance("polymarket")
+        kalshi_free = self.free_balance("kalshi")
+        diff = pm_free - kalshi_free
+        if abs(diff) < threshold:
+            return
+        transfer = abs(diff) / 2.0
+        if diff > 0:
+            from_v, to_v = "polymarket", "kalshi"
+        else:
+            from_v, to_v = "kalshi", "polymarket"
+        free_from = self.free_balance(from_v)
+        if free_from < transfer:
+            transfer = free_from * 0.5
+        if transfer < 10.0:
+            return
+        self.rebalance(from_v, to_v, round(transfer, 2), note="auto-rebalance")
+        print(
+            f"[Rebalance] ${transfer:.2f} {from_v} → {to_v}"
+            f" | PM=${self.free_balance('polymarket'):.2f} KA=${self.free_balance('kalshi'):.2f}"
+        )
+
     def scan(self, open_positions: bool = True) -> list[CrossVenueOpportunity]:
         pm_markets = self.pm_feed.fetch_markets()
         kalshi_markets, kalshi_error = self.kalshi_feed.fetch_markets()
@@ -571,8 +595,13 @@ class CrossArbEngine:
         elif opportunities:
             for opp in opportunities[:5]:
                 print(
-                    f"  {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO "
-                    f"| ask_sum={opp.ask_sum:.4f} | capital_used=${opp.capital_used:.2f} "
-                    f"| fees=${opp.total_fee:.2f} | expected_payout=${opp.expected_payout:.2f} "
-                    f"| expected_profit=${opp.expected_profit:.2f}"
+                    f"\n  [{opp.symbol}] {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO"
+                    f" | ask_sum={opp.ask_sum:.4f} | edge={opp.edge_per_share:.4f}"
+                    f" | cost=${opp.total_cost:.2f} | exp_profit=${opp.expected_profit:.2f}"
+                    f"\n    PM:     {opp.polymarket_title}"
+                    f"\n    Kalshi: {opp.kalshi_title}"
+                    f"\n    Expiry: {opp.expiry.strftime('%Y-%m-%d %H:%M')} UTC"
+                    f" | expiry_delta={opp.expiry_delta_seconds:.0f}s"
+                    f"\n    YES ask: {opp.yes_ask:.4f} ({opp.buy_yes_venue})"
+                    f" | NO ask: {opp.no_ask:.4f} ({opp.buy_no_venue})"
                 )

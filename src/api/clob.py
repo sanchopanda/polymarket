@@ -30,15 +30,25 @@ class ClobClient:
         self.base_url = base_url.rstrip("/")
         self.delay_s = delay_ms / 1000.0
         self._http = httpx.Client(timeout=15.0)
+        self._dead_tokens: set[str] = set()  # 404 токены — не повторяем
 
     def get_orderbook(self, token_id: str) -> Optional[OrderBook]:
         """Получить orderbook для конкретного токена (исхода)."""
+        if token_id in self._dead_tokens:
+            return None
         try:
             resp = self._http.get(f"{self.base_url}/book", params={"token_id": token_id})
             resp.raise_for_status()
             data = resp.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                self._dead_tokens.add(token_id)
+                print(f"[ClobClient] Token не найден (404), пропускаю: {token_id[:20]}...")
+            else:
+                print(f"[ClobClient] Ошибка get_orderbook {token_id[:20]}...: {e}")
+            return None
         except httpx.HTTPError as e:
-            print(f"[ClobClient] Ошибка get_orderbook {token_id}: {e}")
+            print(f"[ClobClient] Ошибка get_orderbook {token_id[:20]}...: {e}")
             return None
 
         bids = [OrderLevel(float(b["price"]), float(b["size"])) for b in data.get("bids", [])]
