@@ -1,0 +1,469 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import uuid
+from dataclasses import asdict
+from datetime import datetime
+
+from cross_arb_bot.models import CrossPosition, CrossVenueOpportunity
+
+from real_arb_bot.clients import OrderResult
+
+
+class RealArbDB:
+    def __init__(self, path: str) -> None:
+        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self._migrate()
+
+    def _migrate(self) -> None:
+        self.conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS positions (
+                id TEXT PRIMARY KEY,
+                pair_key TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                title TEXT NOT NULL,
+                expiry TEXT NOT NULL,
+                venue_yes TEXT NOT NULL,
+                market_yes TEXT NOT NULL,
+                venue_no TEXT NOT NULL,
+                market_no TEXT NOT NULL,
+                polymarket_title TEXT,
+                kalshi_title TEXT,
+                match_score REAL,
+                expiry_delta_seconds REAL,
+                polymarket_reference_price REAL,
+                kalshi_reference_price REAL,
+                polymarket_rules TEXT,
+                kalshi_rules TEXT,
+                polymarket_snapshot_open TEXT,
+                kalshi_snapshot_open TEXT,
+                polymarket_snapshot_resolved TEXT,
+                kalshi_snapshot_resolved TEXT,
+                shares REAL NOT NULL,
+                yes_ask REAL NOT NULL,
+                no_ask REAL NOT NULL,
+                yes_requested_shares REAL,
+                yes_filled_shares REAL,
+                yes_available_shares REAL,
+                yes_avg_price REAL,
+                yes_best_ask REAL,
+                yes_remaining_shares_after_fill REAL,
+                no_requested_shares REAL,
+                no_filled_shares REAL,
+                no_available_shares REAL,
+                no_avg_price REAL,
+                no_best_ask REAL,
+                no_remaining_shares_after_fill REAL,
+                ask_sum REAL NOT NULL,
+                total_cost REAL NOT NULL,
+                expected_profit REAL NOT NULL,
+                opened_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                resolved_at TEXT,
+                winning_side TEXT,
+                pnl REAL,
+                actual_pnl REAL,
+                polymarket_result TEXT,
+                kalshi_result TEXT,
+                lock_valid INTEGER,
+                -- Реальные ордера
+                kalshi_order_id TEXT,
+                kalshi_client_order_id TEXT,
+                kalshi_fill_price REAL,
+                kalshi_fill_shares REAL,
+                kalshi_order_fee REAL,
+                kalshi_order_latency_ms REAL,
+                kalshi_order_status TEXT,
+                polymarket_order_id TEXT,
+                polymarket_fill_price REAL,
+                polymarket_fill_shares REAL,
+                polymarket_order_fee REAL,
+                polymarket_order_latency_ms REAL,
+                polymarket_order_status TEXT,
+                execution_status TEXT,
+                execution_started_at TEXT,
+                execution_completed_at TEXT,
+                -- Settlement/redeem
+                polymarket_redeem_tx TEXT,
+                polymarket_redeem_gas_cost REAL,
+                polymarket_redeem_ms REAL
+            );
+
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                position_id TEXT,
+                details TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_stats (
+                date TEXT PRIMARY KEY,
+                trades_count INTEGER NOT NULL DEFAULT 0,
+                realized_pnl REAL NOT NULL DEFAULT 0,
+                orphaned_count INTEGER NOT NULL DEFAULT 0,
+                failed_count INTEGER NOT NULL DEFAULT 0
+            );
+            """
+        )
+        # Миграции для новых колонок
+        for col, definition in [
+            ("is_paper", "INTEGER NOT NULL DEFAULT 0"),
+            ("exclude_from_stats", "INTEGER NOT NULL DEFAULT 0"),
+            ("yes_usable_shares", "REAL"),
+            ("no_usable_shares", "REAL"),
+        ]:
+            try:
+                self.conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {definition}")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass  # колонка уже есть
+
+    # ── Позиции ─────────────────────────────────────────────────────────
+
+    def open_position(
+        self,
+        opportunity: CrossVenueOpportunity,
+        kalshi_result: OrderResult,
+        polymarket_result: OrderResult,
+        polymarket_snapshot_open: str | None = None,
+        kalshi_snapshot_open: str | None = None,
+        yes_leg=None,
+        no_leg=None,
+    ) -> CrossPosition:
+        pos_id = str(uuid.uuid4())
+        now = datetime.utcnow().isoformat()
+        execution_status = "both_filled"
+        if kalshi_result.status.startswith("error") or kalshi_result.shares_matched <= 0:
+            execution_status = "failed"
+        elif polymarket_result.status.startswith("error") or polymarket_result.shares_matched <= 0:
+            execution_status = "orphaned_kalshi"
+
+        self.conn.execute(
+            """
+            INSERT INTO positions (
+                id, pair_key, symbol, title, expiry, venue_yes, market_yes, venue_no, market_no,
+                polymarket_title, kalshi_title, match_score, expiry_delta_seconds,
+                polymarket_reference_price, kalshi_reference_price, polymarket_rules, kalshi_rules,
+                polymarket_snapshot_open, kalshi_snapshot_open,
+                shares, yes_ask, no_ask,
+                yes_requested_shares, yes_filled_shares, yes_available_shares, yes_usable_shares, yes_avg_price, yes_best_ask, yes_remaining_shares_after_fill,
+                no_requested_shares, no_filled_shares, no_available_shares, no_usable_shares, no_avg_price, no_best_ask, no_remaining_shares_after_fill,
+                ask_sum, total_cost, expected_profit, opened_at, status,
+                kalshi_order_id, kalshi_fill_price, kalshi_fill_shares, kalshi_order_fee, kalshi_order_latency_ms, kalshi_order_status,
+                polymarket_order_id, polymarket_fill_price, polymarket_fill_shares, polymarket_order_fee, polymarket_order_latency_ms, polymarket_order_status,
+                execution_status, execution_started_at, execution_completed_at
+            ) VALUES (
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+            )
+            """,
+            (
+                pos_id,
+                opportunity.pair_key,
+                opportunity.symbol,
+                opportunity.title,
+                opportunity.expiry.isoformat(),
+                opportunity.buy_yes_venue,
+                opportunity.polymarket_market_id if opportunity.buy_yes_venue == "polymarket" else opportunity.kalshi_market_id,
+                opportunity.buy_no_venue,
+                opportunity.polymarket_market_id if opportunity.buy_no_venue == "polymarket" else opportunity.kalshi_market_id,
+                opportunity.polymarket_title,
+                opportunity.kalshi_title,
+                opportunity.match_score,
+                opportunity.expiry_delta_seconds,
+                opportunity.polymarket_reference_price,
+                opportunity.kalshi_reference_price,
+                opportunity.polymarket_rules,
+                opportunity.kalshi_rules,
+                polymarket_snapshot_open,
+                kalshi_snapshot_open,
+                opportunity.shares,
+                opportunity.yes_ask,
+                opportunity.no_ask,
+                getattr(yes_leg, "requested_shares", None),
+                getattr(yes_leg, "filled_shares", None),
+                getattr(yes_leg, "available_shares", None),
+                getattr(yes_leg, "usable_shares", None),
+                getattr(yes_leg, "avg_price", None),
+                getattr(yes_leg, "best_ask", None),
+                getattr(yes_leg, "remaining_shares_after_fill", None),
+                getattr(no_leg, "requested_shares", None),
+                getattr(no_leg, "filled_shares", None),
+                getattr(no_leg, "available_shares", None),
+                getattr(no_leg, "usable_shares", None),
+                getattr(no_leg, "avg_price", None),
+                getattr(no_leg, "best_ask", None),
+                getattr(no_leg, "remaining_shares_after_fill", None),
+                opportunity.ask_sum,
+                opportunity.total_cost,
+                opportunity.expected_profit,
+                now,
+                "open",
+                kalshi_result.order_id,
+                kalshi_result.fill_price,
+                kalshi_result.shares_matched,
+                kalshi_result.fee,
+                kalshi_result.latency_ms,
+                kalshi_result.status,
+                polymarket_result.order_id,
+                polymarket_result.fill_price,
+                polymarket_result.shares_matched,
+                polymarket_result.fee,
+                polymarket_result.latency_ms,
+                polymarket_result.status,
+                execution_status,
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+        self.audit("position_opened", pos_id, {
+            "pair_key": opportunity.pair_key,
+            "symbol": opportunity.symbol,
+            "execution_status": execution_status,
+            "kalshi_fill": kalshi_result.shares_matched,
+            "polymarket_fill": polymarket_result.shares_matched,
+        })
+        return self.get_position(pos_id)
+
+    def open_paper_position(self, opportunity: CrossVenueOpportunity) -> CrossPosition:
+        pos_id = str(uuid.uuid4())
+        now = datetime.utcnow().isoformat()
+        self.conn.execute(
+            """
+            INSERT INTO positions (
+                id, pair_key, symbol, title, expiry, venue_yes, market_yes, venue_no, market_no,
+                polymarket_title, kalshi_title, match_score, expiry_delta_seconds,
+                polymarket_reference_price, kalshi_reference_price, polymarket_rules, kalshi_rules,
+                shares, yes_ask, no_ask, ask_sum, total_cost, expected_profit,
+                opened_at, status, execution_status, is_paper
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                pos_id,
+                opportunity.pair_key,
+                opportunity.symbol,
+                opportunity.title,
+                opportunity.expiry.isoformat(),
+                opportunity.buy_yes_venue,
+                opportunity.polymarket_market_id if opportunity.buy_yes_venue == "polymarket" else opportunity.kalshi_market_id,
+                opportunity.buy_no_venue,
+                opportunity.polymarket_market_id if opportunity.buy_no_venue == "polymarket" else opportunity.kalshi_market_id,
+                opportunity.polymarket_title,
+                opportunity.kalshi_title,
+                opportunity.match_score,
+                opportunity.expiry_delta_seconds,
+                opportunity.polymarket_reference_price,
+                opportunity.kalshi_reference_price,
+                opportunity.polymarket_rules,
+                opportunity.kalshi_rules,
+                opportunity.shares,
+                opportunity.yes_ask,
+                opportunity.no_ask,
+                opportunity.ask_sum,
+                opportunity.total_cost,
+                opportunity.expected_profit,
+                now, "open", "paper", 1,
+            ),
+        )
+        self.conn.commit()
+        return self.get_position(pos_id)
+
+    def has_open_paper_position(self, pair_key: str, yes_venue: str, no_venue: str) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM positions WHERE pair_key=? AND venue_yes=? AND venue_no=? AND status='open' AND is_paper=1",
+            (pair_key, yes_venue, no_venue),
+        ).fetchone() is not None
+
+    def resolve_position(
+        self,
+        position_id: str,
+        winning_side: str,
+        pnl: float,
+        actual_pnl: float | None,
+        polymarket_result: str | None,
+        kalshi_result: str | None,
+        lock_valid: bool,
+        polymarket_snapshot_resolved: str | None = None,
+        kalshi_snapshot_resolved: str | None = None,
+        polymarket_redeem_tx: str | None = None,
+        polymarket_redeem_gas_cost: float | None = None,
+        polymarket_redeem_ms: float | None = None,
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE positions SET
+                status='resolved', resolved_at=?, winning_side=?, pnl=?, actual_pnl=?,
+                polymarket_result=?, kalshi_result=?, lock_valid=?,
+                polymarket_snapshot_resolved=?, kalshi_snapshot_resolved=?,
+                polymarket_redeem_tx=?, polymarket_redeem_gas_cost=?, polymarket_redeem_ms=?
+            WHERE id=?
+            """,
+            (
+                datetime.utcnow().isoformat(),
+                winning_side, pnl, actual_pnl,
+                polymarket_result, kalshi_result, 1 if lock_valid else 0,
+                polymarket_snapshot_resolved, kalshi_snapshot_resolved,
+                polymarket_redeem_tx, polymarket_redeem_gas_cost, polymarket_redeem_ms,
+                position_id,
+            ),
+        )
+        self.conn.commit()
+        # Paper позиции не считаем в реальный P&L
+        is_paper = self.conn.execute(
+            "SELECT is_paper FROM positions WHERE id=?", (position_id,)
+        ).fetchone()
+        if not (is_paper and is_paper["is_paper"]):
+            self._update_daily_stats(pnl or 0.0)
+        self.audit("position_resolved", position_id, {
+            "winning_side": winning_side, "pnl": pnl, "lock_valid": lock_valid,
+        })
+
+    def get_position(self, position_id: str) -> CrossPosition | None:
+        row = self.conn.execute("SELECT * FROM positions WHERE id=?", (position_id,)).fetchone()
+        return self._row_to_position(row) if row else None
+
+    def get_open_positions(self) -> list[CrossPosition]:
+        rows = self.conn.execute(
+            "SELECT * FROM positions WHERE status='open' ORDER BY expiry ASC"
+        ).fetchall()
+        return [self._row_to_position(r) for r in rows]
+
+    def get_orphaned_positions(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM positions WHERE execution_status IN ('orphaned_kalshi','orphaned_polymarket') ORDER BY opened_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def has_open_position(self, pair_key: str, yes_venue: str, no_venue: str) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM positions WHERE pair_key=? AND venue_yes=? AND venue_no=? AND status='open'",
+            (pair_key, yes_venue, no_venue),
+        ).fetchone() is not None
+
+    def count_positions_for_pair(self, pair_key: str, yes_venue: str, no_venue: str) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM positions WHERE pair_key=? AND venue_yes=? AND venue_no=?",
+            (pair_key, yes_venue, no_venue),
+        ).fetchone()
+        return int(row["cnt"] or 0)
+
+    def _row_to_position(self, row) -> CrossPosition:
+        d = dict(row)
+        return CrossPosition(
+            id=d["id"],
+            pair_key=d["pair_key"],
+            symbol=d["symbol"],
+            title=d["title"],
+            expiry=datetime.fromisoformat(d["expiry"]),
+            venue_yes=d["venue_yes"],
+            market_yes=d["market_yes"],
+            venue_no=d["venue_no"],
+            market_no=d["market_no"],
+            shares=d["shares"],
+            yes_ask=d["yes_ask"],
+            no_ask=d["no_ask"],
+            ask_sum=d["ask_sum"],
+            total_cost=d["total_cost"],
+            expected_profit=d["expected_profit"],
+            opened_at=datetime.fromisoformat(d["opened_at"]),
+            status=d.get("status", "open"),
+            resolved_at=datetime.fromisoformat(d["resolved_at"]) if d.get("resolved_at") else None,
+            pnl=d.get("pnl"),
+            polymarket_result=d.get("polymarket_result"),
+            kalshi_result=d.get("kalshi_result"),
+            lock_valid=bool(d["lock_valid"]) if d.get("lock_valid") is not None else None,
+            winning_side=d.get("winning_side"),
+            yes_filled_shares=d.get("yes_filled_shares"),
+            yes_avg_price=d.get("yes_avg_price"),
+            yes_best_ask=d.get("yes_best_ask"),
+            no_filled_shares=d.get("no_filled_shares"),
+            no_avg_price=d.get("no_avg_price"),
+            no_best_ask=d.get("no_best_ask"),
+            polymarket_title=d.get("polymarket_title"),
+            kalshi_title=d.get("kalshi_title"),
+            match_score=d.get("match_score"),
+            expiry_delta_seconds=d.get("expiry_delta_seconds"),
+            polymarket_snapshot_open=d.get("polymarket_snapshot_open"),
+            kalshi_snapshot_open=d.get("kalshi_snapshot_open"),
+            polymarket_snapshot_resolved=d.get("polymarket_snapshot_resolved"),
+            kalshi_snapshot_resolved=d.get("kalshi_snapshot_resolved"),
+        )
+
+    # ── Аудит ──────────────────────────────────────────────────────────
+
+    def audit(self, event_type: str, position_id: str | None, details: dict) -> None:
+        self.conn.execute(
+            "INSERT INTO audit_log (timestamp, event_type, position_id, details) VALUES (?,?,?,?)",
+            (datetime.utcnow().isoformat(), event_type, position_id, json.dumps(details)),
+        )
+        self.conn.commit()
+
+    def get_audit_log(self, last_n: int = 50) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (last_n,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Дневная статистика ─────────────────────────────────────────────
+
+    def _update_daily_stats(self, pnl: float) -> None:
+        today = datetime.utcnow().date().isoformat()
+        self.conn.execute(
+            """
+            INSERT INTO daily_stats (date, trades_count, realized_pnl)
+            VALUES (?, 1, ?)
+            ON CONFLICT(date) DO UPDATE SET
+                trades_count = trades_count + 1,
+                realized_pnl = realized_pnl + excluded.realized_pnl
+            """,
+            (today, pnl),
+        )
+        self.conn.commit()
+
+    def daily_realized_pnl(self) -> float:
+        today = datetime.utcnow().date().isoformat()
+        row = self.conn.execute(
+            "SELECT SUM(actual_pnl) AS pnl FROM positions "
+            "WHERE status='resolved' AND is_paper=0 AND exclude_from_stats=0 "
+            "AND date(resolved_at)=?", (today,)
+        ).fetchone()
+        return float(row["pnl"] or 0.0)
+
+    def last_trade_time(self) -> float | None:
+        row = self.conn.execute(
+            "SELECT opened_at FROM positions WHERE execution_status='both_filled' ORDER BY opened_at DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            return datetime.fromisoformat(row["opened_at"]).timestamp()
+        except Exception:
+            return None
+
+    # ── Сводная статистика ─────────────────────────────────────────────
+
+    def stats(self) -> dict:
+        positions = [self._row_to_position(r) for r in self.conn.execute("SELECT * FROM positions").fetchall()]
+        open_pos = [p for p in positions if p.status == "open"]
+        resolved = [p for p in positions if p.status == "resolved"]
+        rows_for_pnl = self.conn.execute(
+            "SELECT actual_pnl FROM positions WHERE status='resolved' AND is_paper=0 AND exclude_from_stats=0"
+        ).fetchall()
+        realized_pnl = sum(float(r["actual_pnl"] or 0.0) for r in rows_for_pnl)
+
+        orphans = self.conn.execute(
+            "SELECT COUNT(*) AS c FROM positions WHERE execution_status IN ('orphaned_kalshi','orphaned_polymarket')"
+        ).fetchone()["c"]
+
+        return {
+            "open": len(open_pos),
+            "resolved": len(resolved),
+            "realized_pnl": realized_pnl,
+            "daily_pnl": self.daily_realized_pnl(),
+            "orphaned": orphans,
+        }

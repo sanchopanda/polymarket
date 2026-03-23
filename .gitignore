@@ -19,6 +19,10 @@ bybit-bot/.venv/
 .env
 .env.*
 data/*.key
+data/.telegram_chat_id
+
+# Claude Code local settings
+.claude/settings.local.json
 
 # Database files
 data/*.db

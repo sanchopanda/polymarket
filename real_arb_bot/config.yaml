@@ -1,0 +1,55 @@
+trading:
+  stake_per_pair_usd: 100.0
+  min_lock_edge: 0.06
+  min_profit_pct: 3.0
+  max_lock_edge: 0.32
+  max_open_pairs: 3
+  max_entries_per_pair: 1
+
+safety:
+  max_daily_loss_usd: 50.0
+  max_trade_size_usd: 200.0
+  min_balance_polymarket: 50.0
+  min_balance_kalshi: 50.0
+  cooldown_seconds: 30.0
+  require_confirmation: false
+  dry_run: false
+  balance_divergence_threshold: 5.0
+  min_partial_fill_pct: 50
+  kalshi_slippage_cents: 2
+
+market_filter:
+  symbol: ""
+  fee_type: "crypto_fees"
+  min_days_to_expiry: 0
+  max_days_to_expiry: 0.083
+  min_volume: 1000
+  min_liquidity: 1000
+  expiry_tolerance_seconds: 120
+
+runtime:
+  poll_interval_seconds: 20
+  recheck_delay_seconds: 1.0
+
+db:
+  path: "data/real_arb_bot.db"
+
+polymarket:
+  gamma_base_url: "https://gamma-api.polymarket.com"
+  clob_host: "https://clob.polymarket.com"
+  chain_id: 137
+  page_size: 500
+  request_delay_ms: 100
+
+kalshi:
+  base_url: "https://api.elections.kalshi.com/trade-api/v2"
+  page_size: 200
+  max_pages: 10
+  request_timeout_seconds: 20
+  series_tickers:
+    - "KXBTC15M"
+    - "KXETH15M"
+    - "KXSOL15M"
+    - "KXXRP15M"
+    - "KXDOGE15M"
+    - "KXBNB15M"
