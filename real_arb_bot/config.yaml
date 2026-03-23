@@ -2,7 +2,9 @@ trading:
   stake_per_pair_usd: 100.0
   min_lock_edge: 0.06
   min_profit_pct: 3.0
-  max_lock_edge: 0.32
+  max_lock_edge: 0.40
+  stake_tier_half_above: 0.20   # edge > 20% → ставка x0.5
+  stake_tier_third_above: 0.30  # edge > 30% → ставка x0.33
   max_open_pairs: 3
   max_entries_per_pair: 1
 

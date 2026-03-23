@@ -272,6 +272,14 @@ class RealArbEngine:
 
     # ── Execution pricing (переиспользуем логику из cross_arb_bot) ─────
 
+    def _stake_for_edge(self, edge: float) -> float:
+        base = self.trading["stake_per_pair_usd"]
+        if edge > self.trading.get("stake_tier_third_above", 0.30):
+            return base / 3.0
+        if edge > self.trading.get("stake_tier_half_above", 0.20):
+            return base / 2.0
+        return base
+
     def _apply_execution_pricing(
         self,
         opp: CrossVenueOpportunity,
@@ -280,15 +288,19 @@ class RealArbEngine:
         yes_market = matched.polymarket if opp.buy_yes_venue == "polymarket" else matched.kalshi
         no_market = matched.polymarket if opp.buy_no_venue == "polymarket" else matched.kalshi
 
+        # Уменьшаем ставку при высоком edge
+        tiered_stake = self._stake_for_edge(opp.edge_per_share)
+        shares = min(tiered_stake / opp.ask_sum, opp.shares)
+
         min_edge = self.config.get("trading", {}).get("min_lock_edge", 0.04)
         max_yes_price = 1.0 - opp.no_ask - min_edge
         max_no_price = 1.0 - opp.yes_ask - min_edge
-        yes_leg = self._execution_leg_info(opp.buy_yes_venue, yes_market, "yes", opp.shares, max_price=max_yes_price)
-        no_leg = self._execution_leg_info(opp.buy_no_venue, no_market, "no", opp.shares, max_price=max_no_price)
+        yes_leg = self._execution_leg_info(opp.buy_yes_venue, yes_market, "yes", shares, max_price=max_yes_price)
+        no_leg = self._execution_leg_info(opp.buy_no_venue, no_market, "no", shares, max_price=max_no_price)
 
         if yes_leg is None or no_leg is None:
             return None, yes_leg, no_leg
-        if yes_leg.filled_shares + 1e-6 < opp.shares or no_leg.filled_shares + 1e-6 < opp.shares:
+        if yes_leg.filled_shares + 1e-6 < shares or no_leg.filled_shares + 1e-6 < shares:
             return None, yes_leg, no_leg
 
         yes_ask = yes_leg.avg_price
@@ -300,13 +312,13 @@ class RealArbEngine:
         pm_fee = 0.0
         kalshi_fee = 0.0
         if opp.buy_yes_venue == "polymarket":
-            pm_fee += self._pm_fee(opp.shares, yes_ask)
+            pm_fee += self._pm_fee(shares, yes_ask)
         else:
-            kalshi_fee += self._kalshi_fee(opp.shares, yes_ask)
+            kalshi_fee += self._kalshi_fee(shares, yes_ask)
         if opp.buy_no_venue == "polymarket":
-            pm_fee += self._pm_fee(opp.shares, no_ask)
+            pm_fee += self._pm_fee(shares, no_ask)
         else:
-            kalshi_fee += self._kalshi_fee(opp.shares, no_ask)
+            kalshi_fee += self._kalshi_fee(shares, no_ask)
 
         total_fee = pm_fee + kalshi_fee
         total_cost = capital_used + total_fee
@@ -314,11 +326,12 @@ class RealArbEngine:
         return (
             replace(
                 opp,
+                shares=shares,
                 yes_ask=yes_ask, no_ask=no_ask, ask_sum=ask_sum,
                 edge_per_share=edge_per_share, capital_used=capital_used,
                 polymarket_fee=pm_fee, kalshi_fee=kalshi_fee,
                 total_fee=total_fee, total_cost=total_cost,
-                expected_profit=opp.shares - total_cost,
+                expected_profit=shares - total_cost,
             ),
             yes_leg,
             no_leg,
