@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from arb_bot.kalshi_ws import KalshiTopOfBook, KalshiWebSocketClient
 from arb_bot.ws import MarketWebSocketClient, TopOfBook
 
+from cross_arb_bot.matcher import kalshi_taker_fee, polymarket_crypto_taker_fee
 from cross_arb_bot.models import CrossVenueOpportunity, MatchedMarketPair
 
 from real_arb_bot.engine import RealArbEngine
@@ -74,12 +75,7 @@ class RealArbWatchRunner:
         # Для watch подписываемся на все сматченные пары с валидными ценами.
         # Торговые фильтры применяем уже в момент входа, а не при построении подписки.
         max_edge = self.engine.trading["max_lock_edge"]
-        tracking_candidates = build_opportunities(
-            matches=matches,
-            min_lock_edge=-1.0,
-            max_lock_edge=999.0,
-            stake_per_pair_usd=self.engine.trading["stake_per_pair_usd"],
-        )
+        tracking_candidates = self._build_tracking_candidates(matches)
         match_index = {
             f"{m.polymarket.market_id}:{m.kalshi.market_id}": m
             for m in matches
@@ -353,6 +349,68 @@ class RealArbWatchRunner:
 
     def _watch_key(self, opp: CrossVenueOpportunity) -> str:
         return f"{opp.pair_key}|{opp.buy_yes_venue}|{opp.buy_no_venue}"
+
+    def _build_tracking_candidates(self, matches: list[MatchedMarketPair]) -> list[CrossVenueOpportunity]:
+        candidates: list[CrossVenueOpportunity] = []
+        stake_per_pair_usd = float(self.engine.trading["stake_per_pair_usd"])
+        for item in matches:
+            pm = item.polymarket
+            ka = item.kalshi
+            legs = [
+                ("polymarket", "kalshi", pm.yes_ask, ka.no_ask),
+                ("kalshi", "polymarket", ka.yes_ask, pm.no_ask),
+            ]
+            for yes_venue, no_venue, yes_ask, no_ask in legs:
+                ask_sum = yes_ask + no_ask
+                if ask_sum <= 0:
+                    continue
+                edge_per_share = 1.0 - ask_sum
+                shares = stake_per_pair_usd / ask_sum
+                polymarket_fee = 0.0
+                kalshi_fee = 0.0
+                if yes_venue == "polymarket":
+                    polymarket_fee += polymarket_crypto_taker_fee(shares, yes_ask)
+                else:
+                    kalshi_fee += kalshi_taker_fee(shares, yes_ask)
+                if no_venue == "polymarket":
+                    polymarket_fee += polymarket_crypto_taker_fee(shares, no_ask)
+                else:
+                    kalshi_fee += kalshi_taker_fee(shares, no_ask)
+                total_fee = polymarket_fee + kalshi_fee
+                capital_used = ask_sum * shares
+                candidates.append(
+                    CrossVenueOpportunity(
+                        pair_key=f"{pm.market_id}:{ka.market_id}",
+                        polymarket_market_id=pm.market_id,
+                        kalshi_market_id=ka.market_id,
+                        symbol=pm.symbol,
+                        title=f"{pm.title} <> {ka.title}",
+                        expiry=min(pm.expiry, ka.expiry),
+                        polymarket_title=pm.title,
+                        kalshi_title=ka.title,
+                        match_score=item.score,
+                        expiry_delta_seconds=abs((pm.expiry - ka.expiry).total_seconds()),
+                        polymarket_reference_price=pm.reference_price,
+                        kalshi_reference_price=ka.reference_price,
+                        polymarket_rules=pm.rules_text,
+                        kalshi_rules=ka.rules_text,
+                        buy_yes_venue=yes_venue,
+                        buy_no_venue=no_venue,
+                        yes_ask=yes_ask,
+                        no_ask=no_ask,
+                        ask_sum=ask_sum,
+                        edge_per_share=edge_per_share,
+                        shares=shares,
+                        capital_used=capital_used,
+                        polymarket_fee=polymarket_fee,
+                        kalshi_fee=kalshi_fee,
+                        total_fee=total_fee,
+                        total_cost=capital_used + total_fee,
+                        expected_payout=shares,
+                        expected_profit=shares - (capital_used + total_fee),
+                    )
+                )
+        return candidates
 
     def _snapshot_summary(self, matched: MatchedMarketPair) -> str:
         pm = matched.polymarket
