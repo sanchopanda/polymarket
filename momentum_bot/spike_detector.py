@@ -79,7 +79,7 @@ class SpikeDetector:
         baseline = self.baseline_price(venue, identifier, side, lookback_seconds)
         if baseline is None:
             return False
-        return current > baseline
+        return current >= baseline
 
     def current_price(self, venue: str, identifier: str, side: str) -> float | None:
         key = (venue, identifier, side)

@@ -33,6 +33,7 @@ class RealMomentumWatchRunner:
         self._current_kalshi_tickers: list[str] = []
         self._refresh_lock = threading.Lock()
         self._refresh_in_progress = False
+        self._last_skip_log: dict[str, float] = {}  # key -> last log timestamp
 
     def run(self) -> None:
         runtime = self.engine.config["runtime"]
@@ -269,8 +270,16 @@ class RealMomentumWatchRunner:
 
         gap_min = self.engine.strategy.get("gap_signal_min_cents", 9999)
 
+        disable_pm_kalshi = self.engine.strategy.get("disable_pm_to_kalshi", False)
+        lookback = self.engine.strategy.get("gap_rising_lookback_seconds", 20.0)
+        skip_log_interval = 30.0  # логируем одинаковый скип не чаще раза в 30с
+
         for leader_venue, leader_id, follower_venue, side in combos:
             if not leader_id:
+                continue
+
+            # Пропускаем PM→Kalshi если отключено (до любых вычислений)
+            if disable_pm_kalshi and leader_venue == "polymarket" and follower_venue == "kalshi":
                 continue
 
             spike = self.spike_detector.detect_spike(leader_venue, leader_id, side)
@@ -287,17 +296,20 @@ class RealMomentumWatchRunner:
             if spike is None:
                 if gap_cents < gap_min:
                     continue
-                # Лидер должен расти за последние N секунд, а не падать
-                lookback = self.engine.strategy.get("gap_rising_lookback_seconds", 10.0)
+                # Лидер не должен падать за последние N секунд
                 baseline = self.spike_detector.baseline_price(leader_venue, leader_id, side, lookback)
                 if not self.spike_detector.is_rising(leader_venue, leader_id, side, lookback):
-                    baseline_str = f"{baseline:.4f}" if baseline is not None else "n/a"
-                    print(
-                        f"[RealMomentum][GAP-SKIP] {pm.symbol} {side.upper()}"
-                        f" | leader={leader_venue} now={leader_price:.4f} baseline({lookback:.0f}s)={baseline_str}"
-                        f" gap={gap_cents:.1f}c follower={follower_venue} price={follower_price:.4f}"
-                        f" | не растёт"
-                    )
+                    skip_key = f"falling:{pair_key}:{leader_venue}:{side}"
+                    now_ts = time.time()
+                    if now_ts - self._last_skip_log.get(skip_key, 0) >= skip_log_interval:
+                        baseline_str = f"{baseline:.4f}" if baseline is not None else "n/a"
+                        print(
+                            f"[RealMomentum][GAP-SKIP] {pm.symbol} {side.upper()}"
+                            f" | leader={leader_venue} now={leader_price:.4f} baseline({lookback:.0f}s)={baseline_str}"
+                            f" gap={gap_cents:.1f}c follower={follower_venue} price={follower_price:.4f}"
+                            f" | лидер падает"
+                        )
+                        self._last_skip_log[skip_key] = now_ts
                     continue
                 signal_type = "gap"
                 spike_val = 0.0
@@ -318,14 +330,18 @@ class RealMomentumWatchRunner:
                     spike_magnitude=spike_val,
                 )
                 if reject_reason is not None:
-                    _silent = {"outside window", "pm->kalshi disabled", "duplicate position", "opposite side open"}
+                    _silent = {"outside window", "duplicate position", "opposite side open"}
                     if reject_reason not in _silent:
-                        print(
-                            f"[RealMomentum][GAP-SKIP] {pm.symbol} {side.upper()}"
-                            f" | leader={leader_venue} price={leader_price:.4f}"
-                            f" gap={gap_cents:.1f}c follower={follower_venue} price={follower_price:.4f}"
-                            f" | {reject_reason}"
-                        )
+                        skip_key = f"eval:{pair_key}:{leader_venue}:{side}:{reject_reason}"
+                        now_ts = time.time()
+                        if now_ts - self._last_skip_log.get(skip_key, 0) >= skip_log_interval:
+                            print(
+                                f"[RealMomentum][GAP-SKIP] {pm.symbol} {side.upper()}"
+                                f" | leader={leader_venue} price={leader_price:.4f}"
+                                f" gap={gap_cents:.1f}c follower={follower_venue} price={follower_price:.4f}"
+                                f" | {reject_reason}"
+                            )
+                            self._last_skip_log[skip_key] = now_ts
                     continue
 
                 print(
