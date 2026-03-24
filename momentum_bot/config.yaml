@@ -1,0 +1,46 @@
+strategy:
+  spike_threshold_cents: 7      # min price rise in cents within window
+  max_spike_cents: 30           # ignore spikes > this (market near resolution)
+  max_entry_price: 0.80         # don't enter if follower price already this high
+  spike_window_seconds: 45      # rolling window for spike detection
+  min_leader_price: 0.70        # цена лидера должна быть выше этого
+  max_price_gap_cents: 20       # если разрыв > этого — структурное расхождение, не входим
+  gap_signal_min_cents: 5       # статический гэп: минимальный разрыв для входа без спайка
+  cooldown_seconds: 120         # cooldown per pair+side
+  stake_per_trade_usd: 5.0
+  max_open_positions: 10
+  starting_balance: 50.0
+
+market_filter:
+  symbol: ""
+  fee_type: "crypto_fees"
+  min_days_to_expiry: 0
+  max_days_to_expiry: 0.083
+  min_volume: 1000
+  min_liquidity: 1000
+  expiry_tolerance_seconds: 120
+
+runtime:
+  universe_refresh_seconds: 60
+  status_interval_seconds: 15
+
+db:
+  path: "data/momentum_bot.db"
+
+polymarket:
+  gamma_base_url: "https://gamma-api.polymarket.com"
+  page_size: 500
+  request_delay_ms: 100
+
+kalshi:
+  base_url: "https://api.elections.kalshi.com/trade-api/v2"
+  page_size: 200
+  max_pages: 10
+  request_timeout_seconds: 20
+  series_tickers:
+    - "KXBTC15M"
+    - "KXETH15M"
+    - "KXSOL15M"
+    - "KXXRP15M"
+    - "KXDOGE15M"
+    - "KXBNB15M"

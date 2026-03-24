@@ -77,6 +77,7 @@ class RedeemResult:
     gas_cost_pol: float = 0.0
     payout_usdc: float = 0.0
     error: str = ""
+    pending: bool = False  # TX ушла но ещё не замайнена
 
 
 # ── PolymarketTrader ────────────────────────────────────────────────────
@@ -134,7 +135,7 @@ class PolymarketTrader:
         fee = 0.0
 
         if order_id:
-            time.sleep(1.5)
+            time.sleep(0.5)
             try:
                 info = self._client.get_order(order_id)
                 shares_matched = float(info.get("size_matched", 0))
@@ -159,7 +160,7 @@ class PolymarketTrader:
             raw_response=resp if isinstance(resp, dict) else {},
         )
 
-    def redeem(self, market_id: str) -> RedeemResult:
+    def redeem(self, market_id: str, pending_tx_hash: str = "") -> RedeemResult:
         try:
             data = httpx.get(f"{GAMMA_URL}/markets/{market_id}", timeout=10).json()
             condition_id = data.get("conditionId", "")
@@ -181,26 +182,47 @@ class PolymarketTrader:
                 usdc_contract = w3.eth.contract(
                     address=Web3.to_checksum_address(USDC_E), abi=ERC20_BALANCE_ABI
                 )
+
                 balance_before = usdc_contract.functions.balanceOf(addr_cs).call() / 1e6
 
-                ctf = w3.eth.contract(address=Web3.to_checksum_address(CTF_ADDRESS), abi=REDEEM_ABI)
-                gas_price = max(w3.eth.gas_price, w3.to_wei(50, "gwei"))
-                nonce = w3.eth.get_transaction_count(addr_cs, "latest")
-                t0 = time.time()
-                tx = ctf.functions.redeemPositions(
-                    Web3.to_checksum_address(USDC_E), bytes(32), condition_bytes, [1, 2]
-                ).build_transaction({
-                    "from": addr_cs, "nonce": nonce,
-                    "gasPrice": gas_price, "gas": 200000, "chainId": CHAIN_ID,
-                })
-                signed = w3.eth.account.sign_transaction(tx, self._pk)
-                tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-                receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=90)
+                # Если предыдущая TX ещё в pending — ждём её, не шлём новую
+                if pending_tx_hash:
+                    print(f"[pm-redeem] ждём pending TX {pending_tx_hash[:16]}...")
+                    try:
+                        receipt = w3.eth.wait_for_transaction_receipt(
+                            bytes.fromhex(pending_tx_hash.replace("0x", "")), timeout=120
+                        )
+                    except Exception:
+                        print(f"[pm-redeem] pending TX не подтвердилась через RPC {rpc}")
+                        continue
+                    gas_price = w3.to_wei(50, "gwei")
+                    tx_hex = pending_tx_hash
+                    t0 = time.time()
+                else:
+                    ctf = w3.eth.contract(address=Web3.to_checksum_address(CTF_ADDRESS), abi=REDEEM_ABI)
+                    gas_price = max(w3.eth.gas_price, w3.to_wei(50, "gwei"))
+                    nonce = w3.eth.get_transaction_count(addr_cs, "latest")
+                    t0 = time.time()
+                    tx = ctf.functions.redeemPositions(
+                        Web3.to_checksum_address(USDC_E), bytes(32), condition_bytes, [1, 2]
+                    ).build_transaction({
+                        "from": addr_cs, "nonce": nonce,
+                        "gasPrice": gas_price, "gas": 200000, "chainId": CHAIN_ID,
+                    })
+                    signed = w3.eth.account.sign_transaction(tx, self._pk)
+                    tx_hash_bytes = w3.eth.send_raw_transaction(signed.raw_transaction)
+                    tx_hex = "0x" + tx_hash_bytes.hex()
+                    try:
+                        receipt = w3.eth.wait_for_transaction_receipt(tx_hash_bytes, timeout=90)
+                    except Exception:
+                        # TX ушла но не замайнена за 90с — вернём pending
+                        elapsed = (time.time() - t0) * 1000
+                        print(f"[pm-redeem] TX в pending ({elapsed:.0f}ms), tx={tx_hex[:16]}...")
+                        return RedeemResult(success=False, pending=True, tx_hash=tx_hex)
+
                 total_ms = (time.time() - t0) * 1000
                 gas_cost = receipt.gasUsed * gas_price / 1e18
                 success = receipt.status == 1
-                tx_hex = "0x" + tx_hash.hex()
-
                 balance_after = usdc_contract.functions.balanceOf(addr_cs).call() / 1e6
                 payout = round(balance_after - balance_before, 6)
 
