@@ -308,6 +308,7 @@ class RealMomentumWatchRunner:
 
         disable_pm_kalshi = self.engine.strategy.get("disable_pm_to_kalshi", False)
         lookback = self.engine.strategy.get("gap_rising_lookback_seconds", 20.0)
+        min_rise = float(self.engine.strategy.get("gap_rising_min_cents", 0.0))
         for leader_venue, leader_id, follower_venue, side in combos:
             if not leader_id:
                 continue
@@ -331,7 +332,7 @@ class RealMomentumWatchRunner:
                 if gap_cents < gap_min:
                     continue
                 # Лидер не должен падать за последние N секунд
-                if not self.spike_detector.is_rising(leader_venue, leader_id, side, lookback):
+                if not self.spike_detector.is_rising(leader_venue, leader_id, side, lookback, min_rise):
                     continue
                 signal_type = "gap"
                 spike_val = 0.0

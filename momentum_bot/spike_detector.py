@@ -65,7 +65,7 @@ class SpikeDetector:
         cutoff = window[-1].timestamp - lookback_seconds
         return next((tick.price for tick in window if tick.timestamp >= cutoff), None)
 
-    def is_rising(self, venue: str, identifier: str, side: str, lookback_seconds: float = 10.0) -> bool:
+    def is_rising(self, venue: str, identifier: str, side: str, lookback_seconds: float = 10.0, min_rise_cents: float = 0.0) -> bool:
         """True if current price is higher than the earliest price in the last lookback_seconds.
 
         More robust than comparing last two ticks — ignores noise from frequent ticks.
@@ -79,7 +79,7 @@ class SpikeDetector:
         baseline = self.baseline_price(venue, identifier, side, lookback_seconds)
         if baseline is None:
             return False
-        return current >= baseline
+        return (current - baseline) * 100 >= min_rise_cents
 
     def current_price(self, venue: str, identifier: str, side: str) -> float | None:
         key = (venue, identifier, side)
