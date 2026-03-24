@@ -5,6 +5,8 @@
 - `src/` — основной Polymarket Martingale bot: paper trading, real trading, загрузка исторических данных и backtest.
 - `simple_bot/` — упрощённый paper bot без Мартингейла.
 - `ev_bot/` — отдельный paper bot с EV-фильтром по историческим бакетам.
+- `momentum_bot/` — paper momentum bot по паре `Polymarket ↔ Kalshi`.
+- `real_momentum_bot/` — momentum bot с реальными ордерами и виртуальным бюджетом.
 - `bybit-bot/` — отдельный Bybit futures bot.
 - корень репозитория — диагностические и backtest-скрипты.
 
@@ -34,6 +36,14 @@ pip install -e ".[dev]"
 - после активации `venv` запускай ботов через `python -m ...`
 - если `python3.10` у тебя не установлен, сначала проверь доступные версии: `python3.10 --version`, `python3.11 --version`
 - если до этого venv уже был создан, после обновления репозитория повторно выполни `pip install -e ".[dev]"`, иначе новые зависимости не подтянутся
+
+Для `real_arb_bot` порядок исполнения ног можно переключать через `real_arb_bot/config.yaml`:
+
+```yaml
+execution:
+  first_leg: "kalshi"      # дефолт
+  # first_leg: "polymarket"  # альтернативный режим для тестов
+```
 
 ## Основной бот: `python -m src.main`
 
@@ -326,6 +336,108 @@ Research notes:
   - виртуальный перевод между paper-балансами
 - `run` / `live`
   - непрерывный цикл со статусом и live-решениями
+
+## `momentum_bot`
+
+Paper momentum bot для short-term crypto markets между `Polymarket` и `Kalshi`.
+Бот отслеживает лидирующую площадку, ищет spike/gap сигналы и открывает виртуальную позицию
+на follower-ноге, если цена ещё не ушла слишком далеко и разрыв не выглядит структурным.
+
+Запуск:
+
+```bash
+python -m momentum_bot watch
+python -m momentum_bot status
+python -m momentum_bot resolve
+python -m momentum_bot --config momentum_bot/config.yaml resolve
+```
+
+Команды:
+
+- `watch` — live monitoring with spike detection
+- `status` — показать позиции и P&L
+- `resolve` — зарезолвить истёкшие позиции
+
+Конфиг: `momentum_bot/config.yaml`.
+База: `data/momentum_bot.db`.
+
+Ключевые параметры:
+
+- `strategy.spike_threshold_cents`
+- `strategy.max_spike_cents`
+- `strategy.max_entry_price`
+- `strategy.spike_window_seconds`
+- `strategy.min_leader_price`
+- `strategy.max_price_gap_cents`
+- `strategy.gap_signal_min_cents`
+- `strategy.cooldown_seconds`
+- `strategy.stake_per_trade_usd`
+- `strategy.max_open_positions`
+- `strategy.starting_balance`
+- `market_filter.symbol`
+- `market_filter.fee_type`
+- `market_filter.max_days_to_expiry`
+- `market_filter.min_volume`
+- `market_filter.min_liquidity`
+- `runtime.universe_refresh_seconds`
+- `runtime.status_interval_seconds`
+
+## `real_momentum_bot`
+
+Momentum bot с реальными ордерами и виртуальным risk-budget. Входы происходят в live режиме,
+при этом бот может остановиться по stop-loss логике относительно накопленного P&L и свободного бюджета.
+
+Запуск:
+
+```bash
+python -m real_momentum_bot watch
+python -m real_momentum_bot status
+python -m real_momentum_bot resolve
+python -m real_momentum_bot --config real_momentum_bot/config.yaml resolve
+```
+
+Команды:
+
+- `watch` — live monitoring + real order execution
+- `status` — показать позиции и P&L
+- `resolve` — зарезолвить истёкшие позиции и повторить redeem
+
+Конфиг: `real_momentum_bot/config.yaml`.
+База: `data/real_momentum_bot.db`.
+
+Ключевые параметры:
+
+- `strategy.spike_threshold_cents`
+- `strategy.spike_signals_enabled`
+- `strategy.disable_pm_to_kalshi`
+- `strategy.max_spike_cents`
+- `strategy.max_entry_price`
+- `strategy.min_leader_price`
+- `strategy.max_leader_price`
+- `strategy.max_price_gap_cents`
+- `strategy.max_price_gap_cents_pm_to_kalshi`
+- `strategy.gap_signal_min_cents`
+- `strategy.gap_rising_lookback_seconds`
+- `strategy.spike_window_seconds`
+- `strategy.cooldown_seconds`
+- `strategy.trades_per_budget`
+- `strategy.max_open_positions`
+- `budget.total_usd`
+- `budget.min_floor_usd`
+- `market_filter.symbol`
+- `market_filter.fee_type`
+- `market_filter.max_days_to_expiry`
+- `market_filter.min_volume`
+- `market_filter.min_liquidity`
+- `runtime.universe_refresh_seconds`
+- `runtime.status_interval_seconds`
+
+Требует `.env` с:
+
+- `WALLET_PRIVATE_KEY`
+- `WALLET_PROXY`
+- `KALSHI_API_KEY_ID`
+- `KALSHI_PRIVATE_KEY_PATH`
 
 ## `ev_bot`
 

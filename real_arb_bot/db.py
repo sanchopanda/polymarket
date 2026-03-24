@@ -129,6 +129,8 @@ class RealArbDB:
         opportunity: CrossVenueOpportunity,
         kalshi_result: OrderResult,
         polymarket_result: OrderResult,
+        execution_status: str | None = None,
+        route: str | None = None,
         polymarket_snapshot_open: str | None = None,
         kalshi_snapshot_open: str | None = None,
         yes_leg=None,
@@ -136,11 +138,12 @@ class RealArbDB:
     ) -> CrossPosition:
         pos_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
-        execution_status = "both_filled"
-        if kalshi_result.status.startswith("error") or kalshi_result.shares_matched <= 0:
-            execution_status = "failed"
-        elif polymarket_result.status.startswith("error") or polymarket_result.shares_matched <= 0:
-            execution_status = "orphaned_kalshi"
+        if execution_status is None:
+            execution_status = "both_filled"
+            if kalshi_result.status.startswith("error") or kalshi_result.shares_matched <= 0:
+                execution_status = "failed"
+            elif polymarket_result.status.startswith("error") or polymarket_result.shares_matched <= 0:
+                execution_status = "orphaned_kalshi"
 
         self.conn.execute(
             """
@@ -225,6 +228,7 @@ class RealArbDB:
             "pair_key": opportunity.pair_key,
             "symbol": opportunity.symbol,
             "execution_status": execution_status,
+            "route": route,
             "kalshi_fill": kalshi_result.shares_matched,
             "polymarket_fill": polymarket_result.shares_matched,
         })

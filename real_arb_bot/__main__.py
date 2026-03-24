@@ -53,6 +53,8 @@ def cmd_scan(engine, dry: bool) -> None:
         f"[scan] pm={len(pm_markets)} kalshi={len(kalshi_markets)} "
         f"matches={len(matches)} opportunities={len(opps)}"
     )
+    if matches:
+        engine.print_match_diagnostics(limit=30)
     for opp in opps[:5]:
         print(
             f"  {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO "
@@ -89,6 +91,8 @@ def cmd_run(engine, interval: int, dry: bool = False) -> None:
                     f"[scan] pm={len(pm_markets)} kalshi={len(kalshi_markets)} "
                     f"matches={len(matches)} opportunities={len(opps)}"
                 )
+                if matches:
+                    engine.print_match_diagnostics(limit=30)
                 for opp in opps:
                     print(
                         f"\n  [{opp.symbol}] {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO"
@@ -103,6 +107,10 @@ def cmd_run(engine, interval: int, dry: bool = False) -> None:
                     )
                 if not opps:
                     print("  (нет возможностей)")
+            else:
+                pm_markets, kalshi_markets, matches, _ = engine.last_snapshot
+                if matches:
+                    engine.print_match_diagnostics(limit=30)
         except Exception as e:
             print(f"[run] Error in cycle {cycle}: {e}")
             engine.db.audit("cycle_error", None, {"cycle": cycle, "error": str(e)})

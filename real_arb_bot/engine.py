@@ -50,7 +50,9 @@ class RealArbEngine:
 
         # Safety, executor, resolver
         self.safety = SafetyGuard(config, db)
-        self.executor = OrderExecutor(self.pm_trader, self.kalshi_trader, self.safety, db)
+        first_leg = config.get("execution", {}).get("first_leg", "kalshi")
+        print(f"[config] execution.first_leg={first_leg}")
+        self.executor = OrderExecutor(self.pm_trader, self.kalshi_trader, self.safety, db, first_leg=first_leg)
         self.resolver = PositionResolver(
             self.pm_trader, self.kalshi_trader, self.pm_feed, self.kalshi_feed, db,
             notifier=None,  # устанавливается после _init_notifier
@@ -58,6 +60,7 @@ class RealArbEngine:
 
         self.last_snapshot: tuple[list, list, list, list] = ([], [], [], [])
         self.last_kalshi_error: str | None = None
+        self.last_match_diagnostics: list[str] = []
         self.notifier = None
         self._init_notifier()
 
@@ -108,12 +111,62 @@ class RealArbEngine:
             stake_per_pair_usd=self.trading["stake_per_pair_usd"],
         )
         self.last_snapshot = (pm_markets, kalshi_markets, matches, opportunities)
+        self.last_match_diagnostics = self._build_match_diagnostics(matches)
 
         if execute and opportunities:
             balances = self.get_real_balances()
             self._try_open_positions(opportunities, balances)
 
         return opportunities
+
+    def _build_match_diagnostics(self, matches: list[MatchedMarketPair]) -> list[str]:
+        lines: list[str] = []
+        min_lock_edge = float(self.trading["min_lock_edge"])
+        max_lock_edge = float(self.trading["max_lock_edge"])
+        stake_per_pair_usd = float(self.trading["stake_per_pair_usd"])
+
+        for item in matches:
+            pm = item.polymarket
+            kalshi = item.kalshi
+            lines.append(
+                f"{pm.symbol} | expiry_delta={abs((pm.expiry - kalshi.expiry).total_seconds()):.0f}s | "
+                f"PM={pm.title} <> Kalshi={kalshi.title}"
+            )
+            legs = [
+                ("PM:YES + KA:NO", pm.yes_ask, kalshi.no_ask, min(pm.yes_depth, kalshi.no_depth)),
+                ("KA:YES + PM:NO", kalshi.yes_ask, pm.no_ask, min(kalshi.yes_depth, pm.no_depth)),
+            ]
+            for label, yes_ask, no_ask, max_shares in legs:
+                ask_sum = yes_ask + no_ask
+                edge = 1.0 - ask_sum
+                if ask_sum <= 0:
+                    reason = "ask_sum<=0"
+                elif edge < min_lock_edge:
+                    reason = f"edge_low ({edge:.4f} < {min_lock_edge:.4f})"
+                elif edge > max_lock_edge:
+                    reason = f"edge_high ({edge:.4f} > {max_lock_edge:.4f})"
+                else:
+                    shares = min(stake_per_pair_usd / ask_sum, max_shares)
+                    if shares <= 0:
+                        reason = f"no_size (max_shares={max_shares:.2f})"
+                    else:
+                        reason = f"candidate shares={shares:.2f}"
+                lines.append(
+                    f"  {label} | yes={yes_ask:.4f} no={no_ask:.4f} "
+                    f"ask_sum={ask_sum:.4f} edge={edge:.4f} max_shares={max_shares:.2f} | {reason}"
+                )
+        return lines
+
+    def print_match_diagnostics(self, limit: int = 20) -> None:
+        if not self.last_match_diagnostics:
+            print("[debug] match diagnostics: none")
+            return
+        print("[debug] watched pairs / skip reasons:")
+        for line in self.last_match_diagnostics[:limit]:
+            print(f"  {line}")
+        remaining = len(self.last_match_diagnostics) - limit
+        if remaining > 0:
+            print(f"  ... (+{remaining} more lines)")
 
     def _try_open_positions(
         self,
@@ -170,7 +223,7 @@ class RealArbEngine:
         no_leg: ExecutionLegInfo | None,
     ) -> None:
         print(
-            f"\n[OPEN] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
+            f"\n[OPEN] {opp.symbol} | route={self.executor.first_leg}_first | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
             f"       ask_sum={opp.ask_sum:.4f} | edge={opp.edge_per_share:.4f} "
             f"| cost=${opp.total_cost:.2f} | exp_profit=${opp.expected_profit:.2f}"
         )
@@ -186,9 +239,13 @@ class RealArbEngine:
         result: ExecutionResult = self.executor.execute_pair(opp, mapped_yes_leg, mapped_no_leg)
 
         if result.execution_status == "both_filled":
-            print(f"[OPEN] SUCCESS | kalshi={result.kalshi_order.shares_matched}@{result.kalshi_order.fill_price} | pm={result.polymarket_order.shares_matched}@{result.polymarket_order.fill_price}")
+            print(
+                f"[OPEN] SUCCESS | route={result.route} | "
+                f"kalshi={result.kalshi_order.shares_matched}@{result.kalshi_order.fill_price} | "
+                f"pm={result.polymarket_order.shares_matched}@{result.polymarket_order.fill_price}"
+            )
         else:
-            print(f"[OPEN] {result.execution_status.upper()} | {result.reason}")
+            print(f"[OPEN] {result.execution_status.upper()} | route={result.route} | {result.reason}")
             if result.execution_status == "failed":
                 return  # Ничего не исполнилось — не записываем
 
@@ -199,25 +256,33 @@ class RealArbEngine:
             opportunity=opp,
             kalshi_result=kalshi_res,
             polymarket_result=pm_res,
+            execution_status=result.execution_status,
+            route=result.route,
             polymarket_snapshot_open=self._pm_snapshot(matched.polymarket.market_id),
             kalshi_snapshot_open=self._kalshi_snapshot(matched.kalshi.market_id),
             yes_leg=yes_leg,
             no_leg=no_leg,
         )
 
-        # unwound_kalshi: Kalshi продан обратно — записываем и сразу закрываем с реальным P&L
-        if result.execution_status == "unwound_kalshi":
-            buy_order = result.kalshi_order
-            sell_order = result.unwind_order
+        if result.execution_status in {"unwound_kalshi", "unwound_polymarket"}:
+            if result.execution_status == "unwound_kalshi":
+                buy_order = result.kalshi_order
+                sell_order = result.unwind_order
+                pm_result = "not_filled"
+                kalshi_result = "unwound"
+            else:
+                buy_order = result.polymarket_order
+                sell_order = result.unwind_order
+                pm_result = "unwound"
+                kalshi_result = "not_filled"
+
             if result.realized_pnl is not None:
                 unwind_pnl = result.realized_pnl
             elif buy_order and sell_order and sell_order.shares_matched > 0:
-                # Реальная потеря = спред между покупкой и продажей + комиссии
-                buy_proceeds = buy_order.fill_price * sell_order.shares_matched
+                buy_cost = buy_order.fill_price * sell_order.shares_matched
                 sell_proceeds = sell_order.fill_price * sell_order.shares_matched
-                unwind_pnl = sell_proceeds - buy_proceeds - buy_order.fee - sell_order.fee
+                unwind_pnl = sell_proceeds - buy_cost - buy_order.fee - sell_order.fee
             elif buy_order:
-                # Unwind не заполнился — теряем полную стоимость покупки
                 unwind_pnl = -(buy_order.fill_price * buy_order.shares_matched + buy_order.fee)
             else:
                 unwind_pnl = 0.0
@@ -226,22 +291,22 @@ class RealArbEngine:
                 winning_side="n/a",
                 pnl=unwind_pnl,
                 actual_pnl=unwind_pnl,
-                polymarket_result="not_filled",
-                kalshi_result="unwound",
+                polymarket_result=pm_result,
+                kalshi_result=kalshi_result,
                 lock_valid=False,
             )
             print(f"[CLOSED] UNWOUND | pnl=${unwind_pnl:.2f}")
             if self.notifier:
                 self.notifier.notify_resolve(
                     symbol=opp.symbol,
-                    pm_result="not_filled",
-                    kalshi_result="unwound",
+                    pm_result=pm_result,
+                    kalshi_result=kalshi_result,
                     pnl=unwind_pnl,
                     lock_valid=False,
                 )
             return
 
-        if result.execution_status == "orphaned_kalshi":
+        if result.execution_status in {"orphaned_kalshi", "orphaned_polymarket"}:
             print("[OPEN] ORPHANED — торговля приостановлена до ручного разбора позиции!")
             self.safety.dry_run = True
 

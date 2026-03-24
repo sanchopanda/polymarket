@@ -37,6 +37,9 @@ runtime:
   recheck_delay_seconds: 1.0
   watch_universe_refresh_seconds: 900
 
+execution:
+  first_leg: "polymarket"
+
 db:
   path: "data/real_arb_bot.db"
 

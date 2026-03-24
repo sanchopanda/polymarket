@@ -159,6 +159,37 @@ class PolymarketTrader:
         size: float,
         wait_seconds: float = 1.5,
     ) -> OrderResult:
+        return self._place_limit_order(
+            token_id=token_id,
+            price=price,
+            size=size,
+            side="BUY",
+            wait_seconds=wait_seconds,
+        )
+
+    def place_limit_sell_order(
+        self,
+        token_id: str,
+        price: float,
+        size: float,
+        wait_seconds: float = 1.5,
+    ) -> OrderResult:
+        return self._place_limit_order(
+            token_id=token_id,
+            price=price,
+            size=size,
+            side="SELL",
+            wait_seconds=wait_seconds,
+        )
+
+    def _place_limit_order(
+        self,
+        token_id: str,
+        price: float,
+        size: float,
+        side: str,
+        wait_seconds: float = 1.5,
+    ) -> OrderResult:
         if OrderArgs is None:
             raise RuntimeError("py_clob_client.OrderArgs недоступен")
 
@@ -168,7 +199,7 @@ class PolymarketTrader:
         if size <= 0:
             raise ValueError(f"Некорректный PM size: {size}")
 
-        args = OrderArgs(token_id=token_id, price=rounded_price, size=size, side="BUY")
+        args = OrderArgs(token_id=token_id, price=rounded_price, size=size, side=side)
         t0 = time.time()
         order = self._client.create_order(args)
         sign_ms = (time.time() - t0) * 1000
@@ -185,7 +216,7 @@ class PolymarketTrader:
 
         print(
             f"[pm-limit] sign={sign_ms:.0f}ms post={post_ms:.0f}ms | "
-            f"status={status} | req={shares_requested:.4f} | fill={shares_matched:.4f}@{fill_price:.4f} | "
+            f"side={side} | status={status} | req={shares_requested:.4f} | fill={shares_matched:.4f}@{fill_price:.4f} | "
             f"limit={rounded_price:.4f} | fee=${fee:.4f}"
         )
         return OrderResult(

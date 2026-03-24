@@ -8,6 +8,8 @@
 
 - `cross_arb_bot/` — кросс-маркет арбитражный бот (Polymarket ↔ Kalshi), **paper trading**;
 - `real_arb_bot/` — реальный арбитражный бот (Polymarket ↔ Kalshi), **real trading**;
+- `momentum_bot/` — momentum-following бот (Polymarket ↔ Kalshi), **paper trading**;
+- `real_momentum_bot/` — momentum-following бот с реальными ордерами и виртуальным бюджетом;
 - `arb_bot/` — общий WebSocket клиент для Polymarket (зависимость `cross_arb_bot` и тестов);
 - `test_real_15m.py` — тестовый скрипт реальных ставок на Polymarket (сбор аналитики);
 - `test_real_kalshi.py` — тестовый скрипт реальных ставок на Kalshi (сбор аналитики);
@@ -106,8 +108,43 @@
 
 Практика для `real_arb_bot watch`:
 - universe refresh настраивается через `runtime.watch_universe_refresh_seconds`; частые price-update всё равно приходят через WS, так что discovery можно держать заметно реже
+- порядок исполнения ног настраивается через `execution.first_leg`:
+  - `kalshi` — текущий дефолт
+  - `polymarket` — альтернативный режим для теста `Polymarket first`
 
 Переменные `.env` для `real_arb_bot`:
+- `WALLET_PRIVATE_KEY` — Polymarket кошелёк
+- `WALLET_PROXY` — прокси (опционально)
+- `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` — Kalshi API
+
+## Команды: `python3 -m momentum_bot`
+
+- `watch` — live monitoring with spike detection
+- `status` — позиции и P&L
+- `resolve` — резолюция истёкших позиций
+
+Конфиг: `momentum_bot/config.yaml`
+База: `data/momentum_bot.db`
+
+Ключевые секции:
+
+- `strategy`
+- `market_filter`
+- `runtime`
+- `db`
+- `polymarket`
+- `kalshi`
+
+## Команды: `python3 -m real_momentum_bot`
+
+- `watch` — live monitoring + real order execution
+- `status` — позиции и P&L
+- `resolve` — резолюция истёкших позиций + retry redeem
+
+Конфиг: `real_momentum_bot/config.yaml`
+База: `data/real_momentum_bot.db`
+
+Переменные `.env` для `real_momentum_bot`:
 - `WALLET_PRIVATE_KEY` — Polymarket кошелёк
 - `WALLET_PROXY` — прокси (опционально)
 - `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` — Kalshi API
