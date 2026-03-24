@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import math
 import os
 import time
 import uuid
@@ -15,6 +16,10 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from eth_account import Account
 from py_clob_client.client import ClobClient as PyClobClient
 from py_clob_client.clob_types import MarketOrderArgs, OrderType
+try:
+    from py_clob_client.clob_types import OrderArgs
+except ImportError:
+    OrderArgs = None
 from web3 import Web3
 
 # ── Константы Polymarket ────────────────────────────────────────────────
@@ -127,23 +132,10 @@ class PolymarketTrader:
         post_ms = (time.time() - t1) * 1000
         total_ms = sign_ms + post_ms
 
-        status = resp.get("status", "") if isinstance(resp, dict) else str(resp)
-        order_id = resp.get("orderID", "") if isinstance(resp, dict) else ""
-        fill_price = 0.0
-        shares_matched = 0.0
-        shares_requested = 0.0
-        fee = 0.0
-
-        if order_id:
-            time.sleep(0.5)
-            try:
-                info = self._client.get_order(order_id)
-                shares_matched = float(info.get("size_matched", 0))
-                shares_requested = float(info.get("original_size", 0))
-                fill_price = float(info.get("price", 0))
-                fee = _polymarket_fee(shares_matched, fill_price)
-            except Exception as e:
-                print(f"[pm-order] get_order error: {e}")
+        status, order_id, fill_price, shares_matched, shares_requested, fee = self._extract_order_fields(
+            resp=resp,
+            wait_seconds=1.5,
+        )
 
         print(
             f"[pm-order] sign={sign_ms:.0f}ms post={post_ms:.0f}ms | "
@@ -159,6 +151,94 @@ class PolymarketTrader:
             latency_ms=round(total_ms, 1),
             raw_response=resp if isinstance(resp, dict) else {},
         )
+
+    def place_limit_buy_order(
+        self,
+        token_id: str,
+        price: float,
+        size: float,
+        wait_seconds: float = 1.5,
+    ) -> OrderResult:
+        if OrderArgs is None:
+            raise RuntimeError("py_clob_client.OrderArgs недоступен")
+
+        rounded_price = math.floor(price * 100) / 100.0
+        if rounded_price <= 0:
+            raise ValueError(f"Некорректная PM limit price: {price}")
+        if size <= 0:
+            raise ValueError(f"Некорректный PM size: {size}")
+
+        args = OrderArgs(token_id=token_id, price=rounded_price, size=size, side="BUY")
+        t0 = time.time()
+        order = self._client.create_order(args)
+        sign_ms = (time.time() - t0) * 1000
+
+        t1 = time.time()
+        resp = self._client.post_order(order, orderType=OrderType.GTC)
+        post_ms = (time.time() - t1) * 1000
+        total_ms = sign_ms + post_ms
+
+        status, order_id, fill_price, shares_matched, shares_requested, fee = self._extract_order_fields(
+            resp=resp,
+            wait_seconds=wait_seconds,
+        )
+
+        print(
+            f"[pm-limit] sign={sign_ms:.0f}ms post={post_ms:.0f}ms | "
+            f"status={status} | req={shares_requested:.4f} | fill={shares_matched:.4f}@{fill_price:.4f} | "
+            f"limit={rounded_price:.4f} | fee=${fee:.4f}"
+        )
+        return OrderResult(
+            order_id=order_id,
+            status=status,
+            fill_price=fill_price,
+            shares_matched=shares_matched,
+            shares_requested=shares_requested,
+            fee=fee,
+            latency_ms=round(total_ms, 1),
+            raw_response=resp if isinstance(resp, dict) else {},
+        )
+
+    def cancel_order(self, order_id: str) -> bool:
+        if not order_id:
+            return False
+        try:
+            response = self._client.cancel(order_id)
+            canceled = response.get("canceled", []) if isinstance(response, dict) else []
+            ok = order_id in canceled if canceled else True
+            print(f"[pm-cancel] {'OK' if ok else 'FAILED'} | order={order_id[:16]}...")
+            return ok
+        except Exception as e:
+            print(f"[pm-cancel] FAILED | order={order_id[:16]}... | {e}")
+            return False
+
+    def _extract_order_fields(
+        self,
+        resp: dict | object,
+        wait_seconds: float,
+    ) -> tuple[str, str, float, float, float, float]:
+        status = resp.get("status", "") if isinstance(resp, dict) else str(resp)
+        order_id = resp.get("orderID", "") if isinstance(resp, dict) else ""
+        fill_price = 0.0
+        shares_matched = 0.0
+        shares_requested = 0.0
+        fee = 0.0
+
+        if not order_id:
+            return status, order_id, fill_price, shares_matched, shares_requested, fee
+
+        time.sleep(wait_seconds)
+        try:
+            info = self._client.get_order(order_id)
+            status = info.get("status", status)
+            shares_matched = float(info.get("size_matched", 0))
+            shares_requested = float(info.get("original_size", 0))
+            fill_price = float(info.get("price", 0))
+            fee = _polymarket_fee(shares_matched, fill_price)
+        except Exception as e:
+            print(f"[pm-order] get_order error: {e}")
+
+        return status, order_id, fill_price, shares_matched, shares_requested, fee
 
     def redeem(self, market_id: str, pending_tx_hash: str = "") -> RedeemResult:
         try:

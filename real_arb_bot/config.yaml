@@ -1,5 +1,5 @@
 trading:
-  stake_per_pair_usd: 100.0
+  stake_per_pair_usd: 80.0
   min_lock_edge: 0.06
   min_profit_pct: 3.0
   max_lock_edge: 0.45
@@ -20,7 +20,8 @@ safety:
   dry_run: false
   balance_divergence_threshold: 5.0
   min_partial_fill_pct: 50
-  kalshi_slippage_cents: 2
+  kalshi_slippage_cents: 1
+  polymarket_price_buffer_cents: 2
 
 market_filter:
   symbol: ""

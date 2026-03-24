@@ -22,6 +22,7 @@ class SafetyGuard:
         self.balance_divergence_threshold: float = float(s.get("balance_divergence_threshold", 5.0))
         self.min_partial_fill_pct: float = float(s.get("min_partial_fill_pct", 50))
         self.kalshi_slippage_cents: int = int(s.get("kalshi_slippage_cents", 2))
+        self.polymarket_price_buffer_cents: int = int(s.get("polymarket_price_buffer_cents", 1))
         self.trading_min_lock_edge: float = float(config["trading"]["min_lock_edge"])
         self.min_profit_pct: float = float(config["trading"].get("min_profit_pct", 3.0))
         self.max_open_pairs: int = int(config["trading"]["max_open_pairs"])

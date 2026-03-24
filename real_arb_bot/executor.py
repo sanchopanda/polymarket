@@ -22,6 +22,9 @@ class ExecutionResult:
 
 
 class OrderExecutor:
+    PM_LIMIT_WAIT_SECONDS = 1.5
+    PM_SHARE_EPSILON = 0.01
+
     def __init__(
         self,
         pm_trader: PolymarketTrader,
@@ -35,6 +38,7 @@ class OrderExecutor:
         self.db = db
         self.min_partial_fill_pct = safety.min_partial_fill_pct
         self.kalshi_slippage_cents = safety.kalshi_slippage_cents
+        self.pm_price_buffer = safety.polymarket_price_buffer_cents / 100.0
 
     def execute_pair(
         self,
@@ -47,7 +51,7 @@ class OrderExecutor:
 
         Порядок:
         1. Kalshi первым (limit order — контроль цены, чёткий ответ)
-        2. Polymarket вторым (FOK — всё или ничего)
+        2. Polymarket вторым (aggressive limit BUY на точный size)
 
         Если Kalshi наполнился, а Polymarket нет → orphaned_kalshi (нужен ручной разбор).
         """
@@ -133,7 +137,6 @@ class OrderExecutor:
             )
 
         # ── Шаг 2: Polymarket ───────────────────────────────────────────
-        pm_side = "yes" if opp.buy_yes_venue == "polymarket" else "no"
         pm_token_id = (
             opp.polymarket_market_id  # рынок, но нам нужен token_id
         )
@@ -141,13 +144,21 @@ class OrderExecutor:
         # передаём через leg.market_id который == token_id в нашем случае
         pm_token_id = pm_leg.market_id
 
-        # PM нога должна купить ровно столько контрактов, сколько заполнил Kalshi
-        # (не масштабировать по долларам — разные цены дают разные кол-ва контрактов)
-        pm_amount_usd = kalshi_order.shares_matched * pm_leg.best_ask
+        max_pm_price = 1.0 - kalshi_order.fill_price - self.safety.trading_min_lock_edge
+        if max_pm_price <= 0:
+            return ExecutionResult(
+                success=False,
+                kalshi_order=kalshi_order,
+                polymarket_order=None,
+                execution_status="failed",
+                reason=f"pm_price_cap_non_positive ({max_pm_price:.4f})",
+            )
 
-        # Polymarket min order size = $1
-        if pm_amount_usd < 1.0:
-            print(f"[executor] PM amount ${pm_amount_usd:.2f} < $1 min → unwind Kalshi")
+        pm_limit_price = min(max_pm_price, pm_leg.best_ask + self.pm_price_buffer)
+        pm_limit_price = math.floor(pm_limit_price * 100) / 100.0
+        pm_min_notional = kalshi_order.shares_matched * pm_limit_price
+        if pm_min_notional < 1.0:
+            print(f"[executor] PM amount ${pm_min_notional:.2f} < $1 min → unwind Kalshi")
             unwind = self._try_unwind_kalshi(
                 kalshi_ticker, kalshi_side,
                 int(kalshi_order.shares_matched),
@@ -163,7 +174,7 @@ class OrderExecutor:
                 kalshi_order=kalshi_order,
                 polymarket_order=empty,
                 execution_status="unwound_kalshi" if unwind else "orphaned_kalshi",
-                reason=f"pm_amount_too_small (${pm_amount_usd:.2f})",
+                reason=f"pm_amount_too_small (${pm_min_notional:.2f})",
                 unwind_order=unwind,
                 realized_pnl=self._realized_unwind_pnl(kalshi_balance_before) if unwind else None,
             )
@@ -171,14 +182,18 @@ class OrderExecutor:
         self.db.audit("order_attempt", None, {
             "venue": "polymarket",
             "token_id": pm_token_id,
-            "amount_usd": pm_amount_usd,
+            "size": kalshi_order.shares_matched,
+            "limit_price": pm_limit_price,
+            "price_cap": max_pm_price,
             "kalshi_shares": kalshi_order.shares_matched,
         })
 
         try:
-            pm_order = self.pm.place_fok_order(
+            pm_order = self.pm.place_limit_buy_order(
                 token_id=pm_token_id,
-                amount_usd=pm_amount_usd,
+                price=pm_limit_price,
+                size=kalshi_order.shares_matched,
+                wait_seconds=self.PM_LIMIT_WAIT_SECONDS,
             )
         except Exception as e:
             print(
@@ -219,9 +234,14 @@ class OrderExecutor:
             "fill": pm_order.shares_matched,
             "fill_price": pm_order.fill_price,
             "fee": pm_order.fee,
+            "shares_requested": pm_order.shares_requested,
         })
 
-        if pm_order.shares_matched <= 0 or pm_order.status not in {"matched", "MATCHED"}:
+        pm_missing = kalshi_order.shares_matched - pm_order.shares_matched
+        if pm_order.order_id and pm_missing > self.PM_SHARE_EPSILON:
+            self.pm.cancel_order(pm_order.order_id)
+
+        if pm_order.shares_matched <= 0:
             print(
                 f"[executor] ВНИМАНИЕ: Kalshi заполнен, Polymarket не исполнился!\n"
                 f"           kalshi: {kalshi_order.shares_matched} контрактов @ {kalshi_order.fill_price}\n"
@@ -239,6 +259,31 @@ class OrderExecutor:
                 polymarket_order=pm_order,
                 execution_status="unwound_kalshi" if unwind else "orphaned_kalshi",
                 reason=f"polymarket_not_filled: {pm_order.status}" + (f" | kalshi_unwound" if unwind else ""),
+                unwind_order=unwind,
+                realized_pnl=self._realized_unwind_pnl(kalshi_balance_before) if unwind else None,
+            )
+
+        if pm_missing > self.PM_SHARE_EPSILON:
+            print(
+                f"[executor] ВНИМАНИЕ: PM limit filled only partially.\n"
+                f"           kalshi: {kalshi_order.shares_matched} контрактов @ {kalshi_order.fill_price}\n"
+                f"           polymarket: {pm_order.shares_matched:.4f}/{kalshi_order.shares_matched:.4f} @ {pm_order.fill_price:.4f}"
+            )
+            unwind = self._try_unwind_kalshi(
+                kalshi_ticker, kalshi_side,
+                int(kalshi_order.shares_matched),
+                kalshi_price_cents,
+            )
+            return ExecutionResult(
+                success=False,
+                kalshi_order=kalshi_order,
+                polymarket_order=pm_order,
+                execution_status="unwound_kalshi" if unwind else "orphaned_kalshi",
+                reason=(
+                    f"polymarket_partial_fill: {pm_order.shares_matched:.4f}/"
+                    f"{kalshi_order.shares_matched:.4f}"
+                    + (f" | kalshi_unwound" if unwind else "")
+                ),
                 unwind_order=unwind,
                 realized_pnl=self._realized_unwind_pnl(kalshi_balance_before) if unwind else None,
             )
