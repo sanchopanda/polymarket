@@ -27,6 +27,8 @@ class RealMomentumDB:
                 leader_venue TEXT NOT NULL,
                 entry_price REAL NOT NULL,
                 leader_price_at_entry REAL NOT NULL,
+                signal_gap_cents REAL,
+                fill_gap_cents REAL,
                 shares REAL NOT NULL,
                 total_cost REAL NOT NULL,
                 spike_magnitude REAL NOT NULL,
@@ -46,6 +48,8 @@ class RealMomentumDB:
                 kalshi_ticker TEXT
             )
         """)
+        self._ensure_column("positions", "signal_gap_cents", "REAL")
+        self._ensure_column("positions", "fill_gap_cents", "REAL")
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,6 +60,12 @@ class RealMomentumDB:
             )
         """)
         self.conn.commit()
+
+    def _ensure_column(self, table: str, column: str, col_type: str) -> None:
+        cols = [r[1] for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        if column not in cols:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+            self.conn.commit()
 
     def open_position(
         self,
@@ -68,6 +78,8 @@ class RealMomentumDB:
         leader_venue: str,
         entry_price: float,
         leader_price: float,
+        signal_gap_cents: float | None,
+        fill_gap_cents: float | None,
         shares: float,
         total_cost: float,
         spike_magnitude: float,
@@ -84,14 +96,16 @@ class RealMomentumDB:
             """
             INSERT INTO positions
               (id, pair_key, symbol, title, expiry, side, bet_venue, leader_venue,
-               entry_price, leader_price_at_entry, shares, total_cost, spike_magnitude,
+               entry_price, leader_price_at_entry, signal_gap_cents, fill_gap_cents,
+               shares, total_cost, spike_magnitude,
                opened_at, order_id, fill_price, fill_shares, order_fee, status,
                pm_market_id, kalshi_ticker)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
             """,
             (
                 pos_id, pair_key, symbol, title, expiry.isoformat(), side,
-                bet_venue, leader_venue, entry_price, leader_price, shares,
+                bet_venue, leader_venue, entry_price, leader_price,
+                signal_gap_cents, fill_gap_cents, shares,
                 total_cost, spike_magnitude, now, order_id, fill_price,
                 fill_shares, order_fee, pm_market_id, kalshi_ticker,
             ),
@@ -111,13 +125,16 @@ class RealMomentumDB:
         ).fetchone()
         return row is not None
 
-    def has_open_opposite_side(self, pair_key: str, side: str) -> bool:
-        opposite = "no" if side == "yes" else "yes"
+    def has_open_side(self, pair_key: str, side: str) -> bool:
         row = self.conn.execute(
             "SELECT 1 FROM positions WHERE pair_key=? AND side=? AND status='open'",
-            (pair_key, opposite),
+            (pair_key, side),
         ).fetchone()
         return row is not None
+
+    def has_open_opposite_side(self, pair_key: str, side: str) -> bool:
+        opposite = "no" if side == "yes" else "yes"
+        return self.has_open_side(pair_key, opposite)
 
     def last_trade_time(self, pair_key: str, side: str) -> Optional[float]:
         row = self.conn.execute(

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from cross_arb_bot.kalshi_feed import KalshiFeed
 from cross_arb_bot.matcher import kalshi_taker_fee, match_markets, polymarket_crypto_taker_fee
-from cross_arb_bot.models import MatchedMarketPair
+from cross_arb_bot.models import MatchedMarketPair, NormalizedMarket
 from cross_arb_bot.polymarket_feed import PolymarketFeed
 
 from momentum_bot.db import MomentumDB
@@ -32,16 +32,79 @@ class MomentumEngine:
             market_filter=self.market_filter,
             series_tickers=config["kalshi"].get("series_tickers", []),
         )
+        self.last_discovery_stats: dict[str, int | str | None] = {
+            "pm_markets": 0,
+            "kalshi_markets": 0,
+            "matches": 0,
+            "kalshi_error": None,
+            "same_symbol_pairs": 0,
+            "symbol_only_pairs": 0,
+            "kind_mismatch": 0,
+            "rule_mismatch": 0,
+            "interval_mismatch": 0,
+            "expiry_mismatch": 0,
+        }
 
     def discover_pairs(self) -> list[MatchedMarketPair]:
         pm_markets = self.pm_feed.fetch_markets()
-        kalshi_markets, _ = self.kalshi_feed.fetch_markets()
+        kalshi_markets, kalshi_error = self.kalshi_feed.fetch_markets()
+        diag = self._diagnose_matching(pm_markets, kalshi_markets)
         matches = match_markets(
             pm_markets,
             kalshi_markets,
             self.market_filter["expiry_tolerance_seconds"],
         )
+        self.last_discovery_stats = {
+            "pm_markets": len(pm_markets),
+            "kalshi_markets": len(kalshi_markets),
+            "matches": len(matches),
+            "kalshi_error": kalshi_error,
+            **diag,
+        }
         return matches
+
+    def _diagnose_matching(
+        self,
+        pm_markets: list[NormalizedMarket],
+        kalshi_markets: list[NormalizedMarket],
+    ) -> dict[str, int]:
+        same_symbol_pairs = 0
+        symbol_only_pairs = 0
+        kind_mismatch = 0
+        rule_mismatch = 0
+        interval_mismatch = 0
+        expiry_mismatch = 0
+        expiry_tolerance_seconds = self.market_filter["expiry_tolerance_seconds"]
+
+        for pm in pm_markets:
+            for kalshi in kalshi_markets:
+                if pm.symbol != kalshi.symbol:
+                    continue
+                same_symbol_pairs += 1
+
+                if pm.market_kind != kalshi.market_kind:
+                    kind_mismatch += 1
+                    continue
+                if pm.rule_family != kalshi.rule_family:
+                    rule_mismatch += 1
+                    continue
+                if pm.interval_minutes != kalshi.interval_minutes:
+                    interval_mismatch += 1
+                    continue
+
+                symbol_only_pairs += 1
+                delta = abs((pm.expiry - kalshi.expiry).total_seconds())
+                if delta > expiry_tolerance_seconds:
+                    expiry_mismatch += 1
+
+        return {
+            "same_symbol_pairs": same_symbol_pairs,
+            "symbol_only_pairs": symbol_only_pairs,
+            "kind_mismatch": kind_mismatch,
+            "rule_mismatch": rule_mismatch,
+            "interval_mismatch": interval_mismatch,
+            "expiry_mismatch": expiry_mismatch,
+        }
 
     def evaluate_signal(self, signal: SpikeSignal) -> bool:
         strat = self.strategy

@@ -15,6 +15,8 @@ from momentum_bot.spike_detector import SpikeDetector
 
 class MomentumWatchRunner:
     MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    EMPTY_SCAN_RETRIES = 2
+    EMPTY_SCAN_RETRY_DELAY_SECONDS = 2.0
 
     def __init__(self, engine: MomentumEngine) -> None:
         self.engine = engine
@@ -120,7 +122,38 @@ class MomentumWatchRunner:
 
     def _refresh_watchlist(self, prev_ws: MarketWebSocketClient | None = None) -> MarketWebSocketClient | None:
         print("[Momentum][Watch] Scanning markets...")
-        matches = self.engine.discover_pairs()
+        matches: list[MatchedMarketPair] = []
+        stats: dict[str, int | str | None] = {}
+        for attempt in range(1, self.EMPTY_SCAN_RETRIES + 2):
+            matches = self.engine.discover_pairs()
+            stats = self.engine.last_discovery_stats
+            kalshi_error = stats.get("kalshi_error")
+            print(
+                f"[Momentum][Watch] Discovery attempt {attempt}: "
+                f"pm={stats.get('pm_markets', 0)} "
+                f"kalshi={stats.get('kalshi_markets', 0)} "
+                f"matches={stats.get('matches', 0)}"
+                + (f" | kalshi_error={kalshi_error}" if kalshi_error else "")
+            )
+            if not matches:
+                print(
+                    f"[Momentum][Watch] Match diagnostics: "
+                    f"same_symbol={stats.get('same_symbol_pairs', 0)} "
+                    f"symbol_after_kind_rule_interval={stats.get('symbol_only_pairs', 0)} "
+                    f"kind_mismatch={stats.get('kind_mismatch', 0)} "
+                    f"rule_mismatch={stats.get('rule_mismatch', 0)} "
+                    f"interval_mismatch={stats.get('interval_mismatch', 0)} "
+                    f"expiry_mismatch={stats.get('expiry_mismatch', 0)}"
+                )
+            if matches:
+                break
+            if attempt >= self.EMPTY_SCAN_RETRIES + 1:
+                break
+            print(
+                f"[Momentum][Watch] Empty match set, retry in "
+                f"{self.EMPTY_SCAN_RETRY_DELAY_SECONDS:.0f}s..."
+            )
+            time.sleep(self.EMPTY_SCAN_RETRY_DELAY_SECONDS)
 
         watched: dict[str, MatchedMarketPair] = {}
         pairs_by_asset: dict[str, set[str]] = {}

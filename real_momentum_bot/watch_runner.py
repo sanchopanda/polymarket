@@ -34,17 +34,16 @@ class RealMomentumWatchRunner:
         self._refresh_lock = threading.Lock()
         self._refresh_in_progress = False
         self._last_skip_log: dict[str, float] = {}  # key -> last log timestamp
+        self._pm_ws: MarketWebSocketClient | None = None
+        self._ws_active = False
 
     def run(self) -> None:
         runtime = self.engine.config["runtime"]
-        universe_refresh = runtime["universe_refresh_seconds"]
         status_interval = runtime["status_interval_seconds"]
 
-        ws: MarketWebSocketClient | None = None
-        last_refresh = 0.0
         last_status = 0.0
-        ws_active = False  # WS сейчас открыт?
-        scanned_this_cycle = False  # сканировали ли рынки в текущем 15м цикле
+        early_scan_done = False
+        window_scan_done = False
 
         try:
             while True:
@@ -57,32 +56,33 @@ class RealMomentumWatchRunner:
                 minute_in_cycle = now_dt.minute % 15
                 should_be_active = minute_in_cycle >= 8  # за минуту до окна ставок
 
-                # Сканируем рынки один раз на минуте 2 каждого цикла
-                if minute_in_cycle == 2 and not scanned_this_cycle and not self._refresh_in_progress:
-                    print(f"[RealMomentum][Watch] Сканируем рынки (minute={now_dt.minute})")
+                if minute_in_cycle == 0:
+                    early_scan_done = False
+                    window_scan_done = False
+
+                # Ранний scan universe один раз на минуте 2 каждого цикла
+                if minute_in_cycle == 2 and not early_scan_done and not self._refresh_in_progress:
+                    print(f"[RealMomentum][Watch] Ранний scan universe (minute={now_dt.minute})")
                     self._start_refresh_async(prev_ws=None)
-                    scanned_this_cycle = True
-                elif minute_in_cycle != 2:
-                    scanned_this_cycle = False
+                    early_scan_done = True
 
                 # Открываем WS при входе в окно
-                if should_be_active and not ws_active:
+                if should_be_active and not self._ws_active:
                     print(f"[RealMomentum][Watch] Окно ставок — открываем WS (minute={now_dt.minute})")
-                    # Если ещё не сканировали — делаем scan сейчас
-                    if not scanned_this_cycle and not self._refresh_in_progress:
-                        self._start_refresh_async(prev_ws=None)
-                        scanned_this_cycle = True
-                    ws_active = True
+                    # Обязательный свежий scan прямо перед торговым окном
+                    if not window_scan_done and not self._refresh_in_progress:
+                        print(f"[RealMomentum][Watch] Предоконный scan universe (minute={now_dt.minute})")
+                        self._start_refresh_async(prev_ws=self._pm_ws)
+                        window_scan_done = True
+                    else:
+                        self._ensure_ws_started(prev_ws=self._pm_ws)
+                    self._ws_active = True
 
                 # Закрываем WS при выходе из окна
-                elif not should_be_active and ws_active:
+                elif not should_be_active and self._ws_active:
                     print(f"[RealMomentum][Watch] Вне окна ставок — закрываем WS (minute={now_dt.minute})")
-                    if self._kalshi_ws is not None:
-                        self._kalshi_ws.stop()
-                        self._kalshi_ws = None
-                    self._current_asset_ids = []
-                    self._current_kalshi_tickers = []
-                    ws_active = False
+                    self._stop_all_ws(clear_subscriptions=False)
+                    self._ws_active = False
 
                 now = time.time()
                 if (now - last_status) >= status_interval:
@@ -90,7 +90,7 @@ class RealMomentumWatchRunner:
                     self.engine.print_status()
                     print(
                         f"[RealMomentum][Watch] pairs={len(self.watched)}"
-                        f" | ws={'on' if ws_active else 'off (waiting)'}"
+                        f" | ws={'on' if self._ws_active else 'off (waiting)'}"
                         f" | minute_in_cycle={minute_in_cycle}"
                     )
                     last_status = now
@@ -99,10 +99,7 @@ class RealMomentumWatchRunner:
         except KeyboardInterrupt:
             print("\n[RealMomentum][Watch] Остановлен.")
         finally:
-            if ws is not None:
-                ws.stop()
-            if self._kalshi_ws is not None:
-                self._kalshi_ws.stop()
+            self._stop_all_ws(clear_subscriptions=True)
 
     def _start_refresh_async(self, prev_ws: MarketWebSocketClient | None = None) -> None:
         if self._refresh_in_progress:
@@ -122,6 +119,8 @@ class RealMomentumWatchRunner:
     def _refresh_watchlist(self, prev_ws: MarketWebSocketClient | None = None) -> MarketWebSocketClient | None:
         print("[RealMomentum][Watch] Сканирование рынков...")
         matches = self.engine.discover_pairs()
+        prev_asset_ids = list(self._current_asset_ids)
+        prev_kalshi_tickers = list(self._current_kalshi_tickers)
 
         watched: dict[str, MatchedMarketPair] = {}
         pairs_by_asset: dict[str, set[str]] = {}
@@ -156,35 +155,27 @@ class RealMomentumWatchRunner:
         self.pairs_by_kalshi_ticker = pairs_by_kalshi
         self.token_to_side = token_to_side
 
-        new_kalshi_tickers = sorted(set(pairs_by_kalshi.keys()))
-        self._refresh_kalshi_ws(new_kalshi_tickers)
-
         new_asset_ids = sorted(set(asset_ids))
         if not new_asset_ids:
             self.live_books = {}
             print("[RealMomentum][Watch] Нет пар для мониторинга.")
+            if self._ws_active:
+                self._stop_all_ws(clear_subscriptions=False)
             return None
 
         kept = set(new_asset_ids)
         self.live_books = {k: v for k, v in self.live_books.items() if k in kept}
-
-        if new_asset_ids == self._current_asset_ids and prev_ws is not None:
-            print(f"[RealMomentum][Watch] {len(watched)} пар (WS переиспользован).")
-            self._current_asset_ids = new_asset_ids
-            return prev_ws
-
-        if prev_ws is not None:
-            prev_ws.stop()
-
-        print(f"[RealMomentum][Watch] {len(watched)} пар, {len(new_asset_ids)} PM токенов.")
         self._current_asset_ids = new_asset_ids
-        ws = MarketWebSocketClient(
-            url=self.MARKET_WS_URL,
-            asset_ids=new_asset_ids,
-            on_message=self.on_ws_message,
-        )
-        ws.start()
-        return ws
+        self._current_kalshi_tickers = sorted(set(pairs_by_kalshi.keys()))
+        print(f"[RealMomentum][Watch] {len(watched)} пар, {len(new_asset_ids)} PM токенов.")
+
+        if self._ws_active:
+            return self._ensure_ws_started(
+                prev_ws=prev_ws,
+                prev_asset_ids=prev_asset_ids,
+                prev_kalshi_tickers=prev_kalshi_tickers,
+            )
+        return prev_ws
 
     def _refresh_kalshi_ws(self, new_tickers: list[str]) -> None:
         if new_tickers == self._current_kalshi_tickers and self._kalshi_ws is not None:
@@ -205,7 +196,50 @@ class RealMomentumWatchRunner:
             print(f"[RealMomentum][Watch] Kalshi WS недоступен: {exc}")
             self._kalshi_ws = None
 
+    def _ensure_ws_started(
+        self,
+        prev_ws: MarketWebSocketClient | None = None,
+        prev_asset_ids: list[str] | None = None,
+        prev_kalshi_tickers: list[str] | None = None,
+    ) -> MarketWebSocketClient | None:
+        new_asset_ids = self._current_asset_ids
+        new_kalshi_tickers = self._current_kalshi_tickers
+        if new_kalshi_tickers != (prev_kalshi_tickers or []):
+            self._refresh_kalshi_ws(new_kalshi_tickers)
+
+        if not new_asset_ids:
+            return None
+        if new_asset_ids == (prev_asset_ids or []) and prev_ws is not None:
+            print(f"[RealMomentum][Watch] {len(self.watched)} пар (WS переиспользован).")
+            self._pm_ws = prev_ws
+            return prev_ws
+
+        if prev_ws is not None:
+            prev_ws.stop()
+
+        ws = MarketWebSocketClient(
+            url=self.MARKET_WS_URL,
+            asset_ids=new_asset_ids,
+            on_message=self.on_ws_message,
+        )
+        ws.start()
+        self._pm_ws = ws
+        return ws
+
+    def _stop_all_ws(self, clear_subscriptions: bool) -> None:
+        if self._pm_ws is not None:
+            self._pm_ws.stop()
+            self._pm_ws = None
+        if self._kalshi_ws is not None:
+            self._kalshi_ws.stop()
+            self._kalshi_ws = None
+        if clear_subscriptions:
+            self._current_asset_ids = []
+            self._current_kalshi_tickers = []
+
     def on_ws_message(self, payload: dict) -> None:
+        if not self._ws_active:
+            return
         if isinstance(payload, list):
             for item in payload:
                 if isinstance(item, dict):
@@ -241,6 +275,8 @@ class RealMomentumWatchRunner:
             self._check_for_signals(pair_key)
 
     def on_kalshi_update(self, ticker: str, top: KalshiTopOfBook) -> None:
+        if not self._ws_active:
+            return
         self.live_books_kalshi[ticker] = top
         now = time.time()
         if top.best_yes_ask > 0:
@@ -272,8 +308,6 @@ class RealMomentumWatchRunner:
 
         disable_pm_kalshi = self.engine.strategy.get("disable_pm_to_kalshi", False)
         lookback = self.engine.strategy.get("gap_rising_lookback_seconds", 20.0)
-        skip_log_interval = 30.0  # логируем одинаковый скип не чаще раза в 30с
-
         for leader_venue, leader_id, follower_venue, side in combos:
             if not leader_id:
                 continue
@@ -297,19 +331,7 @@ class RealMomentumWatchRunner:
                 if gap_cents < gap_min:
                     continue
                 # Лидер не должен падать за последние N секунд
-                baseline = self.spike_detector.baseline_price(leader_venue, leader_id, side, lookback)
                 if not self.spike_detector.is_rising(leader_venue, leader_id, side, lookback):
-                    skip_key = f"falling:{pair_key}:{leader_venue}:{side}"
-                    now_ts = time.time()
-                    if now_ts - self._last_skip_log.get(skip_key, 0) >= skip_log_interval:
-                        baseline_str = f"{baseline:.4f}" if baseline is not None else "n/a"
-                        print(
-                            f"[RealMomentum][GAP-SKIP] {pm.symbol} {side.upper()}"
-                            f" | leader={leader_venue} now={leader_price:.4f} baseline({lookback:.0f}s)={baseline_str}"
-                            f" gap={gap_cents:.1f}c follower={follower_venue} price={follower_price:.4f}"
-                            f" | лидер падает"
-                        )
-                        self._last_skip_log[skip_key] = now_ts
                     continue
                 signal_type = "gap"
                 spike_val = 0.0
@@ -330,26 +352,22 @@ class RealMomentumWatchRunner:
                     spike_magnitude=spike_val,
                 )
                 if reject_reason is not None:
-                    _silent = {"outside window", "duplicate position", "opposite side open"}
-                    if reject_reason not in _silent:
-                        skip_key = f"eval:{pair_key}:{leader_venue}:{side}:{reject_reason}"
-                        now_ts = time.time()
-                        if now_ts - self._last_skip_log.get(skip_key, 0) >= skip_log_interval:
-                            print(
-                                f"[RealMomentum][GAP-SKIP] {pm.symbol} {side.upper()}"
-                                f" | leader={leader_venue} price={leader_price:.4f}"
-                                f" gap={gap_cents:.1f}c follower={follower_venue} price={follower_price:.4f}"
-                                f" | {reject_reason}"
-                            )
-                            self._last_skip_log[skip_key] = now_ts
                     continue
 
-                print(
-                    f"[RealMomentum][SIGNAL][{signal_type.upper()}] {pm.symbol} {side.upper()}"
-                    f" | leader={leader_venue} price={leader_price:.4f}"
-                    + (f" spike={spike_val:.1f}¢" if signal_type == "spike" else f" gap={gap_cents:.1f}¢")
-                    + f" | follower={follower_venue} price={follower_price:.4f}"
-                )
+                if self.engine.is_reverse_signal(pair_key, side, leader_price, follower_price):
+                    print(
+                        f"[RealMomentum][REVERSE-SIGNAL] {pm.symbol} {side.upper()}"
+                        f" | leader={leader_venue} price={leader_price:.4f}"
+                        + (f" spike={spike_val:.1f}¢" if signal_type == 'spike' else f" gap={gap_cents:.1f}¢")
+                        + f" | follower={follower_venue} price={follower_price:.4f}"
+                    )
+                else:
+                    print(
+                        f"[RealMomentum][SIGNAL][{signal_type.upper()}] {pm.symbol} {side.upper()}"
+                        f" | leader={leader_venue} price={leader_price:.4f}"
+                        + (f" spike={spike_val:.1f}¢" if signal_type == "spike" else f" gap={gap_cents:.1f}¢")
+                        + f" | follower={follower_venue} price={follower_price:.4f}"
+                    )
 
                 # Коллбэк для проверки актуальной цены прямо перед отправкой ордера
                 def _current_pm_price(fv=follower_venue, m=matched, s=side):

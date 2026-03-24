@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 from datetime import datetime, timezone
 
@@ -38,6 +39,27 @@ class RealMomentumEngine:
         self.kalshi_trader = KalshiTrader()
         # cooldown после любой попытки ордера (даже неудачной)
         self._last_attempt: dict[tuple[str, str, str], float] = {}  # (pair_key, side, venue) -> ts
+        self.notifier = None
+        self._init_notifier()
+
+    def _init_notifier(self) -> None:
+        if not os.environ.get("TELEGRAM_TOKEN"):
+            return
+        try:
+            from real_momentum_bot.telegram_notify import TelegramNotifier
+            self.notifier = TelegramNotifier(get_status_fn=self.get_status_text)
+            self.notifier.start()
+            print("[Telegram] Бот real_momentum запущен.")
+        except Exception as e:
+            print(f"[Telegram] Не удалось запустить real_momentum bot: {e}")
+
+    def is_reverse_signal(self, pair_key: str, side: str, leader_price: float, follower_price: float) -> bool:
+        if not self.db.has_open_opposite_side(pair_key, side):
+            return False
+        if self.db.has_open_side(pair_key, side):
+            return False
+        gap_cents = (leader_price - follower_price) * 100.0
+        return gap_cents >= float(self.strategy.get("reverse_signal_min_cents", 10.0))
 
     def discover_pairs(self) -> list[MatchedMarketPair]:
         pm_markets = self.pm_feed.fetch_markets()
@@ -48,14 +70,9 @@ class RealMomentumEngine:
         )
 
     def _stop_threshold(self) -> float:
-        """Trailing floor: max(min_floor, cumulative_pnl).
-
-        Защищаем всю прибыль выше начального бюджета.
-        При нулевой прибыли — минимальный порог min_floor_usd.
-        """
-        cum_pnl = self.db.cumulative_pnl()
-        min_floor = self.budget["min_floor_usd"]
-        return max(min_floor, cum_pnl)
+        """Dynamic floor as a fraction of current total balance."""
+        floor_pct = float(self.budget.get("floor_pct_of_total", 0.20))
+        return self._total_balance() * floor_pct
 
     def _total_balance(self) -> float:
         """Начальный бюджет + реализованный PnL."""
@@ -129,17 +146,20 @@ class RealMomentumEngine:
         if self.db.has_open_position(pair_key, side, follower_venue):
             return "duplicate position"
 
-        if self.db.has_open_opposite_side(pair_key, side):
+        reverse_mode = self.is_reverse_signal(pair_key, side, leader_price, follower_price)
+        if self.db.has_open_opposite_side(pair_key, side) and not reverse_mode:
             return "opposite side open"
 
+        trade_cooldown = strat.get("cooldown_seconds", 120)
         last_trade = self.db.last_trade_time(pair_key, side)
-        if last_trade is not None and (time.time() - last_trade) < strat["cooldown_seconds"]:
-            remaining = int(strat["cooldown_seconds"] - (time.time() - last_trade))
+        if last_trade is not None and (time.time() - last_trade) < trade_cooldown:
+            remaining = int(trade_cooldown - (time.time() - last_trade))
             return f"cooldown {remaining}s"
 
+        attempt_cooldown = strat.get("attempt_cooldown_seconds", trade_cooldown)
         last_attempt = self._last_attempt.get((pair_key, side, follower_venue), 0.0)
-        if (time.time() - last_attempt) < strat["cooldown_seconds"]:
-            remaining = int(strat["cooldown_seconds"] - (time.time() - last_attempt))
+        if (time.time() - last_attempt) < attempt_cooldown:
+            remaining = int(attempt_cooldown - (time.time() - last_attempt))
             return f"attempt cooldown {remaining}s"
 
         if len(self.db.get_open_positions()) >= strat["max_open_positions"]:
@@ -164,7 +184,13 @@ class RealMomentumEngine:
         """Place a real order on the follower venue. Returns True if filled."""
         strat = self.strategy
         trades_per_budget = strat.get("trades_per_budget", 10)
-        stake = max(1.0, round(self._free_balance() / trades_per_budget, 2))
+        reverse_mode = self.is_reverse_signal(pair_key, side, leader_price, follower_price)
+        if reverse_mode:
+            stake = float(strat.get("reverse_test_stake_usd", 1.0))
+        elif leader_venue == "polymarket" and follower_venue == "kalshi":
+            stake = float(strat.get("pm_to_kalshi_test_stake_usd", 1.0))
+        else:
+            stake = max(1.0, round(self._free_balance() / trades_per_budget, 2))
         pm = matched.polymarket
         ka = matched.kalshi
 
@@ -172,6 +198,7 @@ class RealMomentumEngine:
         expiry = min(pm.expiry, ka.expiry)
         pm_market_id = pm.market_id
         kalshi_ticker = ka.market_id
+        signal_gap_cents = gap_cents
 
         # Ставим cooldown сразу при попытке, независимо от результата
         self._last_attempt[(pair_key, side, follower_venue)] = time.time()
@@ -205,10 +232,12 @@ class RealMomentumEngine:
                 "venue": "kalshi", "order_id": result.order_id,
                 "fill": result.shares_matched, "fee": result.fee,
             })
+            fill_gap_cents = (leader_price - result.fill_price) * 100.0
             pos_id = self.db.open_position(
                 pair_key=pair_key, symbol=symbol, title=title, expiry=expiry,
                 side=side, bet_venue=follower_venue, leader_venue=leader_venue,
                 entry_price=price_cents / 100.0, leader_price=leader_price,
+                signal_gap_cents=signal_gap_cents, fill_gap_cents=fill_gap_cents,
                 shares=result.shares_matched, total_cost=total_cost,
                 spike_magnitude=spike_magnitude,
                 order_id=result.order_id, fill_price=result.fill_price,
@@ -216,8 +245,9 @@ class RealMomentumEngine:
                 pm_market_id=pm_market_id, kalshi_ticker=kalshi_ticker,
             )
             print(
-                f"[RealMomentum][OPEN] {symbol} {side.upper()} @ kalshi"
-                f" | leader={leader_venue} price={leader_price:.4f} spike={spike_magnitude:.1f}¢ gap={gap_cents:.1f}¢"
+                f"[RealMomentum][{'REVERSE' if reverse_mode else 'OPEN'}] {symbol} {side.upper()} @ kalshi"
+                f" | leader={leader_venue} price={leader_price:.4f} spike={spike_magnitude:.1f}¢"
+                f" signal_gap={signal_gap_cents:.1f}¢ fill_gap={fill_gap_cents:.1f}¢"
                 f" | entry={price_cents/100:.2f} fill={result.shares_matched:.2f}"
                 f" | cost=${total_cost:.2f} | id={pos_id[:8]}"
             )
@@ -283,10 +313,12 @@ class RealMomentumEngine:
                 "fill": shares, "fee": fee,
                 "estimated": result.shares_matched <= 0,
             })
+            fill_gap_cents = (leader_price - fill_price) * 100.0
             pos_id = self.db.open_position(
                 pair_key=pair_key, symbol=symbol, title=title, expiry=expiry,
                 side=side, bet_venue=follower_venue, leader_venue=leader_venue,
                 entry_price=fill_price, leader_price=leader_price,
+                signal_gap_cents=signal_gap_cents, fill_gap_cents=fill_gap_cents,
                 shares=shares, total_cost=actual_cost,
                 spike_magnitude=spike_magnitude,
                 order_id=result.order_id, fill_price=fill_price,
@@ -294,8 +326,9 @@ class RealMomentumEngine:
                 pm_market_id=pm_market_id, kalshi_ticker=kalshi_ticker,
             )
             print(
-                f"[RealMomentum][OPEN] {symbol} {side.upper()} @ polymarket"
-                f" | leader={leader_venue} price={leader_price:.4f} spike={spike_magnitude:.1f}¢ gap={gap_cents:.1f}¢"
+                f"[RealMomentum][{'REVERSE' if reverse_mode else 'OPEN'}] {symbol} {side.upper()} @ polymarket"
+                f" | leader={leader_venue} price={leader_price:.4f} spike={spike_magnitude:.1f}¢"
+                f" signal_gap={signal_gap_cents:.1f}¢ fill_gap={fill_gap_cents:.1f}¢"
                 f" | entry={fill_price:.4f} fill={shares:.2f}"
                 f" | cost=${actual_cost:.2f} | id={pos_id[:8]}"
             )
@@ -349,7 +382,7 @@ class RealMomentumEngine:
             if self.is_stopped():
                 print(
                     f"[RealMomentum][STOP] Cumulative PnL ${self.db.cumulative_pnl():.2f}"
-                    f" <= stop_loss ${self.budget['stop_loss_usd']:.2f} — бот остановлен"
+                    f" | total=${self._total_balance():.2f} <= floor=${self._stop_threshold():.2f} — бот остановлен"
                 )
 
     def retry_redeems(self) -> None:
@@ -418,6 +451,72 @@ class RealMomentumEngine:
             return result
         return None
 
+    def get_status_text(self) -> str:
+        stats = self.db.stats()
+        total = self._total_balance()
+        free = self._free_balance()
+        threshold = self._stop_threshold()
+        cum_pnl = stats["cumulative_pnl"]
+
+        try:
+            pm_balance = self.pm_trader.get_balance()
+            ka_balance = self.kalshi_trader.get_balance()
+            balances_line = (
+                f"Polymarket: <b>${pm_balance:.2f}</b>\n"
+                f"Kalshi: <b>${ka_balance:.2f}</b>\n"
+                f"Total: <b>${pm_balance + ka_balance:.2f}</b>"
+            )
+        except Exception as e:
+            balances_line = f"Ошибка чтения балансов: <code>{e}</code>"
+
+        if self.is_stopped():
+            state = "STOPPED"
+        elif not self.can_place_new():
+            state = "WAITING RESOLVES"
+        else:
+            state = "RUNNING"
+
+        lines = [
+            "📈 <b>real_momentum_bot</b>",
+            f"State: <b>{state}</b>",
+            "",
+            "💼 <b>Виртуальный баланс</b>",
+            f"Total: <b>${total:.2f}</b>",
+            f"Free: <b>${free:.2f}</b>",
+            f"P&L: <b>${cum_pnl:+.2f}</b>",
+            f"Floor: <b>${threshold:.2f}</b>",
+            "",
+            "🏦 <b>Реальные балансы</b>",
+            balances_line,
+            "",
+            "📊 <b>Статистика</b>",
+            f"Open: {stats['open_count']} | Locked: ${stats['locked']:.2f}",
+            f"Resolved: {stats['resolved']} | Won: {stats['won']} | Lost: {stats['lost']}",
+        ]
+
+        open_rows = self.db.get_open_positions()
+        if open_rows:
+            lines.append("")
+            lines.append("📌 <b>Открытые позиции</b>")
+            for row in open_rows[:10]:
+                signal_gap = (
+                    float(row["signal_gap_cents"])
+                    if row["signal_gap_cents"] is not None
+                    else (float(row["leader_price_at_entry"]) - float(row["entry_price"])) * 100
+                )
+                fill_gap = (
+                    float(row["fill_gap_cents"])
+                    if row["fill_gap_cents"] is not None
+                    else (float(row["leader_price_at_entry"]) - float(row["entry_price"])) * 100
+                )
+                lines.append(
+                    f"{row['symbol']} {row['side'].upper()} @ {row['bet_venue']} "
+                    f"| leader={row['leader_venue']} | sig_gap={signal_gap:.1f}¢ fill_gap={fill_gap:.1f}¢ "
+                    f"| entry={row['entry_price']:.4f} | cost=${float(row['total_cost']):.2f}"
+                )
+
+        return "\n".join(lines)
+
     def print_status(self) -> None:
         stats = self.db.stats()
         total = self._total_balance()
@@ -441,9 +540,18 @@ class RealMomentumEngine:
 
         self._print_balances()
         for row in self.db.get_open_positions():
-            gap = (float(row['leader_price_at_entry']) - float(row['entry_price'])) * 100
+            signal_gap = (
+                float(row["signal_gap_cents"])
+                if row["signal_gap_cents"] is not None
+                else (float(row["leader_price_at_entry"]) - float(row["entry_price"])) * 100
+            )
+            fill_gap = (
+                float(row["fill_gap_cents"])
+                if row["fill_gap_cents"] is not None
+                else (float(row["leader_price_at_entry"]) - float(row["entry_price"])) * 100
+            )
             spike = float(row['spike_magnitude'])
-            signal_str = f"spike={spike:.1f}¢ gap={gap:.1f}¢"
+            signal_str = f"spike={spike:.1f}¢ sig_gap={signal_gap:.1f}¢ fill_gap={fill_gap:.1f}¢"
             print(
                 f"  {row['symbol']} {row['side'].upper()} @ {row['bet_venue']}"
                 f" | leader={row['leader_venue']} {signal_str}"

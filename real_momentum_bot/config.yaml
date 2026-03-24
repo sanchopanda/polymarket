@@ -1,25 +1,27 @@
 strategy:
   spike_threshold_cents: 7
   spike_signals_enabled: false  # отключены — gap сигналы работают лучше
-  disable_pm_to_kalshi: true    # PM→Kalshi убыточно, отключено
+  disable_pm_to_kalshi: false   # PM→Kalshi включено в тестовом режиме
   max_spike_cents: 30
-  max_entry_price: 0.90
+  max_entry_price: 0.70
   min_leader_price: 0.65
-  max_leader_price: 0.90
+  max_leader_price: 0.93
   max_price_gap_cents: 40           # kalshi→pm направление
   max_price_gap_cents_pm_to_kalshi: 15  # pm→kalshi: PM знает исход раньше, большой гэп = ловушка
   gap_signal_min_cents: 5       # статический гэп: минимальный разрыв для входа без спайка
   gap_rising_lookback_seconds: 45  # лидер не должен падать за последние N секунд
   spike_window_seconds: 45
-  cooldown_seconds: 120
+  cooldown_seconds: 60
+  attempt_cooldown_seconds: 5
   trades_per_budget: 10     # stake = free_balance / trades_per_budget
+  pm_to_kalshi_test_stake_usd: 1.0
+  reverse_signal_min_cents: 10.0
+  reverse_test_stake_usd: 1.0
   max_open_positions: 10
 
 budget:
-  total_usd: 20.0           # начальный виртуальный бюджет
-  min_floor_usd: 2.0        # минимальный порог остановки (при нулевой прибыли)
-  # порог = max(min_floor_usd, cumulative_pnl)
-  # пример: бюджет $30 (pnl=+$10) → порог=$10, останавливаем если баланс <= $10
+  total_usd: 50.0
+  floor_pct_of_total: 0.40  # floor = 40% от текущего total
 
 market_filter:
   symbol: ""
