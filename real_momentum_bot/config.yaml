@@ -9,7 +9,7 @@ strategy:
   max_price_gap_cents: 40           # kalshi→pm направление
   max_price_gap_cents_pm_to_kalshi: 15  # pm→kalshi: PM знает исход раньше, большой гэп = ловушка
   gap_signal_min_cents: 5       # статический гэп: минимальный разрыв для входа без спайка
-  gap_rising_lookback_seconds: 20  # лидер должен расти за последние N секунд
+  gap_rising_lookback_seconds: 45  # лидер не должен падать за последние N секунд
   spike_window_seconds: 45
   cooldown_seconds: 120
   trades_per_budget: 10     # stake = free_balance / trades_per_budget
