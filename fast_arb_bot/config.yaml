@@ -1,0 +1,68 @@
+trading:
+  stake_per_pair_usd: 20.0
+  min_lock_edge: 0.06
+  max_lock_edge: 0.45
+  stake_tier_half_above: 0.20
+  stake_tier_third_above: 0.30
+  max_open_pairs: 5
+  max_entries_per_pair: 1
+
+safety:
+  max_trade_size_usd: 25.0
+  min_total_balance_usd: 100.0
+  min_leg_price: 0.15
+  max_leg_price: 0.85
+  min_balance_polymarket: 30.0
+  min_balance_kalshi: 30.0
+  cooldown_seconds: 10.0
+  require_confirmation: false
+  dry_run: false
+  balance_divergence_threshold: 5.0
+  min_partial_fill_pct: 50
+  kalshi_slippage_cents: 1
+  polymarket_price_buffer_cents: 1
+
+fast_arb:
+  budget_usd: 40.0           # базовый бюджет (растёт с выигрышами)
+  max_realized_loss_usd: 20.0  # максимальные реализованные потери — стоп
+  order_book_min_liquidity_ratio: 5.0
+  scan_interval_seconds: 60
+
+market_filter:
+  symbol: ""
+  fee_type: "crypto_fees"
+  min_days_to_expiry: 0
+  max_days_to_expiry: 0.083
+  min_volume: 1000
+  min_liquidity: 1000
+  expiry_tolerance_seconds: 120
+
+runtime:
+  poll_interval_seconds: 60
+  recheck_delay_seconds: 1.0
+  watch_universe_refresh_seconds: 60
+
+execution:
+  first_leg: "parallel"
+
+db:
+  path: "data/fast_arb_bot.db"
+
+polymarket:
+  gamma_base_url: "https://gamma-api.polymarket.com"
+  clob_host: "https://clob.polymarket.com"
+  chain_id: 137
+  page_size: 500
+  request_delay_ms: 100
+
+kalshi:
+  base_url: "https://api.elections.kalshi.com/trade-api/v2"
+  page_size: 200
+  max_pages: 10
+  request_timeout_seconds: 20
+  series_tickers:
+    - "KXBTC15M"
+    - "KXETH15M"
+    - "KXXRP15M"
+    - "KXDOGE15M"
+    - "KXBNB15M"
