@@ -270,9 +270,12 @@ class FastArbWatchRunner:
         opp = watched.opportunity
         matched = watched.matched
 
-        # 1. Проверяем существующую позицию
-        if self.engine.db.has_open_position(opp.pair_key, opp.buy_yes_venue, opp.buy_no_venue):
-            # Если есть одноногая — пробуем докупить вторую ногу
+        # 1. Проверяем существующую позицию (любое направление)
+        any_open = self.engine.db.conn.execute(
+            "SELECT 1 FROM positions WHERE pair_key=? AND status='open'",
+            (opp.pair_key,),
+        ).fetchone() is not None
+        if any_open:
             self._maybe_complete_one_legged(opp, matched)
             return
 
@@ -325,7 +328,11 @@ class FastArbWatchRunner:
             return
 
         with self._signal_lock:
-            if self.engine.db.has_open_position(opp.pair_key, opp.buy_yes_venue, opp.buy_no_venue):
+            any_open = self.engine.db.conn.execute(
+                "SELECT 1 FROM positions WHERE pair_key=? AND status='open'",
+                (opp.pair_key,),
+            ).fetchone() is not None
+            if any_open:
                 return
 
             # 5. Параллельная проверка стаканов + 1.5x margin
@@ -624,11 +631,12 @@ class FastArbWatchRunner:
         self._last_completion_attempt[opp.pair_key] = now_ts
 
         row = self.engine.db.conn.execute(
-            "SELECT id, execution_status, kalshi_fill_price, kalshi_fill_shares, "
+            "SELECT id, execution_status, venue_yes, venue_no, "
+            "kalshi_fill_price, kalshi_fill_shares, "
             "polymarket_fill_price, polymarket_fill_shares "
-            "FROM positions WHERE pair_key=? AND venue_yes=? AND venue_no=? AND status='open' "
+            "FROM positions WHERE pair_key=? AND status='open' "
             "AND execution_status IN ('one_legged_kalshi','one_legged_polymarket')",
-            (opp.pair_key, opp.buy_yes_venue, opp.buy_no_venue),
+            (opp.pair_key,),
         ).fetchone()
         if row is None:
             return
@@ -640,9 +648,11 @@ class FastArbWatchRunner:
         # Определяем какая нога уже есть и по какой цене
         if exec_status == "one_legged_kalshi":
             # Kalshi есть, нужна PM нога
+            # venue_yes из БД — какая площадка покупала YES при открытии
+            db_venue_yes = row["venue_yes"]
             existing_fill_price = float(row["kalshi_fill_price"] or 0)
             missing_venue = "polymarket"
-            missing_side = "yes" if opp.buy_yes_venue == "polymarket" else "no"
+            missing_side = "yes" if db_venue_yes == "polymarket" else "no"
             missing_token = (
                 matched.polymarket.yes_token_id if missing_side == "yes"
                 else matched.polymarket.no_token_id
@@ -653,18 +663,8 @@ class FastArbWatchRunner:
                 return
             current_ask = book.best_ask
         else:
-            # one_legged_polymarket: PM есть, нужна Kalshi нога
-            existing_fill_price = float(row["polymarket_fill_price"] or 0)
-            missing_venue = "kalshi"
-            missing_side = "yes" if opp.buy_yes_venue == "kalshi" else "no"
-            kalshi_live = self.live_books_kalshi.get(matched.kalshi.market_id or "")
-            if kalshi_live is None:
-                return
-            current_ask = (
-                kalshi_live.best_yes_ask if missing_side == "yes" else kalshi_live.best_no_ask
-            )
-            if current_ask <= 0:
-                return
+            # one_legged_polymarket: Kalshi ордер уже рестингует — не трогаем
+            return
 
         # Проверяем: с учётом уже уплаченной цены есть ли смысл докупать
         total_ask = existing_fill_price + current_ask
