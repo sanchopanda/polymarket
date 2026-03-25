@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_DOWN
 
 from cross_arb_bot.models import CrossVenueOpportunity, ExecutionLegInfo
 
@@ -17,6 +18,35 @@ class FastExecutionResult:
     polymarket_order: OrderResult | None
     execution_status: str  # both_filled | one_legged_kalshi | one_legged_polymarket | failed
     reason: str = ""
+
+
+_PM_PRICE_QUANT = Decimal("0.01")
+_PM_SIZE_QUANT = Decimal("0.01")
+_PM_NOTIONAL_QUANT = Decimal("0.01")
+
+
+def _normalize_pm_buy_order(price: float, size: float) -> tuple[float, float]:
+    """Приводит PM BUY order к точности, которую принимает CLOB.
+
+    Для limit BUY Polymarket сервер сейчас ожидает:
+    - size (taker amount): максимум 2 знака
+    - notional = price * size (maker amount): максимум 2 знака
+
+    Простого round(size, 2) недостаточно: при дробной цене произведение всё ещё
+    может иметь лишние знаки и сервер вернёт 400 invalid amounts.
+    """
+    price_dec = Decimal(str(price)).quantize(_PM_PRICE_QUANT, rounding=ROUND_DOWN)
+    size_dec = Decimal(str(size)).quantize(_PM_SIZE_QUANT, rounding=ROUND_DOWN)
+    if price_dec <= 0 or size_dec <= 0:
+        return 0.0, 0.0
+
+    while size_dec > 0:
+        notional = (price_dec * size_dec).quantize(_PM_NOTIONAL_QUANT, rounding=ROUND_DOWN)
+        if price_dec * size_dec == notional:
+            return float(price_dec), float(size_dec)
+        size_dec = (size_dec - _PM_SIZE_QUANT).quantize(_PM_SIZE_QUANT, rounding=ROUND_DOWN)
+
+    return float(price_dec), 0.0
 
 
 class FastArbExecutor:
@@ -35,12 +65,14 @@ class FastArbExecutor:
         db: RealArbDB,
         kalshi_slippage_cents: int = 1,
         pm_price_buffer: float = 0.02,
+        completion_min_edge: float = 0.05,
     ) -> None:
         self.pm = pm_trader
         self.kalshi = kalshi_trader
         self.db = db
         self.kalshi_slippage_cents = kalshi_slippage_cents
         self.pm_price_buffer = pm_price_buffer
+        self.completion_min_edge = completion_min_edge
 
     def execute_pair_parallel(
         self,
@@ -115,11 +147,22 @@ class FastArbExecutor:
             )
 
         elif p_filled and not k_filled:
-            # PM заполнился, Kalshi не заполнился — оставляем рестинг как есть.
-            # Ордер стоит по хорошей цене, может заполнится позже.
+            replaced = self._replace_kalshi_resting_for_completion(
+                ticker=kalshi_ticker,
+                side=kalshi_side,
+                count=kalshi_count,
+                pm_fill_price=p_result.fill_price,
+                current_order=k_result,
+            )
+            replacement_filled = replaced is not None and replaced.shares_matched > 0
+            if replacement_filled:
+                return FastExecutionResult(
+                    True, replaced, p_result, "both_filled",
+                    f"kalshi_resting_replaced_and_filled: {replaced.status}",
+                )
             return FastExecutionResult(
-                False, k_result, p_result, "one_legged_polymarket",
-                f"kalshi_resting_left: {k_result.status if k_result else 'exception'}",
+                False, replaced or k_result, p_result, "one_legged_polymarket",
+                f"kalshi_resting_replaced: {(replaced.status if replaced else (k_result.status if k_result else 'exception'))}",
             )
 
         else:
@@ -139,6 +182,28 @@ class FastArbExecutor:
         except Exception as e:
             self.db.audit("order_error", None, {"venue": "kalshi", "error": f"cancel_error: {e}"})
             return False
+
+    def _replace_kalshi_resting_for_completion(
+        self,
+        ticker: str,
+        side: str,
+        count: int,
+        pm_fill_price: float,
+        current_order: OrderResult | None,
+    ) -> OrderResult | None:
+        if count <= 0 or pm_fill_price <= 0:
+            return current_order
+        if current_order is not None and current_order.order_id:
+            self._try_cancel_kalshi_resting(current_order)
+
+        max_price = 1.0 - pm_fill_price - self.completion_min_edge
+        price_cents = max(1, min(99, math.floor(max_price * 100)))
+        if price_cents <= 0:
+            return current_order
+        replacement = self._place_kalshi_order(ticker, side, count, price_cents)
+        if replacement is not None:
+            return replacement
+        return current_order
 
     def _place_kalshi_order(
         self,
@@ -167,9 +232,9 @@ class FastArbExecutor:
             "fill": order.shares_matched,
             "fee": order.fee,
         })
+        if order.status == "resting":
+            return order
         if order.shares_matched <= 0 or order.status.startswith("error"):
-            if order.order_id and order.status == "resting":
-                self.kalshi.cancel_order(order.order_id)
             return None
         return order
 
@@ -188,8 +253,7 @@ class FastArbExecutor:
         import time as _time
         from py_clob_client.clob_types import OrderArgs, OrderType
 
-        rounded_price = math.floor(price * 100) / 100.0
-        size = round(size, 2)
+        rounded_price, size = _normalize_pm_buy_order(price, size)
         if rounded_price <= 0 or size <= 0:
             return None
 

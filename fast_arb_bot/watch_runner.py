@@ -12,6 +12,7 @@ from arb_bot.ws import MarketWebSocketClient, TopOfBook
 
 from cross_arb_bot.matcher import build_opportunities, kalshi_taker_fee, polymarket_crypto_taker_fee
 from cross_arb_bot.models import CrossVenueOpportunity, ExecutionLegInfo, MatchedMarketPair
+from src.api.clob import OrderLevel
 
 from real_arb_bot.clients import OrderResult
 from real_arb_bot.engine import RealArbEngine
@@ -23,6 +24,13 @@ from fast_arb_bot.executor import FastArbExecutor, FastExecutionResult, _empty_o
 class WatchedPair:
     opportunity: CrossVenueOpportunity
     matched: MatchedMarketPair
+
+
+@dataclass
+class PMCompletionCandidate:
+    best_ask: float
+    avg_price: float
+    worst_price: float
 
 
 class FastArbWatchRunner:
@@ -63,6 +71,8 @@ class FastArbWatchRunner:
         self._SKIP_LOG_INTERVAL = 30.0
         self._last_completion_attempt: dict[str, float] = {}
         self._COMPLETION_COOLDOWN = 5.0  # секунд между попытками докупки
+        self._last_kalshi_resting_sync_ts: float = 0.0
+        self._KALSHI_RESTING_SYNC_INTERVAL = 2.0
         self._cached_balances: dict = {"polymarket": None, "kalshi": None}
         self._last_scan_ts: float = 0.0
 
@@ -87,6 +97,7 @@ class FastArbWatchRunner:
                     self._print_status()
                     last_status = now
 
+                self._sync_one_legged_polymarket_orders()
                 time.sleep(1)
         except KeyboardInterrupt:
             print("\n[fast-arb] Stopped.")
@@ -187,7 +198,19 @@ class FastArbWatchRunner:
             matched = match_index.get(opp.pair_key)
             if matched is None:
                 continue
-            if self.engine.db.has_open_position(opp.pair_key, opp.buy_yes_venue, opp.buy_no_venue):
+            if self._has_open_one_legged_pair(opp.pair_key):
+                self._maybe_complete_one_legged(opp, matched)
+                continue
+            if self._is_too_close_to_expiry(opp.expiry):
+                continue
+            if not self._prices_within_bounds(opp.yes_ask, opp.no_ask):
+                continue
+            if not self._prices_cross_midpoint(opp.yes_ask, opp.no_ask):
+                continue
+            if self._edge_above_max_allowed(opp.yes_ask, opp.no_ask):
+                continue
+            open_for_pair = self._count_open_positions_for_pair(opp.pair_key)
+            if open_for_pair >= int(self.engine.trading.get("max_entries_per_pair", 1)):
                 continue
             halt, reason = self._check_loss_limits(new_position_cost=opp.total_cost)
             if halt:
@@ -197,6 +220,16 @@ class FastArbWatchRunner:
                 return
             executed, yes_leg, no_leg = self._apply_execution_pricing_parallel(opp, matched)
             if executed is None:
+                continue
+            if not self._prices_within_bounds(executed.yes_ask, executed.no_ask):
+                continue
+            if not self._prices_cross_midpoint(executed.yes_ask, executed.no_ask):
+                continue
+            if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
+                continue
+            if self._edge_above_max_allowed(executed.yes_ask, executed.no_ask):
+                continue
+            if executed.expected_profit <= 0:
                 continue
             self._execute_and_record(executed, matched, yes_leg, no_leg)
             self._cached_balances = self.engine.get_real_balances()
@@ -271,11 +304,14 @@ class FastArbWatchRunner:
         matched = watched.matched
 
         # 1. Проверяем существующую позицию (любое направление)
-        any_open = self.engine.db.conn.execute(
-            "SELECT 1 FROM positions WHERE pair_key=? AND status='open'",
-            (opp.pair_key,),
-        ).fetchone() is not None
-        if any_open:
+        if self._has_open_one_legged_pair(opp.pair_key):
+            self._maybe_complete_one_legged(opp, matched)
+            return
+        if self._is_too_close_to_expiry(opp.expiry):
+            return
+        open_for_pair = self._count_open_positions_for_pair(opp.pair_key)
+        max_entries_per_pair = int(self.engine.trading.get("max_entries_per_pair", 1))
+        if open_for_pair >= max_entries_per_pair:
             self._maybe_complete_one_legged(opp, matched)
             return
 
@@ -314,9 +350,9 @@ class FastArbWatchRunner:
                 return
 
         # 4. Проверка min/max цены ноги (в памяти)
-        min_p = self.engine.safety.min_leg_price
-        max_p = self.engine.safety.max_leg_price
-        if rough_yes < min_p or rough_no < min_p or rough_yes > max_p or rough_no > max_p:
+        if not self._prices_within_bounds(rough_yes, rough_no):
+            return
+        if not self._prices_cross_midpoint(rough_yes, rough_no):
             return
 
         # 5. Loss limit check (SQL)
@@ -328,20 +364,17 @@ class FastArbWatchRunner:
             return
 
         with self._signal_lock:
-            any_open = self.engine.db.conn.execute(
-                "SELECT 1 FROM positions WHERE pair_key=? AND status='open'",
-                (opp.pair_key,),
-            ).fetchone() is not None
-            if any_open:
+            open_for_pair = self._count_open_positions_for_pair(opp.pair_key)
+            if open_for_pair >= max_entries_per_pair:
                 return
 
-            # 5. Параллельная проверка стаканов + 1.5x margin
+            # 5. Параллельная проверка стаканов + liquidity margin
             executed, yes_leg, no_leg = self._apply_execution_pricing_parallel(opp, matched)
             if executed is None:
                 self._skip_log(
                     pair_key,
                     f"[fast-arb][SKIP] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
-                    f"              reason=insufficient_liquidity (1.5x margin)\n"
+                    f"              reason=insufficient_liquidity ({self.liquidity_ratio:.1f}x margin)\n"
                     f"              YES: {self.engine._format_leg_summary(yes_leg)}\n"
                     f"              NO:  {self.engine._format_leg_summary(no_leg)}",
                 )
@@ -350,6 +383,30 @@ class FastArbWatchRunner:
                 self._skip_log(
                     pair_key,
                     f"[fast-arb][SKIP] {opp.symbol} | edge_disappeared ({executed.edge_per_share:.4f})",
+                )
+                return
+            if not self._prices_within_bounds(executed.yes_ask, executed.no_ask):
+                self._skip_log(
+                    pair_key,
+                    f"[fast-arb][SKIP] {opp.symbol} | leg_price_out_of_bounds ({executed.yes_ask:.4f}, {executed.no_ask:.4f})",
+                )
+                return
+            if not self._prices_cross_midpoint(executed.yes_ask, executed.no_ask):
+                self._skip_log(
+                    pair_key,
+                    f"[fast-arb][SKIP] {opp.symbol} | same_side_of_midpoint ({executed.yes_ask:.4f}, {executed.no_ask:.4f})",
+                )
+                return
+            if self._edge_above_max_allowed(executed.yes_ask, executed.no_ask):
+                self._skip_log(
+                    pair_key,
+                    f"[fast-arb][SKIP] {opp.symbol} | edge_too_high ({executed.edge_per_share:.4f})",
+                )
+                return
+            if executed.expected_profit <= 0:
+                self._skip_log(
+                    pair_key,
+                    f"[fast-arb][SKIP] {opp.symbol} | negative_expected_profit ({executed.expected_profit:.2f})",
                 )
                 return
 
@@ -409,7 +466,7 @@ class FastArbWatchRunner:
         kalshi_res = result.kalshi_order or _empty_order("no_order")
         pm_res = result.polymarket_order or _empty_order("no_order")
 
-        self.engine.db.open_position(
+        opened = self.engine.db.open_position(
             opportunity=opp,
             kalshi_result=kalshi_res,
             polymarket_result=pm_res,
@@ -420,6 +477,11 @@ class FastArbWatchRunner:
             yes_leg=yes_leg,
             no_leg=no_leg,
         )
+        if result.execution_status == "both_filled":
+            self._cancel_redundant_one_legged_polymarket_orders(
+                pair_key=opp.pair_key,
+                exclude_position_id=opened.id,
+            )
 
         if self.engine.notifier:
             kalshi_fill = result.kalshi_order.fill_price if result.kalshi_order else 0.0
@@ -439,7 +501,7 @@ class FastArbWatchRunner:
                 pm_fill=pm_fill,
             )
 
-    # ── Execution pricing (параллельные REST + 1.5x margin) ───────────
+    # ── Execution pricing (параллельные REST + liquidity margin) ──────
 
     def _apply_execution_pricing_parallel(
         self,
@@ -452,34 +514,72 @@ class FastArbWatchRunner:
         no_market = matched.polymarket if opp.buy_no_venue == "polymarket" else matched.kalshi
 
         tiered_stake = self.engine._stake_for_edge(opp.edge_per_share)
-        shares = min(tiered_stake / opp.ask_sum, opp.shares)
+        raw_shares = min(tiered_stake / opp.ask_sum, opp.shares)
+        shares = math.floor(raw_shares)
+        if shares <= 0:
+            return None, None, None
 
         min_edge = float(self.engine.config.get("trading", {}).get("min_lock_edge", 0.04))
         max_yes_price = 1.0 - opp.no_ask - min_edge
         max_no_price = 1.0 - opp.yes_ask - min_edge
-
-        # Параллельные REST-запросы к обоим стаканам
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            yes_future = pool.submit(
-                self.engine._execution_leg_info,
-                opp.buy_yes_venue, yes_market, "yes", shares, max_yes_price,
-            )
-            no_future = pool.submit(
-                self.engine._execution_leg_info,
-                opp.buy_no_venue, no_market, "no", shares, max_no_price,
-            )
-            yes_leg = yes_future.result()
-            no_leg = no_future.result()
+        yes_asks, no_asks = self._fetch_execution_asks_parallel(
+            opp=opp,
+            yes_market=yes_market,
+            no_market=no_market,
+        )
+        yes_leg = self._build_execution_leg_from_asks(
+            venue=opp.buy_yes_venue,
+            market_id=yes_market.market_id,
+            side="yes",
+            asks=yes_asks,
+            shares=shares,
+            max_price=max_yes_price,
+        )
+        no_leg = self._build_execution_leg_from_asks(
+            venue=opp.buy_no_venue,
+            market_id=no_market.market_id,
+            side="no",
+            asks=no_asks,
+            shares=shares,
+            max_price=max_no_price,
+        )
 
         if yes_leg is None or no_leg is None:
             return None, yes_leg, no_leg
         if yes_leg.filled_shares + 1e-6 < shares or no_leg.filled_shares + 1e-6 < shares:
             return None, yes_leg, no_leg
 
-        # Проверка 1.5x margin
+        # Проверка liquidity margin
         min_required = self.liquidity_ratio * shares
         if yes_leg.usable_shares < min_required or no_leg.usable_shares < min_required:
-            return None, yes_leg, no_leg
+            retry_max_yes_price = max_yes_price
+            retry_max_no_price = max_no_price
+            if yes_leg.usable_shares < min_required:
+                retry_max_yes_price = max(max_yes_price, 1.0 - no_leg.avg_price - min_edge)
+            if no_leg.usable_shares < min_required:
+                retry_max_no_price = max(max_no_price, 1.0 - yes_leg.avg_price - min_edge)
+            yes_leg = self._build_execution_leg_from_asks(
+                venue=opp.buy_yes_venue,
+                market_id=yes_market.market_id,
+                side="yes",
+                asks=yes_asks,
+                shares=shares,
+                max_price=retry_max_yes_price,
+            )
+            no_leg = self._build_execution_leg_from_asks(
+                venue=opp.buy_no_venue,
+                market_id=no_market.market_id,
+                side="no",
+                asks=no_asks,
+                shares=shares,
+                max_price=retry_max_no_price,
+            )
+            if yes_leg is None or no_leg is None:
+                return None, yes_leg, no_leg
+            if yes_leg.filled_shares + 1e-6 < shares or no_leg.filled_shares + 1e-6 < shares:
+                return None, yes_leg, no_leg
+            if yes_leg.usable_shares < min_required or no_leg.usable_shares < min_required:
+                return None, yes_leg, no_leg
 
         yes_ask = yes_leg.avg_price
         no_ask = no_leg.avg_price
@@ -511,6 +611,82 @@ class FastArbWatchRunner:
             expected_profit=shares - total_cost,
         )
         return executed, yes_leg, no_leg
+
+    def _fetch_execution_asks_parallel(
+        self,
+        opp: CrossVenueOpportunity,
+        yes_market: NormalizedMarket,
+        no_market: NormalizedMarket,
+    ) -> tuple[list[OrderLevel] | None, list[OrderLevel] | None]:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            yes_future = pool.submit(
+                self._fetch_asks_for_leg,
+                opp.buy_yes_venue, yes_market, "yes",
+            )
+            no_future = pool.submit(
+                self._fetch_asks_for_leg,
+                opp.buy_no_venue, no_market, "no",
+            )
+            return yes_future.result(), no_future.result()
+
+    def _fetch_asks_for_leg(
+        self,
+        venue: str,
+        market: NormalizedMarket,
+        side: str,
+    ) -> list[OrderLevel] | None:
+        if venue == "polymarket":
+            token_id = market.yes_token_id if side == "yes" else market.no_token_id
+            if not token_id:
+                return None
+            book = self.engine.pm_clob.get_orderbook(token_id)
+            if not book or not book.asks:
+                return None
+            return book.asks
+        asks, _ = self.engine.kalshi_feed.fetch_side_asks(market.market_id, side)
+        return asks if asks else None
+
+    def _build_execution_leg_from_asks(
+        self,
+        venue: str,
+        market_id: str,
+        side: str,
+        asks: list[OrderLevel] | None,
+        shares: float,
+        max_price: float,
+    ) -> ExecutionLegInfo | None:
+        if not asks:
+            return None
+
+        available = sum(level.size for level in asks)
+        usable = sum(level.size for level in asks if level.price <= max_price)
+        best_ask = asks[0].price if asks else 0.0
+        remaining = shares
+        total_cost = 0.0
+        for level in asks:
+            take = min(level.size, remaining)
+            if take <= 0:
+                continue
+            total_cost += take * level.price
+            remaining -= take
+            if remaining <= 1e-9:
+                break
+
+        filled = shares - remaining
+        avg_price = (total_cost / filled) if filled > 1e-9 else 0.0
+        return ExecutionLegInfo(
+            venue=venue,
+            market_id=market_id,
+            side=side,
+            requested_shares=shares,
+            filled_shares=filled,
+            available_shares=available,
+            usable_shares=usable,
+            avg_price=avg_price,
+            total_cost=total_cost,
+            best_ask=best_ask,
+            remaining_shares_after_fill=max(0.0, available - filled),
+        )
 
     # ── Loss limit ─────────────────────────────────────────────────────
 
@@ -643,7 +819,7 @@ class FastArbWatchRunner:
 
         exec_status = row["execution_status"]
         pos_id = row["id"]
-        min_edge = float(self.engine.trading["min_lock_edge"])
+        min_edge = float(self.engine.trading.get("completion_min_edge", self.engine.trading["min_lock_edge"]))
 
         # Определяем какая нога уже есть и по какой цене
         if exec_status == "one_legged_kalshi":
@@ -657,23 +833,8 @@ class FastArbWatchRunner:
                 matched.polymarket.yes_token_id if missing_side == "yes"
                 else matched.polymarket.no_token_id
             )
-            # Текущая цена пропущенной ноги из WS
-            book = self.live_books.get(missing_token or "")
-            if book is None or book.best_ask <= 0:
-                return
-            current_ask = book.best_ask
         else:
             # one_legged_polymarket: Kalshi ордер уже рестингует — не трогаем
-            return
-
-        # Проверяем: с учётом уже уплаченной цены есть ли смысл докупать
-        total_ask = existing_fill_price + current_ask
-        completion_edge = 1.0 - total_ask
-        if completion_edge < min_edge:
-            return
-
-        # Цена ноги в разумных пределах
-        if current_ask < self.engine.safety.min_leg_price or current_ask > self.engine.safety.max_leg_price:
             return
 
         with self._signal_lock:
@@ -686,12 +847,6 @@ class FastArbWatchRunner:
             if row2 is None:
                 return
 
-            print(
-                f"\n[fast-arb][COMPLETE] {opp.symbol} | докупаем {missing_venue}:{missing_side.upper()}\n"
-                f"  existing={existing_fill_price:.4f} + current={current_ask:.4f} "
-                f"= {total_ask:.4f} | edge={completion_edge:.4f}"
-            )
-
             if self.dry_run:
                 print("[fast-arb][DRY] Пропуск")
                 return
@@ -700,12 +855,58 @@ class FastArbWatchRunner:
             shares = float(self.engine.db.conn.execute(
                 "SELECT shares FROM positions WHERE id=?", (pos_id,)
             ).fetchone()[0])
+            max_price = min(
+                self.engine.safety.max_leg_price,
+                1.0 - existing_fill_price - min_edge,
+            )
 
             try:
                 if missing_venue == "polymarket":
-                    limit_price = math.floor((current_ask + self.pm_price_buffer) * 100) / 100.0
-                    order = self.executor._place_pm_limit_order(missing_token, limit_price, shares)
+                    asks = self._fetch_asks_for_leg(missing_venue, matched.polymarket, missing_side)
+                    candidates = self._build_pm_completion_candidates_from_asks(
+                        asks=asks,
+                        shares=shares,
+                        max_price=max_price,
+                    )
+                    if not candidates:
+                        return
+                    order = None
+                    for attempt, candidate in enumerate(candidates, start=1):
+                        completion_edge = 1.0 - (existing_fill_price + candidate.avg_price)
+                        if completion_edge < min_edge:
+                            return
+                        if (
+                            candidate.best_ask < self.engine.safety.min_leg_price
+                            or candidate.best_ask > self.engine.safety.max_leg_price
+                        ):
+                            return
+                        limit_price = math.floor((candidate.worst_price + self.pm_price_buffer) * 100) / 100.0
+                        print(
+                            f"\n[fast-arb][COMPLETE] {opp.symbol} | докупаем {missing_venue}:{missing_side.upper()}\n"
+                            f"  existing={existing_fill_price:.4f} + avg={candidate.avg_price:.4f} "
+                            f"(best={candidate.best_ask:.4f}, worst={candidate.worst_price:.4f}) "
+                            f"= {existing_fill_price + candidate.avg_price:.4f} | edge={completion_edge:.4f}"
+                            f" | try={attempt}"
+                        )
+                        order = self.executor._place_pm_limit_order(missing_token, limit_price, shares)
+                        if order is not None and order.shares_matched > 0:
+                            break
                 else:
+                    book = self.live_books.get(missing_token or "")
+                    if book is None or book.best_ask <= 0:
+                        return
+                    current_ask = book.best_ask
+                    total_ask = existing_fill_price + current_ask
+                    completion_edge = 1.0 - total_ask
+                    if completion_edge < min_edge:
+                        return
+                    if current_ask < self.engine.safety.min_leg_price or current_ask > self.engine.safety.max_leg_price:
+                        return
+                    print(
+                        f"\n[fast-arb][COMPLETE] {opp.symbol} | докупаем {missing_venue}:{missing_side.upper()}\n"
+                        f"  existing={existing_fill_price:.4f} + current={current_ask:.4f} "
+                        f"= {total_ask:.4f} | edge={completion_edge:.4f}"
+                    )
                     price_cents = round(current_ask * 100) + self.kalshi_slippage_cents
                     price_cents = min(price_cents, 99)
                     count = max(1, math.floor(shares))
@@ -728,23 +929,51 @@ class FastArbWatchRunner:
 
             # Обновляем позицию в DB
             now = __import__("datetime").datetime.utcnow().isoformat()
+            final_total_cost = 0.0
+            final_expected_profit = 0.0
+            final_yes_ask = 0.0
+            final_no_ask = 0.0
+            final_ask_sum = 0.0
+
             if missing_venue == "polymarket":
+                final_yes_ask = order.fill_price if missing_side == "yes" else existing_fill_price
+                final_no_ask = existing_fill_price if missing_side == "yes" else order.fill_price
+                pm_cost = order.shares_matched * order.fill_price + order.fee
+                kalshi_cost = shares * existing_fill_price
+                final_ask_sum = final_yes_ask + final_no_ask
+                final_total_cost = kalshi_cost + pm_cost
+                final_expected_profit = shares - final_total_cost
                 self.engine.db.conn.execute(
                     "UPDATE positions SET execution_status='both_filled', "
+                    "yes_ask=?, no_ask=?, ask_sum=?, total_cost=?, expected_profit=?, "
                     "polymarket_fill_price=?, polymarket_fill_shares=?, polymarket_order_fee=?, "
                     "polymarket_order_id=?, polymarket_order_status=?, execution_completed_at=? "
                     "WHERE id=?",
-                    (order.fill_price, order.shares_matched, order.fee,
-                     order.order_id, order.status, now, pos_id),
+                    (
+                        final_yes_ask, final_no_ask, final_ask_sum, final_total_cost, final_expected_profit,
+                        order.fill_price, order.shares_matched, order.fee,
+                        order.order_id, order.status, now, pos_id,
+                    ),
                 )
             else:
+                final_yes_ask = existing_fill_price if missing_side == "no" else order.fill_price
+                final_no_ask = order.fill_price if missing_side == "no" else existing_fill_price
+                pm_cost = shares * existing_fill_price
+                kalshi_cost = order.shares_matched * order.fill_price + order.fee
+                final_ask_sum = final_yes_ask + final_no_ask
+                final_total_cost = pm_cost + kalshi_cost
+                final_expected_profit = shares - final_total_cost
                 self.engine.db.conn.execute(
                     "UPDATE positions SET execution_status='both_filled', "
+                    "yes_ask=?, no_ask=?, ask_sum=?, total_cost=?, expected_profit=?, "
                     "kalshi_fill_price=?, kalshi_fill_shares=?, kalshi_order_fee=?, "
                     "kalshi_order_id=?, kalshi_order_status=?, execution_completed_at=? "
                     "WHERE id=?",
-                    (order.fill_price, order.shares_matched, order.fee,
-                     order.order_id, order.status, now, pos_id),
+                    (
+                        final_yes_ask, final_no_ask, final_ask_sum, final_total_cost, final_expected_profit,
+                        order.fill_price, order.shares_matched, order.fee,
+                        order.order_id, order.status, now, pos_id,
+                    ),
                 )
             self.engine.db.conn.commit()
 
@@ -753,7 +982,8 @@ class FastArbWatchRunner:
                     f"🔄 <b>ДОКУПЛЕНА нога: {opp.symbol}</b>\n"
                     f"{missing_venue}:{missing_side.upper()} @ {order.fill_price:.4f} "
                     f"(fill={order.shares_matched:.2f})\n"
-                    f"edge итого={completion_edge:.4f} | позиция закрыта в both_filled"
+                    f"edge итого={completion_edge:.4f} | cost=${final_total_cost:.2f} | exp_profit=${final_expected_profit:.2f}\n"
+                    f"позиция закрыта в both_filled"
                 )
 
     def _get_status_text(self) -> str:
@@ -803,12 +1033,211 @@ class FastArbWatchRunner:
     def _watch_key(self, opp: CrossVenueOpportunity) -> str:
         return f"{opp.pair_key}|{opp.buy_yes_venue}|{opp.buy_no_venue}"
 
+    def _cancel_redundant_one_legged_polymarket_orders(
+        self,
+        pair_key: str,
+        exclude_position_id: str,
+    ) -> None:
+        rows = self.engine.db.conn.execute(
+            "SELECT id, kalshi_order_id, kalshi_order_status "
+            "FROM positions "
+            "WHERE pair_key=? AND status='open' AND execution_status='one_legged_polymarket' AND id<>?",
+            (pair_key, exclude_position_id),
+        ).fetchall()
+        for row in rows:
+            order_id = str(row["kalshi_order_id"] or "")
+            if not order_id:
+                continue
+            try:
+                ok = self.engine.kalshi_trader.cancel_order(order_id)
+            except Exception as e:
+                self.engine.db.audit("order_error", row["id"], {
+                    "venue": "kalshi",
+                    "error": f"cancel_redundant_resting_error: {e}",
+                    "order_id": order_id,
+                })
+                continue
+            new_status = "canceled_redundant_after_both_filled" if ok else str(row["kalshi_order_status"] or "")
+            self.engine.db.conn.execute(
+                "UPDATE positions SET kalshi_order_status=? WHERE id=?",
+                (new_status, row["id"]),
+            )
+        self.engine.db.conn.commit()
+
+    def _count_open_positions_for_pair(self, pair_key: str) -> int:
+        row = self.engine.db.conn.execute(
+            "SELECT COUNT(*) FROM positions WHERE pair_key=? AND status='open'",
+            (pair_key,),
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+
+    def _has_open_one_legged_pair(self, pair_key: str) -> bool:
+        row = self.engine.db.conn.execute(
+            "SELECT 1 FROM positions "
+            "WHERE pair_key=? AND status='open' "
+            "AND execution_status IN ('one_legged_kalshi','one_legged_polymarket') "
+            "LIMIT 1",
+            (pair_key,),
+        ).fetchone()
+        return row is not None
+
+    def _is_too_close_to_expiry(self, expiry: datetime) -> bool:
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        return (expiry - now).total_seconds() < 45
+
+    def _prices_within_bounds(self, yes_price: float, no_price: float) -> bool:
+        min_p = self.engine.safety.min_leg_price
+        max_p = self.engine.safety.max_leg_price
+        return min_p <= yes_price <= max_p and min_p <= no_price <= max_p
+
+    def _prices_cross_midpoint(self, yes_price: float, no_price: float) -> bool:
+        return (yes_price > 0.5) != (no_price > 0.5)
+
+    def _edge_above_max_allowed(self, yes_price: float, no_price: float) -> bool:
+        edge = 1.0 - (yes_price + no_price)
+        if edge <= self.engine.trading["max_lock_edge"]:
+            return False
+        polarized = (yes_price > 0.5) != (no_price > 0.5)
+        return not polarized
+
+    def _build_pm_completion_candidates_from_asks(
+        self,
+        asks: list[OrderLevel] | None,
+        shares: float,
+        max_price: float,
+    ) -> list[PMCompletionCandidate]:
+        if not asks or shares <= 0 or max_price <= 0:
+            return []
+
+        cumulative = 0.0
+        total_cost = 0.0
+        fill_cost_at_target = 0.0
+        crossed_target = False
+        best_ask = asks[0].price
+        candidates: list[PMCompletionCandidate] = []
+        last_price: float | None = None
+
+        for level in asks:
+            if level.price > max_price + 1e-9:
+                break
+            total_cost += level.size * level.price
+            prev_cumulative = cumulative
+            cumulative += level.size
+            if not crossed_target and cumulative + 1e-9 >= shares:
+                take_needed = shares - prev_cumulative
+                fill_cost_at_target = (total_cost - level.size * level.price) + max(0.0, take_needed) * level.price
+                crossed_target = True
+            if crossed_target and last_price != level.price:
+                candidates.append(
+                    PMCompletionCandidate(
+                    best_ask=best_ask,
+                    avg_price=fill_cost_at_target / shares,
+                    worst_price=level.price,
+                )
+                )
+                last_price = level.price
+        return candidates
+
     def _skip_log(self, pair_key: str, msg: str) -> None:
         now = time.time()
         if now - self._last_skip_log.get(pair_key, 0.0) < self._SKIP_LOG_INTERVAL:
             return
         self._last_skip_log[pair_key] = now
         print(msg)
+
+    def _sync_one_legged_polymarket_orders(self) -> None:
+        now_ts = time.time()
+        if now_ts - self._last_kalshi_resting_sync_ts < self._KALSHI_RESTING_SYNC_INTERVAL:
+            return
+        self._last_kalshi_resting_sync_ts = now_ts
+
+        rows = self.engine.db.conn.execute(
+            "SELECT id, symbol, shares, venue_yes, yes_ask, no_ask, kalshi_order_id, kalshi_fill_shares, kalshi_fill_price, "
+            "kalshi_order_fee, kalshi_order_status "
+            "FROM positions "
+            "WHERE status='open' AND execution_status='one_legged_polymarket' AND kalshi_order_id IS NOT NULL"
+        ).fetchall()
+        for row in rows:
+            order_id = str(row["kalshi_order_id"] or "")
+            if not order_id:
+                continue
+            info = self.engine.kalshi_trader.get_order(order_id)
+            if info is None:
+                continue
+
+            prev_fill = float(row["kalshi_fill_shares"] or 0)
+            prev_price = float(row["kalshi_fill_price"] or 0)
+            target_shares = float(row["shares"] or 0)
+            if (
+                abs(info.shares_matched - prev_fill) < 1e-9
+                and str(info.status or "") == str(row["kalshi_order_status"] or "")
+            ):
+                continue
+
+            fallback_price = float(row["no_ask"] or 0.0) if str(row["venue_yes"]) == "polymarket" else float(row["yes_ask"] or 0.0)
+            fill_price = float(info.fill_price or 0.0)
+            if fill_price <= 0:
+                fill_price = prev_price if prev_price > 0 else fallback_price
+            fee = float(info.fee or 0.0)
+            if fee <= 0 and info.shares_matched > 0 and fill_price > 0:
+                fee = self.engine._kalshi_fee(info.shares_matched, fill_price)
+
+            new_execution_status = "both_filled" if info.shares_matched + 1e-6 >= target_shares else "one_legged_polymarket"
+            completed_at = __import__("datetime").datetime.utcnow().isoformat() if new_execution_status == "both_filled" else None
+            self.engine.db.conn.execute(
+                "UPDATE positions SET kalshi_fill_price=?, kalshi_fill_shares=?, kalshi_order_fee=?, "
+                "kalshi_order_status=?, execution_status=?, execution_completed_at=COALESCE(?, execution_completed_at) "
+                "WHERE id=?",
+                (
+                    fill_price,
+                    info.shares_matched,
+                    fee,
+                    info.status,
+                    new_execution_status,
+                    completed_at,
+                    row["id"],
+                ),
+            )
+            self.engine.db.conn.commit()
+
+            print(
+                f"[fast-arb][SYNC] {row['symbol']} | kalshi status={info.status} "
+                f"| fill={info.shares_matched:.2f}/{target_shares:.2f}@{fill_price:.4f}"
+            )
+
+            if self.engine.notifier and new_execution_status == "both_filled":
+                full_row = self.engine.db.conn.execute(
+                    "SELECT venue_yes, shares, polymarket_fill_price, polymarket_fill_shares, polymarket_order_fee, "
+                    "kalshi_fill_price, kalshi_fill_shares, kalshi_order_fee "
+                    "FROM positions WHERE id=?",
+                    (row["id"],),
+                ).fetchone()
+                if full_row is not None:
+                    pm_fill_price = float(full_row["polymarket_fill_price"] or 0.0)
+                    pm_fill_shares = float(full_row["polymarket_fill_shares"] or 0.0)
+                    pm_fee = float(full_row["polymarket_order_fee"] or 0.0)
+                    k_fill_price = float(full_row["kalshi_fill_price"] or 0.0)
+                    k_fill_shares = float(full_row["kalshi_fill_shares"] or 0.0)
+                    k_fee = float(full_row["kalshi_order_fee"] or 0.0)
+                    shares = float(full_row["shares"] or target_shares or 0.0)
+
+                    if str(full_row["venue_yes"]) == "polymarket":
+                        final_yes_ask = pm_fill_price
+                        final_no_ask = k_fill_price
+                    else:
+                        final_yes_ask = k_fill_price
+                        final_no_ask = pm_fill_price
+
+                    final_ask_sum = final_yes_ask + final_no_ask
+                    final_total_cost = (pm_fill_shares * pm_fill_price + pm_fee) + (k_fill_shares * k_fill_price + k_fee)
+                    final_expected_profit = shares - final_total_cost
+
+                    self.engine.notifier._send(
+                        f"🔄 <b>ДОКУПЛЕНА нога: {row['symbol']}</b>\n"
+                        f"kalshi @ {k_fill_price:.4f} (fill={k_fill_shares:.2f})\n"
+                        f"edge итого={1.0 - final_ask_sum:.4f} | cost=${final_total_cost:.2f} | exp_profit=${final_expected_profit:.2f}\n"
+                        f"позиция закрыта в both_filled"
+                    )
 
     # ── Резолв одноногих позиций ───────────────────────────────────────
 
@@ -838,11 +1267,12 @@ class FastArbWatchRunner:
 
     def _resolve_one_legged(self, position, exec_status: str) -> None:
         row = self.engine.db.conn.execute(
-            "SELECT kalshi_fill_price, kalshi_fill_shares, kalshi_order_fee, "
+            "SELECT kalshi_order_id, kalshi_fill_price, kalshi_fill_shares, kalshi_order_fee, "
             "polymarket_fill_price, polymarket_fill_shares, polymarket_order_fee "
             "FROM positions WHERE id=?", (position.id,)
         ).fetchone()
 
+        k_order_id = str(row["kalshi_order_id"] or "")
         k_shares = float(row["kalshi_fill_shares"] or 0)
         k_price  = float(row["kalshi_fill_price"]  or 0)
         k_fee    = float(row["kalshi_order_fee"]   or 0)
@@ -885,6 +1315,16 @@ class FastArbWatchRunner:
             pm_result, pm_snapshot = resolver._check_polymarket(position)
             if pm_result is None:
                 return  # Рынок ещё не разрешён
+
+            if k_order_id:
+                try:
+                    self.engine.kalshi_trader.cancel_order(k_order_id)
+                except Exception as e:
+                    self.engine.db.audit("order_error", position.id, {
+                        "venue": "kalshi",
+                        "error": f"cancel_on_resolve_error: {e}",
+                        "order_id": k_order_id,
+                    })
 
             pm_side = "yes" if position.venue_yes == "polymarket" else "no"
             pm_won = (pm_result == pm_side)

@@ -250,16 +250,23 @@ class PositionResolver:
             "market_id": market.id,
             "outcomes": market.outcomes,
             "outcome_prices": market.outcome_prices,
+            "active": market.active,
+            "closed": market.closed,
         })
+        if market.active or not market.closed:
+            return None, snapshot
         try:
             up_idx = next(i for i, o in enumerate(market.outcomes) if o.lower() == "up")
             down_idx = next(i for i, o in enumerate(market.outcomes) if o.lower() == "down")
         except StopIteration:
             return None, snapshot
 
-        if market.outcome_prices[up_idx] >= 0.9:
+        up_price = float(market.outcome_prices[up_idx])
+        down_price = float(market.outcome_prices[down_idx])
+
+        if up_price >= 0.99 and down_price <= 0.01:
             return "yes", snapshot
-        if market.outcome_prices[down_idx] >= 0.9:
+        if down_price >= 0.99 and up_price <= 0.01:
             return "no", snapshot
         return None, snapshot
 

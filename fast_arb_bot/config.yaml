@@ -1,17 +1,18 @@
 trading:
   stake_per_pair_usd: 20.0
   min_lock_edge: 0.06
+  completion_min_edge: 0.05
   max_lock_edge: 0.45
   stake_tier_half_above: 0.20
   stake_tier_third_above: 0.30
   max_open_pairs: 5
-  max_entries_per_pair: 1
+  max_entries_per_pair: 2
 
 safety:
   max_trade_size_usd: 25.0
   min_total_balance_usd: 100.0
-  min_leg_price: 0.15
-  max_leg_price: 0.85
+  min_leg_price: 0.10
+  max_leg_price: 0.90
   min_balance_polymarket: 30.0
   min_balance_kalshi: 30.0
   cooldown_seconds: 10.0
@@ -19,13 +20,13 @@ safety:
   dry_run: false
   balance_divergence_threshold: 5.0
   min_partial_fill_pct: 50
-  kalshi_slippage_cents: 1
-  polymarket_price_buffer_cents: 1
+  kalshi_slippage_cents: 0
+  polymarket_price_buffer_cents: 0
 
 fast_arb:
-  budget_usd: 40.0           # базовый бюджет (растёт с выигрышами)
-  max_realized_loss_usd: 20.0  # максимальные реализованные потери — стоп
-  order_book_min_liquidity_ratio: 5.0
+  budget_usd: 60.0           # базовый бюджет (растёт с выигрышами)
+  max_realized_loss_usd: 130.0  # максимальные реализованные потери — стоп
+  order_book_min_liquidity_ratio: 2.0
   scan_interval_seconds: 60
 
 market_filter:
@@ -63,6 +64,5 @@ kalshi:
   series_tickers:
     - "KXBTC15M"
     - "KXETH15M"
-    - "KXXRP15M"
     - "KXDOGE15M"
     - "KXBNB15M"

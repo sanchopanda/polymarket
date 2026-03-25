@@ -92,6 +92,18 @@ def _polymarket_fee(shares: float, price: float) -> float:
     return shares * price * 0.25 * ((price * (1 - price)) ** 2)
 
 
+def _kalshi_price_to_float(value) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    if price > 1.0:
+        price /= 100.0
+    return max(0.0, min(1.0, price))
+
+
 class PolymarketTrader:
     def __init__(self) -> None:
         pk = os.environ["WALLET_PRIVATE_KEY"]
@@ -435,6 +447,51 @@ class KalshiTrader:
         except Exception as e:
             print(f"[kalshi] get_market {ticker}: {e}")
             return None
+
+    def get_order(self, order_id: str) -> OrderResult | None:
+        if not order_id:
+            return None
+        try:
+            payload = self._get(f"/portfolio/orders/{order_id}")
+        except Exception as e:
+            print(f"[kalshi] get_order {order_id[:16]}...: {e}")
+            return None
+
+        order = payload.get("order", payload) if isinstance(payload, dict) else {}
+        if not isinstance(order, dict):
+            return None
+
+        status = str(order.get("status", ""))
+        fill_count = float(order.get("fill_count_fp", order.get("count_fp", order.get("size_matched", 0))) or 0)
+        requested = float(order.get("count", order.get("initial_count", fill_count)) or fill_count or 0)
+        side = str(order.get("side", "")).lower()
+        yes_price = _kalshi_price_to_float(order.get("yes_price"))
+        no_price = _kalshi_price_to_float(order.get("no_price"))
+        direct_price = _kalshi_price_to_float(order.get("price"))
+
+        if side == "yes":
+            price = yes_price
+            if price is None and no_price is not None:
+                price = max(0.0, 1.0 - no_price)
+        else:
+            price = no_price
+            if price is None and yes_price is not None:
+                price = max(0.0, 1.0 - yes_price)
+
+        if price is None:
+            price = direct_price if direct_price is not None else 0.0
+        fee = _kalshi_fee(fill_count, price) if fill_count > 0 else 0.0
+
+        return OrderResult(
+            order_id=str(order.get("order_id", order_id)),
+            status=status,
+            fill_price=price,
+            shares_matched=fill_count,
+            shares_requested=requested,
+            fee=fee,
+            latency_ms=0.0,
+            raw_response=order,
+        )
 
     def place_limit_order(self, ticker: str, side: str, count: int, price_cents: int, action: str = "buy") -> OrderResult:
         client_order_id = str(uuid.uuid4())
