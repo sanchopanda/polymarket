@@ -292,7 +292,7 @@ class PositionResolver:
             "expiration_value": payload.get("expiration_value"),
         })
         exp_val = payload.get("expiration_value")
-        kalshi_close = float(exp_val) if exp_val is not None else None
+        kalshi_close = float(exp_val) if exp_val not in (None, "", "null") else None
 
         result = str(payload.get("result") or "").lower()
         if result in {"yes", "no"}:
