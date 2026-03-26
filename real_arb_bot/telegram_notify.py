@@ -146,6 +146,8 @@ class TelegramNotifier:
         pnl: float,
         lock_valid: bool,
         is_paper: bool = False,
+        kalshi_close_price: float | None = None,
+        pm_close_price: float | None = None,
     ) -> None:
         paper_tag = " [PAPER]" if is_paper else ""
         if lock_valid:
@@ -158,10 +160,19 @@ class TelegramNotifier:
             icon = "⚠️"
             validity = "ложный матч!"
 
+        if kalshi_close_price is not None and pm_close_price is not None:
+            close_gap_pct = abs(pm_close_price - kalshi_close_price) / kalshi_close_price * 100
+            close_line = f"\nK.close={kalshi_close_price:.4f} | PM.close={pm_close_price:.4f} | gap={close_gap_pct:.4f}%"
+        elif kalshi_close_price is not None:
+            close_line = f"\nK.close={kalshi_close_price:.4f} | PM.close=N/A"
+        else:
+            close_line = ""
+
         text = (
             f"{icon} <b>РЕЗОЛВ{paper_tag}: {symbol}</b>\n"
             f"PM={pm_result} | Kalshi={kalshi_result} | {validity}\n"
             f"P&L: <b>${pnl:+.2f}</b>"
+            f"{close_line}"
         )
         self._send(text)
 

@@ -173,6 +173,8 @@ class PositionResolver:
                 kalshi_result=kalshi_result,
                 pnl=pnl,
                 lock_valid=lock_valid,
+                kalshi_close_price=kalshi_close_price,
+                pm_close_price=pm_close_price,
             )
 
     def _resolve_paper(self, position) -> None:
@@ -215,6 +217,8 @@ class PositionResolver:
                 pnl=pnl,
                 lock_valid=lock_valid,
                 is_paper=True,
+                kalshi_close_price=kalshi_close_price,
+                pm_close_price=pm_close_price,
             )
 
     def _retry_redeem(self, position) -> None:
