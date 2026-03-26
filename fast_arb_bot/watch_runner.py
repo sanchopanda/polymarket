@@ -362,13 +362,39 @@ class FastArbWatchRunner:
         if not self._prices_cross_midpoint(rough_yes, rough_no):
             return
 
-        # 5. Oracle gap check — пропускаем если target prices расходятся слишком сильно
+        # 5. Oracle prices (используются и для XRP paper, и для gap check)
         _kalshi_target = opp.kalshi_reference_price
         _pm_target: float | None = None
         _max_gap_pct = self.engine.config.get("safety", {}).get("max_oracle_gap_pct", 0.02)
         _slug = opp.pm_event_slug
         if _slug:
             _pm_target = self._fetch_pm_open_price(_slug)
+
+        # XRP paper tracking: записываем один раз и не торгуем реально
+        if opp.symbol == "XRP":
+            if not self.engine.db.has_open_paper_position(
+                opp.pair_key, opp.buy_yes_venue, opp.buy_no_venue
+            ):
+                self.engine.db.open_paper_position(opp)
+                if self.engine.notifier:
+                    self.engine.notifier.notify_open(
+                        symbol=opp.symbol,
+                        yes_venue=opp.buy_yes_venue,
+                        no_venue=opp.buy_no_venue,
+                        yes_ask=opp.yes_ask,
+                        no_ask=opp.no_ask,
+                        ask_sum=opp.ask_sum,
+                        edge=opp.edge_per_share,
+                        cost=opp.total_cost,
+                        expected_profit=opp.expected_profit,
+                        execution_status="paper",
+                        is_paper=True,
+                        kalshi_target=_kalshi_target,
+                        pm_target=_pm_target,
+                    )
+            return
+
+        # Oracle gap check (только для реальных символов)
         if _kalshi_target and _pm_target:
             _gap_pct = abs(_pm_target - _kalshi_target) / _kalshi_target * 100
             if _gap_pct > _max_gap_pct:

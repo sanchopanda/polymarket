@@ -70,3 +70,4 @@ kalshi:
     - "KXETH15M"
     - "KXDOGE15M"
     - "KXBNB15M"
+    - "KXXRP15M"   # paper-only: tracking oracle gap accuracy
