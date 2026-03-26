@@ -103,6 +103,7 @@ def build_opportunities(
                     kalshi_reference_price=kalshi.reference_price,
                     polymarket_rules=pm.rules_text,
                     kalshi_rules=kalshi.rules_text,
+                    pm_event_slug=pm.pm_event_slug,
                     buy_yes_venue=yes_venue,
                     buy_no_venue=no_venue,
                     yes_ask=yes_ask,

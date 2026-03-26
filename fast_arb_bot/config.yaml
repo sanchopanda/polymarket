@@ -25,6 +25,7 @@ safety:
   min_partial_fill_pct: 50
   kalshi_slippage_cents: 0
   polymarket_price_buffer_cents: 0
+  max_oracle_gap_pct: 0.02
 
 fast_arb:
   budget_usd: 60.0           # базовый бюджет (растёт с выигрышами)

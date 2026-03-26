@@ -29,6 +29,7 @@ class NormalizedMarket:
     no_token_id: Optional[str] = None
     reference_price: Optional[float] = None
     rules_text: str = ""
+    pm_event_slug: Optional[str] = None
 
 
 @dataclass
@@ -68,6 +69,7 @@ class CrossVenueOpportunity:
     total_cost: float
     expected_payout: float
     expected_profit: float
+    pm_event_slug: Optional[str] = None
 
 
 @dataclass

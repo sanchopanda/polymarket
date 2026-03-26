@@ -75,6 +75,7 @@ class FastArbWatchRunner:
         self._KALSHI_RESTING_SYNC_INTERVAL = 2.0
         self._cached_balances: dict = {"polymarket": None, "kalshi": None}
         self._last_scan_ts: float = 0.0
+        self._pm_price_cache: dict[str, float] = {}  # slug → openPrice
 
         # Подменяем функцию статуса в Telegram-нотификаторе
         if engine.notifier:
@@ -361,7 +362,24 @@ class FastArbWatchRunner:
         if not self._prices_cross_midpoint(rough_yes, rough_no):
             return
 
-        # 5. Loss limit check (SQL)
+        # 5. Oracle gap check — пропускаем если target prices расходятся слишком сильно
+        _kalshi_target = opp.kalshi_reference_price
+        _pm_target: float | None = None
+        _max_gap_pct = self.engine.config.get("safety", {}).get("max_oracle_gap_pct", 0.02)
+        _slug = opp.pm_event_slug
+        if _slug:
+            _pm_target = self._fetch_pm_open_price(_slug)
+        if _kalshi_target and _pm_target:
+            _gap_pct = abs(_pm_target - _kalshi_target) / _kalshi_target * 100
+            if _gap_pct > _max_gap_pct:
+                self._skip_log(
+                    pair_key,
+                    f"[fast-arb][SKIP] {opp.symbol} | oracle_gap_too_large"
+                    f" K={_kalshi_target:.2f} PM={_pm_target:.2f} gap={_gap_pct:.4f}%",
+                )
+                return
+
+        # 6. Loss limit check (SQL)
         halt, reason = self._check_loss_limits()
         if halt:
             self._skip_log(pair_key, f"[fast-arb][HALT] {opp.symbol} | {reason}")
@@ -442,10 +460,19 @@ class FastArbWatchRunner:
         yes_leg: ExecutionLegInfo | None,
         no_leg: ExecutionLegInfo | None,
     ) -> None:
+        _k_tgt = opp.kalshi_reference_price
+        _p_tgt = self._fetch_pm_open_price(opp.pm_event_slug) if opp.pm_event_slug else None
+        if _k_tgt and _p_tgt:
+            _gap_pct = abs(_p_tgt - _k_tgt) / _k_tgt * 100
+            _tgt_str = f" | K.tgt={_k_tgt:.2f} PM.tgt={_p_tgt:.2f} gap={_gap_pct:.4f}%"
+        elif _k_tgt:
+            _tgt_str = f" | K.tgt={_k_tgt:.2f} PM.tgt=N/A"
+        else:
+            _tgt_str = ""
         print(
             f"\n[fast-arb][OPEN] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
             f"                 ask_sum={opp.ask_sum:.4f} edge={opp.edge_per_share:.4f} "
-            f"cost=${opp.total_cost:.2f} exp_profit=${opp.expected_profit:.2f}"
+            f"cost=${opp.total_cost:.2f} exp_profit=${opp.expected_profit:.2f}{_tgt_str}"
         )
 
         if self.dry_run:
@@ -511,6 +538,8 @@ class FastArbWatchRunner:
                 execution_status=result.execution_status,
                 kalshi_fill=kalshi_fill,
                 pm_fill=pm_fill,
+                kalshi_target=_k_tgt,
+                pm_target=_p_tgt,
             )
 
     # ── Execution pricing (параллельные REST + liquidity margin) ──────
@@ -790,6 +819,7 @@ class FastArbWatchRunner:
                         kalshi_reference_price=ka.reference_price,
                         polymarket_rules=pm.rules_text,
                         kalshi_rules=ka.rules_text,
+                        pm_event_slug=pm.pm_event_slug,
                         buy_yes_venue=yes_venue,
                         buy_no_venue=no_venue,
                         yes_ask=yes_ask,
@@ -1175,6 +1205,28 @@ class FastArbWatchRunner:
                 )
                 last_price = level.price
         return candidates
+
+    def _fetch_pm_open_price(self, slug: str) -> float | None:
+        """Парсим openPrice текущего окна с HTML-страницы Polymarket (кэшируется по slug)."""
+        if slug in self._pm_price_cache:
+            return self._pm_price_cache[slug]
+        import re as _re
+        import httpx as _httpx
+        url = f"https://polymarket.com/event/{slug}"
+        try:
+            resp = _httpx.get(url, timeout=5.0, follow_redirects=True,
+                              headers={"User-Agent": "Mozilla/5.0"})
+            m = _re.search(
+                r'"openPrice"\s*:\s*([0-9.]+)\s*,\s*"closePrice"\s*:\s*null',
+                resp.text,
+            )
+            if m:
+                price = float(m.group(1))
+                self._pm_price_cache[slug] = price
+                return price
+        except Exception as e:
+            print(f"[oracle] PM page fetch failed for {slug}: {e}")
+        return None
 
     def _skip_log(self, pair_key: str, msg: str) -> None:
         now = time.time()

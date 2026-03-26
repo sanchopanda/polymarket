@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -79,6 +80,13 @@ class PolymarketFeed:
             return None
         rule_family = self._detect_rule_family(market)
         reference_price = self._extract_reference_price(market.question, market.description)
+        interval_minutes = self._extract_interval_minutes(market.question)
+
+        pm_event_slug: str | None = None
+        if market.end_date is not None and interval_minutes == 15:
+            window_start = market.end_date - timedelta(minutes=15)
+            ts = calendar.timegm(window_start.timetuple())
+            pm_event_slug = f"{symbol.lower()}-updown-15m-{ts}"
 
         return NormalizedMarket(
             venue="polymarket",
@@ -97,12 +105,13 @@ class PolymarketFeed:
             no_depth=market.liquidity_num,
             volume=market.volume_num,
             liquidity=market.liquidity_num,
-            interval_minutes=self._extract_interval_minutes(market.question),
+            interval_minutes=interval_minutes,
             rule_family=rule_family,
             yes_token_id=market.clob_token_ids[0],
             no_token_id=market.clob_token_ids[1],
             reference_price=reference_price,
             rules_text=self._build_rules_text(market),
+            pm_event_slug=pm_event_slug,
         )
 
     def _extract_reference_price(self, question: str, description: str) -> float | None:

@@ -103,6 +103,8 @@ class TelegramNotifier:
         kalshi_fill: float = 0.0,
         pm_fill: float = 0.0,
         is_paper: bool = False,
+        kalshi_target: float | None = None,
+        pm_target: float | None = None,
     ) -> None:
         paper_tag = " [PAPER]" if is_paper else ""
         if is_paper:
@@ -118,11 +120,20 @@ class TelegramNotifier:
             icon = "❌"
             fill_line = f"Статус: {execution_status}"
 
+        if kalshi_target is not None and pm_target is not None:
+            gap_pct = abs(pm_target - kalshi_target) / kalshi_target * 100
+            target_line = f"K.target={kalshi_target:.2f} | PM.target={pm_target:.2f} | gap={gap_pct:.4f}%\n"
+        elif kalshi_target is not None:
+            target_line = f"K.target={kalshi_target:.2f} | PM.target=N/A\n"
+        else:
+            target_line = ""
+
         text = (
             f"{icon} <b>ОТКРЫТА{paper_tag}: {symbol}</b>\n"
             f"{yes_venue}:YES @ {yes_ask:.4f} + {no_venue}:NO @ {no_ask:.4f}\n"
             f"ask_sum={ask_sum:.4f} | edge={edge:.4f}\n"
             f"cost=${cost:.2f} | ожид. прибыль=${expected_profit:.2f}\n"
+            f"{target_line}"
             f"{fill_line}"
         )
         self._send(text)
@@ -140,6 +151,9 @@ class TelegramNotifier:
         if lock_valid:
             icon = "💰" if pnl > 0 else "📉"
             validity = "арбитраж ✓"
+        elif "not_traded" in (pm_result, kalshi_result):
+            icon = "💰" if pnl > 0 else "📉"
+            validity = "одноногая"
         else:
             icon = "⚠️"
             validity = "ложный матч!"
