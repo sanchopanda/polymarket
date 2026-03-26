@@ -205,6 +205,8 @@ class FastArbWatchRunner:
                 continue
             if not self._prices_within_bounds(opp.yes_ask, opp.no_ask):
                 continue
+            if self._prices_in_blocked_zone(opp.yes_ask, opp.no_ask):
+                continue
             if not self._prices_cross_midpoint(opp.yes_ask, opp.no_ask):
                 continue
             if self._edge_above_max_allowed(opp.yes_ask, opp.no_ask):
@@ -222,6 +224,8 @@ class FastArbWatchRunner:
             if executed is None:
                 continue
             if not self._prices_within_bounds(executed.yes_ask, executed.no_ask):
+                continue
+            if self._prices_in_blocked_zone(executed.yes_ask, executed.no_ask):
                 continue
             if not self._prices_cross_midpoint(executed.yes_ask, executed.no_ask):
                 continue
@@ -352,6 +356,8 @@ class FastArbWatchRunner:
         # 4. Проверка min/max цены ноги (в памяти)
         if not self._prices_within_bounds(rough_yes, rough_no):
             return
+        if self._prices_in_blocked_zone(rough_yes, rough_no):
+            return
         if not self._prices_cross_midpoint(rough_yes, rough_no):
             return
 
@@ -389,6 +395,12 @@ class FastArbWatchRunner:
                 self._skip_log(
                     pair_key,
                     f"[fast-arb][SKIP] {opp.symbol} | leg_price_out_of_bounds ({executed.yes_ask:.4f}, {executed.no_ask:.4f})",
+                )
+                return
+            if self._prices_in_blocked_zone(executed.yes_ask, executed.no_ask):
+                self._skip_log(
+                    pair_key,
+                    f"[fast-arb][SKIP] {opp.symbol} | blocked_leg_price_zone ({executed.yes_ask:.4f}, {executed.no_ask:.4f})",
                 )
                 return
             if not self._prices_cross_midpoint(executed.yes_ask, executed.no_ask):
@@ -820,6 +832,7 @@ class FastArbWatchRunner:
         exec_status = row["execution_status"]
         pos_id = row["id"]
         min_edge = float(self.engine.trading.get("completion_min_edge", self.engine.trading["min_lock_edge"]))
+        skip_pm_above = float(self.engine.trading.get("completion_skip_pm_if_price_above", 0.0) or 0.0)
 
         # Определяем какая нога уже есть и по какой цене
         if exec_status == "one_legged_kalshi":
@@ -827,6 +840,7 @@ class FastArbWatchRunner:
             # venue_yes из БД — какая площадка покупала YES при открытии
             db_venue_yes = row["venue_yes"]
             existing_fill_price = float(row["kalshi_fill_price"] or 0)
+            existing_kalshi_side = "no" if db_venue_yes == "polymarket" else "yes"
             missing_venue = "polymarket"
             missing_side = "yes" if db_venue_yes == "polymarket" else "no"
             missing_token = (
@@ -862,6 +876,20 @@ class FastArbWatchRunner:
 
             try:
                 if missing_venue == "polymarket":
+                    if existing_fill_price >= skip_pm_above:
+                        kalshi_live = self.live_books_kalshi.get(matched.kalshi.market_id or "")
+                        live_existing_price = (
+                            kalshi_live.best_yes_ask if (kalshi_live and existing_kalshi_side == "yes")
+                            else kalshi_live.best_no_ask if kalshi_live
+                            else 0.0
+                        )
+                        if live_existing_price > existing_fill_price:
+                            print(
+                                f"[fast-arb][COMPLETE] skip PM completion | "
+                                f"existing_kalshi={existing_fill_price:.4f} >= threshold={skip_pm_above:.4f} "
+                                f"and live_kalshi_{existing_kalshi_side}={live_existing_price:.4f} is higher"
+                            )
+                            return
                     asks = self._fetch_asks_for_leg(missing_venue, matched.polymarket, missing_side)
                     candidates = self._build_pm_completion_candidates_from_asks(
                         asks=asks,
@@ -1089,6 +1117,16 @@ class FastArbWatchRunner:
         min_p = self.engine.safety.min_leg_price
         max_p = self.engine.safety.max_leg_price
         return min_p <= yes_price <= max_p and min_p <= no_price <= max_p
+
+    def _prices_in_blocked_zone(self, yes_price: float, no_price: float) -> bool:
+        blocked_min = float(getattr(self.engine.safety, "blocked_leg_price_min", 0.0) or 0.0)
+        blocked_max = float(getattr(self.engine.safety, "blocked_leg_price_max", 0.0) or 0.0)
+        if blocked_max <= blocked_min:
+            return False
+        return (
+            blocked_min <= yes_price < blocked_max
+            or blocked_min <= no_price < blocked_max
+        )
 
     def _prices_cross_midpoint(self, yes_price: float, no_price: float) -> bool:
         return (yes_price > 0.5) != (no_price > 0.5)

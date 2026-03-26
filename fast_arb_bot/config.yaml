@@ -2,6 +2,7 @@ trading:
   stake_per_pair_usd: 20.0
   min_lock_edge: 0.06
   completion_min_edge: 0.05
+  completion_skip_pm_if_price_above: 0.60
   max_lock_edge: 0.45
   stake_tier_half_above: 0.20
   stake_tier_third_above: 0.30
@@ -13,6 +14,8 @@ safety:
   min_total_balance_usd: 100.0
   min_leg_price: 0.10
   max_leg_price: 0.90
+  blocked_leg_price_min: 0.40
+  blocked_leg_price_max: 0.60
   min_balance_polymarket: 30.0
   min_balance_kalshi: 30.0
   cooldown_seconds: 10.0
@@ -25,7 +28,7 @@ safety:
 
 fast_arb:
   budget_usd: 60.0           # базовый бюджет (растёт с выигрышами)
-  max_realized_loss_usd: 130.0  # максимальные реализованные потери — стоп
+  max_realized_loss_usd: 160.0  # максимальные реализованные потери — стоп
   order_book_min_liquidity_ratio: 2.0
   scan_interval_seconds: 60
 

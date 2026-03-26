@@ -58,6 +58,22 @@ def _parse_end_date(raw: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _parse_bool(raw, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    if isinstance(raw, str):
+        value = raw.strip().lower()
+        if value in {"true", "1", "yes"}:
+            return True
+        if value in {"false", "0", "no", ""}:
+            return False
+    return default
+
+
 class GammaClient:
     def __init__(self, base_url: str, page_size: int = 100, delay_ms: int = 300) -> None:
         self.base_url = base_url.rstrip("/")
@@ -223,9 +239,9 @@ class GammaClient:
                 volume_num=float(raw.get("volumeNum", 0) or 0),
                 liquidity_num=float(raw.get("liquidityNum", 0) or 0),
                 end_date=_parse_end_date(raw.get("endDate")),
-                active=bool(raw.get("active", False)),
-                closed=bool(raw.get("closed", False)),
-                neg_risk=bool(raw.get("negRisk", False)),
+                active=_parse_bool(raw.get("active", False)),
+                closed=_parse_bool(raw.get("closed", False)),
+                neg_risk=_parse_bool(raw.get("negRisk", False)),
                 category=str(raw.get("category", "") or ""),
                 fee_type=str(raw.get("feeType", "") or ""),
             )

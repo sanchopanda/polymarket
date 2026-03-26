@@ -253,7 +253,7 @@ class PositionResolver:
             "active": market.active,
             "closed": market.closed,
         })
-        if market.active or not market.closed:
+        if not market.closed:
             return None, snapshot
         try:
             up_idx = next(i for i, o in enumerate(market.outcomes) if o.lower() == "up")
@@ -264,9 +264,9 @@ class PositionResolver:
         up_price = float(market.outcome_prices[up_idx])
         down_price = float(market.outcome_prices[down_idx])
 
-        if up_price >= 0.99 and down_price <= 0.01:
+        if up_price >= 0.95 and down_price <= 0.05:
             return "yes", snapshot
-        if down_price >= 0.99 and up_price <= 0.01:
+        if down_price >= 0.95 and up_price <= 0.05:
             return "no", snapshot
         return None, snapshot
 

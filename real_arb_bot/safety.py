@@ -14,6 +14,8 @@ class SafetyGuard:
         self.min_total_balance_usd: float = float(s.get("min_total_balance_usd", 0.0))
         self.min_leg_price: float = float(s.get("min_leg_price", 0.0))
         self.max_leg_price: float = float(s.get("max_leg_price", 1.0))
+        self.blocked_leg_price_min: float = float(s.get("blocked_leg_price_min", 0.0))
+        self.blocked_leg_price_max: float = float(s.get("blocked_leg_price_max", 0.0))
         self.min_balance_polymarket: float = float(s["min_balance_polymarket"])
         self.min_balance_kalshi: float = float(s["min_balance_kalshi"])
         self.cooldown_seconds: float = float(s["cooldown_seconds"])
