@@ -68,6 +68,7 @@ kalshi:
   series_tickers:
     - "KXBTC15M"
     - "KXETH15M"
+    - "KXSOL15M"
     - "KXDOGE15M"
     - "KXBNB15M"
     - "KXXRP15M"   # paper-only: tracking oracle gap accuracy
