@@ -362,16 +362,9 @@ class FastArbWatchRunner:
         if not self._prices_cross_midpoint(rough_yes, rough_no):
             return
 
-        # 5. Oracle prices (используются и для XRP paper, и для gap check)
-        _kalshi_target = opp.kalshi_reference_price
-        _pm_target: float | None = None
-        _max_gap_pct = self.engine.config.get("safety", {}).get("max_oracle_gap_pct", 0.02)
-        _slug = opp.pm_event_slug
-        if _slug:
-            _pm_target = self._fetch_pm_open_price(_slug)
-
-        # XRP paper tracking: записываем один раз и не торгуем реально
+        # 5. XRP paper tracking (oracle gap уже проверен при матче)
         if opp.symbol == "XRP":
+            _pm_target = self._fetch_pm_open_price(opp.pm_event_slug) if opp.pm_event_slug else None
             if not self.engine.db.has_open_paper_position(
                 opp.pair_key, opp.buy_yes_venue, opp.buy_no_venue
             ):
@@ -389,21 +382,10 @@ class FastArbWatchRunner:
                         expected_profit=opp.expected_profit,
                         execution_status="paper",
                         is_paper=True,
-                        kalshi_target=_kalshi_target,
+                        kalshi_target=opp.kalshi_reference_price,
                         pm_target=_pm_target,
                     )
             return
-
-        # Oracle gap check (только для реальных символов)
-        if _kalshi_target and _pm_target:
-            _gap_pct = abs(_pm_target - _kalshi_target) / _kalshi_target * 100
-            if _gap_pct > _max_gap_pct:
-                self._skip_log(
-                    pair_key,
-                    f"[fast-arb][SKIP] {opp.symbol} | oracle_gap_too_large"
-                    f" K={_kalshi_target:.2f} PM={_pm_target:.2f} gap={_gap_pct:.4f}%",
-                )
-                return
 
         # 6. Loss limit check (SQL)
         halt, reason = self._check_loss_limits()
@@ -805,9 +787,32 @@ class FastArbWatchRunner:
     def _build_tracking_candidates(self, matches: list[MatchedMarketPair]) -> list[CrossVenueOpportunity]:
         candidates: list[CrossVenueOpportunity] = []
         stake_per_pair_usd = float(self.engine.trading["stake_per_pair_usd"])
+        max_gap_pct = self.engine.config.get("safety", {}).get("max_oracle_gap_pct", 0.02)
+
         for item in matches:
             pm = item.polymarket
             ka = item.kalshi
+            symbol = pm.symbol
+
+            # Oracle gap check — часть проверки матча: оба рынка должны следить за одной ценой.
+            # XRP пропускаем (paper-only, отслеживаем для анализа).
+            k_ref = ka.reference_price
+            slug = pm.pm_event_slug
+            pm_open: float | None = self._fetch_pm_open_price(slug) if slug else None
+
+            if symbol != "XRP" and k_ref and slug:
+                if pm_open is None:
+                    print(f"[match] {symbol} | pm_open_price unavailable (slug={slug}) — skipping match")
+                    continue
+                gap_pct = abs(pm_open - k_ref) / k_ref * 100
+                if gap_pct > max_gap_pct:
+                    print(
+                        f"[match-skip] {symbol} | oracle_gap_too_large"
+                        f" K={k_ref:.4f} PM={pm_open:.4f} gap={gap_pct:.4f}% > {max_gap_pct}%"
+                    )
+                    continue
+                print(f"[match-ok] {symbol} | K={k_ref:.4f} PM={pm_open:.4f} gap={gap_pct:.4f}%")
+
             legs = [
                 ("polymarket", "kalshi", pm.yes_ask, ka.no_ask),
                 ("kalshi", "polymarket", ka.yes_ask, pm.no_ask),
@@ -835,7 +840,7 @@ class FastArbWatchRunner:
                         pair_key=f"{pm.market_id}:{ka.market_id}",
                         polymarket_market_id=pm.market_id,
                         kalshi_market_id=ka.market_id,
-                        symbol=pm.symbol,
+                        symbol=symbol,
                         title=f"{pm.title} <> {ka.title}",
                         expiry=min(pm.expiry, ka.expiry),
                         polymarket_title=pm.title,
@@ -843,10 +848,10 @@ class FastArbWatchRunner:
                         match_score=item.score,
                         expiry_delta_seconds=abs((pm.expiry - ka.expiry).total_seconds()),
                         polymarket_reference_price=pm.reference_price,
-                        kalshi_reference_price=ka.reference_price,
+                        kalshi_reference_price=k_ref,
                         polymarket_rules=pm.rules_text,
                         kalshi_rules=ka.rules_text,
-                        pm_event_slug=pm.pm_event_slug,
+                        pm_event_slug=slug,
                         buy_yes_venue=yes_venue,
                         buy_no_venue=no_venue,
                         yes_ask=yes_ask,
@@ -1533,3 +1538,37 @@ class FastArbWatchRunner:
             f"| open=${open_cost:.2f}/budget=${effective_budget:.2f} "
             f"| realized_pnl=${realized_pnl:+.2f} (stop at -${self.max_realized_loss_usd:.0f})"
         )
+        # Показываем текущие матчи с ценами и oracle gap
+        try:
+            _, _, matches, _ = self.engine.last_snapshot
+            if matches:
+                print("[fast-arb][Matches]")
+                max_gap_pct = self.engine.config.get("safety", {}).get("max_oracle_gap_pct", 0.02)
+                for m in matches:
+                    pm = m.polymarket
+                    ka = m.kalshi
+                    k_ref = ka.reference_price
+                    slug = pm.pm_event_slug
+                    pm_open = self._pm_price_cache.get(slug) if slug else None
+                    if k_ref and pm_open:
+                        gap_pct = abs(pm_open - k_ref) / k_ref * 100
+                        gap_str = f"K={k_ref:.4f} PM={pm_open:.4f} gap={gap_pct:.4f}%"
+                        gap_ok = "✓" if gap_pct <= max_gap_pct else "✗ gap_too_large"
+                    elif k_ref:
+                        gap_str = f"K={k_ref:.4f} PM=N/A"
+                        gap_ok = "?"
+                    else:
+                        gap_str = "targets=N/A"
+                        gap_ok = "?"
+                    best_edge = max(
+                        1.0 - (pm.yes_ask + ka.no_ask),
+                        1.0 - (ka.yes_ask + pm.no_ask),
+                    )
+                    print(
+                        f"  {pm.symbol:6} | PM yes={pm.yes_ask:.3f} no={pm.no_ask:.3f}"
+                        f" | K yes={ka.yes_ask:.3f} no={ka.no_ask:.3f}"
+                        f" | best_edge={best_edge:.3f}"
+                        f" | {gap_str} {gap_ok}"
+                    )
+        except Exception:
+            pass
