@@ -368,13 +368,32 @@ class FastArbWatchRunner:
             if not self.engine.db.has_open_paper_position(
                 opp.pair_key, opp.buy_yes_venue, opp.buy_no_venue
             ):
-                # Используем live-цены (rough_yes/rough_no), а не устаревшие цены из opp
+                # Пересчитываем все поля по live-ценам (rough_yes/rough_no)
                 live_ask_sum = rough_yes + rough_no
+                _stake = float(self.engine.trading["stake_per_pair_usd"])
+                live_shares = _stake / live_ask_sum
+                live_capital = live_ask_sum * live_shares
+                if opp.buy_yes_venue == "polymarket":
+                    _pm_fee = polymarket_crypto_taker_fee(live_shares, rough_yes)
+                    _k_fee = kalshi_taker_fee(live_shares, rough_no)
+                else:
+                    _k_fee = kalshi_taker_fee(live_shares, rough_yes)
+                    _pm_fee = polymarket_crypto_taker_fee(live_shares, rough_no)
+                live_total_fee = _pm_fee + _k_fee
+                live_total_cost = live_capital + live_total_fee
                 live_opp = replace(opp,
                     yes_ask=rough_yes,
                     no_ask=rough_no,
                     ask_sum=live_ask_sum,
                     edge_per_share=1.0 - live_ask_sum,
+                    shares=live_shares,
+                    capital_used=live_capital,
+                    polymarket_fee=_pm_fee,
+                    kalshi_fee=_k_fee,
+                    total_fee=live_total_fee,
+                    total_cost=live_total_cost,
+                    expected_payout=live_shares,
+                    expected_profit=live_shares - live_total_cost,
                 )
                 self.engine.db.open_paper_position(live_opp, pm_price_to_beat=_pm_target)
                 if self.engine.notifier:
