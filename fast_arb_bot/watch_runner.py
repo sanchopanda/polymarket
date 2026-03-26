@@ -375,7 +375,7 @@ class FastArbWatchRunner:
             if not self.engine.db.has_open_paper_position(
                 opp.pair_key, opp.buy_yes_venue, opp.buy_no_venue
             ):
-                self.engine.db.open_paper_position(opp)
+                self.engine.db.open_paper_position(opp, pm_price_to_beat=_pm_target)
                 if self.engine.notifier:
                     self.engine.notifier.notify_open(
                         symbol=opp.symbol,
@@ -541,6 +541,7 @@ class FastArbWatchRunner:
             kalshi_snapshot_open=None,
             yes_leg=yes_leg,
             no_leg=no_leg,
+            pm_price_to_beat=_p_tgt,
         )
         if result.execution_status == "both_filled":
             self._cancel_redundant_one_legged_polymarket_orders(

@@ -115,6 +115,9 @@ class RealArbDB:
             ("exclude_from_stats", "INTEGER NOT NULL DEFAULT 0"),
             ("yes_usable_shares", "REAL"),
             ("no_usable_shares", "REAL"),
+            ("pm_price_to_beat", "REAL"),
+            ("kalshi_close_price", "REAL"),
+            ("pm_close_price", "REAL"),
         ]:
             try:
                 self.conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {definition}")
@@ -135,6 +138,7 @@ class RealArbDB:
         kalshi_snapshot_open: str | None = None,
         yes_leg=None,
         no_leg=None,
+        pm_price_to_beat: float | None = None,
     ) -> CrossPosition:
         pos_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
@@ -158,10 +162,11 @@ class RealArbDB:
                 ask_sum, total_cost, expected_profit, opened_at, status,
                 kalshi_order_id, kalshi_fill_price, kalshi_fill_shares, kalshi_order_fee, kalshi_order_latency_ms, kalshi_order_status,
                 polymarket_order_id, polymarket_fill_price, polymarket_fill_shares, polymarket_order_fee, polymarket_order_latency_ms, polymarket_order_status,
-                execution_status, execution_started_at, execution_completed_at
+                execution_status, execution_started_at, execution_completed_at,
+                pm_price_to_beat
             ) VALUES (
                 ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
             )
             """,
             (
@@ -221,6 +226,7 @@ class RealArbDB:
                 execution_status,
                 now,
                 now,
+                pm_price_to_beat,
             ),
         )
         self.conn.commit()
@@ -234,7 +240,11 @@ class RealArbDB:
         })
         return self.get_position(pos_id)
 
-    def open_paper_position(self, opportunity: CrossVenueOpportunity) -> CrossPosition:
+    def open_paper_position(
+        self,
+        opportunity: CrossVenueOpportunity,
+        pm_price_to_beat: float | None = None,
+    ) -> CrossPosition:
         pos_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
         self.conn.execute(
@@ -244,8 +254,8 @@ class RealArbDB:
                 polymarket_title, kalshi_title, match_score, expiry_delta_seconds,
                 polymarket_reference_price, kalshi_reference_price, polymarket_rules, kalshi_rules,
                 shares, yes_ask, no_ask, ask_sum, total_cost, expected_profit,
-                opened_at, status, execution_status, is_paper
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                opened_at, status, execution_status, is_paper, pm_price_to_beat
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 pos_id,
@@ -271,7 +281,7 @@ class RealArbDB:
                 opportunity.ask_sum,
                 opportunity.total_cost,
                 opportunity.expected_profit,
-                now, "open", "paper", 1,
+                now, "open", "paper", 1, pm_price_to_beat,
             ),
         )
         self.conn.commit()
@@ -297,6 +307,8 @@ class RealArbDB:
         polymarket_redeem_tx: str | None = None,
         polymarket_redeem_gas_cost: float | None = None,
         polymarket_redeem_ms: float | None = None,
+        kalshi_close_price: float | None = None,
+        pm_close_price: float | None = None,
     ) -> None:
         self.conn.execute(
             """
@@ -304,7 +316,8 @@ class RealArbDB:
                 status='resolved', resolved_at=?, winning_side=?, pnl=?, actual_pnl=?,
                 polymarket_result=?, kalshi_result=?, lock_valid=?,
                 polymarket_snapshot_resolved=?, kalshi_snapshot_resolved=?,
-                polymarket_redeem_tx=?, polymarket_redeem_gas_cost=?, polymarket_redeem_ms=?
+                polymarket_redeem_tx=?, polymarket_redeem_gas_cost=?, polymarket_redeem_ms=?,
+                kalshi_close_price=?, pm_close_price=?
             WHERE id=?
             """,
             (
@@ -313,6 +326,7 @@ class RealArbDB:
                 polymarket_result, kalshi_result, 1 if lock_valid else 0,
                 polymarket_snapshot_resolved, kalshi_snapshot_resolved,
                 polymarket_redeem_tx, polymarket_redeem_gas_cost, polymarket_redeem_ms,
+                kalshi_close_price, pm_close_price,
                 position_id,
             ),
         )

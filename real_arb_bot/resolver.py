@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import calendar
 import json
+import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from real_arb_bot.clients import PolymarketTrader, KalshiTrader
 from real_arb_bot.db import RealArbDB
@@ -62,7 +64,7 @@ class PositionResolver:
             return
 
         pm_result, pm_snapshot = self._check_polymarket(position)
-        kalshi_result, kalshi_snapshot = self._check_kalshi(position)
+        kalshi_result, kalshi_snapshot, kalshi_close_price = self._check_kalshi(position)
 
         if pm_result is None or kalshi_result is None:
             return
@@ -142,6 +144,7 @@ class PositionResolver:
             + (f" | pm_redeem_payout=${pm_payout_real:.2f}" if pm_payout_real > 0 else "")
         )
 
+        pm_close_price = self._fetch_pm_close_price(position)
         self.db.resolve_position(
             position_id=position.id,
             winning_side=winning_side,
@@ -155,6 +158,8 @@ class PositionResolver:
             polymarket_redeem_tx=redeem_tx,
             polymarket_redeem_gas_cost=redeem_gas,
             polymarket_redeem_ms=redeem_ms,
+            kalshi_close_price=kalshi_close_price,
+            pm_close_price=pm_close_price,
         )
         print(
             f"[resolve] {position.symbol} | pm={pm_result} kalshi={kalshi_result} "
@@ -172,7 +177,7 @@ class PositionResolver:
 
     def _resolve_paper(self, position) -> None:
         pm_result, _ = self._check_polymarket(position)
-        kalshi_result, _ = self._check_kalshi(position)
+        kalshi_result, _, kalshi_close_price = self._check_kalshi(position)
 
         if pm_result is None or kalshi_result is None:
             return
@@ -185,6 +190,7 @@ class PositionResolver:
         pnl = position.shares - position.total_cost if lock_valid else -position.total_cost
         winning_side = "yes" if yes_wins and not no_wins else ("no" if no_wins and not yes_wins else "mismatch")
 
+        pm_close_price = self._fetch_pm_close_price(position)
         self.db.resolve_position(
             position_id=position.id,
             winning_side=winning_side,
@@ -193,6 +199,8 @@ class PositionResolver:
             polymarket_result=pm_result,
             kalshi_result=kalshi_result,
             lock_valid=lock_valid,
+            kalshi_close_price=kalshi_close_price,
+            pm_close_price=pm_close_price,
         )
         tag = "✓ profit" if pnl > 0 else "✗ loss"
         print(
@@ -270,26 +278,53 @@ class PositionResolver:
             return "no", snapshot
         return None, snapshot
 
-    def _check_kalshi(self, position) -> tuple[str | None, str | None]:
+    def _check_kalshi(self, position) -> tuple[str | None, str | None, float | None]:
         market_id = position.market_yes if position.venue_yes == "kalshi" else position.market_no
         payload = self.kalshi.get_market(market_id)
         if payload is None:
-            return None, None
+            return None, None, None
 
         snapshot = json.dumps({
             "stage": "resolve", "venue": "kalshi",
             "ticker": payload.get("ticker"),
             "status": payload.get("status"),
             "result": payload.get("result"),
+            "expiration_value": payload.get("expiration_value"),
         })
+        exp_val = payload.get("expiration_value")
+        kalshi_close = float(exp_val) if exp_val is not None else None
+
         result = str(payload.get("result") or "").lower()
         if result in {"yes", "no"}:
-            return result, snapshot
+            return result, snapshot, kalshi_close
 
         status = str(payload.get("status") or "").lower()
         if status in {"closed", "determined", "finalized"}:
-            return None, snapshot
-        return None, snapshot
+            return None, snapshot, kalshi_close
+        return None, snapshot, None
+
+    def _fetch_pm_close_price(self, position) -> float | None:
+        """Парсим closePrice целевого окна с HTML-страницы Polymarket после закрытия рынка."""
+        market_id = position.market_yes if position.venue_yes == "polymarket" else position.market_no
+        market = self.pm_feed.client.fetch_market(market_id)
+        if market is None or not market.end_date:
+            return None
+        window_start = market.end_date - timedelta(minutes=15)
+        ts = calendar.timegm(window_start.timetuple())
+        slug = f"{position.symbol.lower()}-updown-15m-{ts}"
+        try:
+            import httpx
+            resp = httpx.get(
+                f"https://polymarket.com/event/{slug}",
+                timeout=5.0, follow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            closes = re.findall(r'"closePrice"\s*:\s*([\d.]+)', resp.text)
+            if closes:
+                return float(closes[-1])
+        except Exception:
+            pass
+        return None
 
     def _leg_wins(self, venue: str, side: str, pm_result: str, kalshi_result: str) -> bool:
         if venue == "polymarket":
