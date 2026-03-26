@@ -822,12 +822,11 @@ class FastArbWatchRunner:
             symbol = pm.symbol
 
             # Oracle gap check — часть проверки матча: оба рынка должны следить за одной ценой.
-            # XRP пропускаем (paper-only, отслеживаем для анализа).
             k_ref = ka.reference_price
             slug = pm.pm_event_slug
             pm_open: float | None = self._fetch_pm_open_price(slug) if slug else None
 
-            if symbol != "XRP" and k_ref and slug:
+            if k_ref and slug:
                 if pm_open is None:
                     print(f"[match] {symbol} | pm_open_price unavailable (slug={slug}) — skipping match")
                     continue
@@ -1584,7 +1583,7 @@ class FastArbWatchRunner:
                 if k_ref and pm_open:
                     gap_pct = abs(pm_open - k_ref) / k_ref * 100
                     gap_str = f"K={k_ref:.4f} PM={pm_open:.4f} gap={gap_pct:.4f}%"
-                    gap_ok = "✓" if (gap_pct <= max_gap_pct or pm.symbol == "XRP") else "✗ oracle_gap"
+                    gap_ok = "✓" if gap_pct <= max_gap_pct else "✗ oracle_gap"
                 elif k_ref:
                     gap_str = f"K={k_ref:.4f} PM=N/A"
                     gap_ok = "✗ no_pm_price"
