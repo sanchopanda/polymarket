@@ -362,27 +362,35 @@ class FastArbWatchRunner:
         if not self._prices_cross_midpoint(rough_yes, rough_no):
             return
 
-        # 5. XRP paper tracking (oracle gap уже проверен при матче)
-        if opp.symbol == "XRP":
+        # 5. Paper-only символы: XRP, SOL (oracle gap уже проверен при матче)
+        if opp.symbol in {"XRP", "SOL"}:
             _pm_target = self._fetch_pm_open_price(opp.pm_event_slug) if opp.pm_event_slug else None
             if not self.engine.db.has_open_paper_position(
                 opp.pair_key, opp.buy_yes_venue, opp.buy_no_venue
             ):
-                self.engine.db.open_paper_position(opp, pm_price_to_beat=_pm_target)
+                # Используем live-цены (rough_yes/rough_no), а не устаревшие цены из opp
+                live_ask_sum = rough_yes + rough_no
+                live_opp = replace(opp,
+                    yes_ask=rough_yes,
+                    no_ask=rough_no,
+                    ask_sum=live_ask_sum,
+                    edge_per_share=1.0 - live_ask_sum,
+                )
+                self.engine.db.open_paper_position(live_opp, pm_price_to_beat=_pm_target)
                 if self.engine.notifier:
                     self.engine.notifier.notify_open(
-                        symbol=opp.symbol,
-                        yes_venue=opp.buy_yes_venue,
-                        no_venue=opp.buy_no_venue,
-                        yes_ask=opp.yes_ask,
-                        no_ask=opp.no_ask,
-                        ask_sum=opp.ask_sum,
-                        edge=opp.edge_per_share,
-                        cost=opp.total_cost,
-                        expected_profit=opp.expected_profit,
+                        symbol=live_opp.symbol,
+                        yes_venue=live_opp.buy_yes_venue,
+                        no_venue=live_opp.buy_no_venue,
+                        yes_ask=live_opp.yes_ask,
+                        no_ask=live_opp.no_ask,
+                        ask_sum=live_opp.ask_sum,
+                        edge=live_opp.edge_per_share,
+                        cost=live_opp.total_cost,
+                        expected_profit=live_opp.expected_profit,
                         execution_status="paper",
                         is_paper=True,
-                        kalshi_target=opp.kalshi_reference_price,
+                        kalshi_target=live_opp.kalshi_reference_price,
                         pm_target=_pm_target,
                     )
             return
@@ -1540,35 +1548,52 @@ class FastArbWatchRunner:
         )
         # Показываем текущие матчи с ценами и oracle gap
         try:
-            _, _, matches, _ = self.engine.last_snapshot
-            if matches:
-                print("[fast-arb][Matches]")
-                max_gap_pct = self.engine.config.get("safety", {}).get("max_oracle_gap_pct", 0.02)
-                for m in matches:
-                    pm = m.polymarket
-                    ka = m.kalshi
-                    k_ref = ka.reference_price
-                    slug = pm.pm_event_slug
-                    pm_open = self._pm_price_cache.get(slug) if slug else None
-                    if k_ref and pm_open:
-                        gap_pct = abs(pm_open - k_ref) / k_ref * 100
-                        gap_str = f"K={k_ref:.4f} PM={pm_open:.4f} gap={gap_pct:.4f}%"
-                        gap_ok = "✓" if gap_pct <= max_gap_pct else "✗ gap_too_large"
-                    elif k_ref:
-                        gap_str = f"K={k_ref:.4f} PM=N/A"
-                        gap_ok = "?"
-                    else:
-                        gap_str = "targets=N/A"
-                        gap_ok = "?"
-                    best_edge = max(
-                        1.0 - (pm.yes_ask + ka.no_ask),
-                        1.0 - (ka.yes_ask + pm.no_ask),
-                    )
-                    print(
-                        f"  {pm.symbol:6} | PM yes={pm.yes_ask:.3f} no={pm.no_ask:.3f}"
-                        f" | K yes={ka.yes_ask:.3f} no={ka.no_ask:.3f}"
-                        f" | best_edge={best_edge:.3f}"
-                        f" | {gap_str} {gap_ok}"
-                    )
+            _, kalshi_markets, matches, _ = self.engine.last_snapshot
+            max_gap_pct = self.engine.config.get("safety", {}).get("max_oracle_gap_pct", 0.02)
+
+            # Какие Kalshi-символы присутствуют в матчах
+            matched_symbols = {m.kalshi.symbol for m in matches}
+
+            accepted = 0
+            match_lines = []
+            for m in matches:
+                pm = m.polymarket
+                ka = m.kalshi
+                k_ref = ka.reference_price
+                slug = pm.pm_event_slug
+                pm_open = self._pm_price_cache.get(slug) if slug else None
+                if k_ref and pm_open:
+                    gap_pct = abs(pm_open - k_ref) / k_ref * 100
+                    gap_str = f"K={k_ref:.4f} PM={pm_open:.4f} gap={gap_pct:.4f}%"
+                    gap_ok = "✓" if (gap_pct <= max_gap_pct or pm.symbol == "XRP") else "✗ oracle_gap"
+                elif k_ref:
+                    gap_str = f"K={k_ref:.4f} PM=N/A"
+                    gap_ok = "✗ no_pm_price"
+                else:
+                    gap_str = "targets=N/A"
+                    gap_ok = "?"
+                if "✓" in gap_ok:
+                    accepted += 1
+                best_edge = max(
+                    1.0 - (pm.yes_ask + ka.no_ask),
+                    1.0 - (ka.yes_ask + pm.no_ask),
+                )
+                match_lines.append(
+                    f"  {pm.symbol:6} | PM yes={pm.yes_ask:.3f} no={pm.no_ask:.3f}"
+                    f" | K yes={ka.yes_ask:.3f} no={ka.no_ask:.3f}"
+                    f" | best_edge={best_edge:.3f}"
+                    f" | {gap_str} {gap_ok}"
+                )
+
+            # Kalshi-рынки без PM-матча
+            unmatched_kalshi = [k for k in kalshi_markets if k.symbol not in matched_symbols]
+            for k in unmatched_kalshi:
+                match_lines.append(f"  {k.symbol:6} | no PM match (K yes={k.yes_ask:.3f} no={k.no_ask:.3f})")
+
+            total_shown = len(matches) + len(unmatched_kalshi)
+            if total_shown:
+                print(f"[fast-arb][Matches] accepted={accepted}/{len(matches)} matched | {len(unmatched_kalshi)} kalshi unmatched")
+                for line in match_lines:
+                    print(line)
         except Exception:
             pass
