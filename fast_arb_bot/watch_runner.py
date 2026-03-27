@@ -356,65 +356,46 @@ class FastArbWatchRunner:
 
         # 4. Проверка min/max цены ноги (в памяти)
         if not self._prices_within_bounds(rough_yes, rough_no):
+            self._skip_log(pair_key, f"[fast-arb][SKIP] {opp.symbol} | leg_price_out_of_bounds ({rough_yes:.4f}, {rough_no:.4f})")
             return
         if self._prices_in_blocked_zone(rough_yes, rough_no):
+            self._skip_log(pair_key, f"[fast-arb][SKIP] {opp.symbol} | blocked_leg_price_zone ({rough_yes:.4f}, {rough_no:.4f})")
             return
         if not self._prices_cross_midpoint(rough_yes, rough_no):
+            self._skip_log(pair_key, f"[fast-arb][SKIP] {opp.symbol} | same_side_of_midpoint ({rough_yes:.4f}, {rough_no:.4f})")
             return
 
-        # 5. Paper-only символы: XRP, SOL (oracle gap уже проверен при матче)
-        if opp.symbol in {"XRP", "SOL"}:
-            _pm_target = self._fetch_pm_open_price(opp.pm_event_slug) if opp.pm_event_slug else None
-            if not self.engine.db.has_open_paper_position(
-                opp.pair_key, opp.buy_yes_venue, opp.buy_no_venue
-            ):
-                # Пересчитываем все поля по live-ценам (rough_yes/rough_no)
-                live_ask_sum = rough_yes + rough_no
-                _stake = float(self.engine.trading["stake_per_pair_usd"])
-                live_shares = _stake / live_ask_sum
-                live_capital = live_ask_sum * live_shares
-                if opp.buy_yes_venue == "polymarket":
-                    _pm_fee = polymarket_crypto_taker_fee(live_shares, rough_yes)
-                    _k_fee = kalshi_taker_fee(live_shares, rough_no)
-                else:
-                    _k_fee = kalshi_taker_fee(live_shares, rough_yes)
-                    _pm_fee = polymarket_crypto_taker_fee(live_shares, rough_no)
-                live_total_fee = _pm_fee + _k_fee
-                live_total_cost = live_capital + live_total_fee
-                live_opp = replace(opp,
-                    yes_ask=rough_yes,
-                    no_ask=rough_no,
-                    ask_sum=live_ask_sum,
-                    edge_per_share=1.0 - live_ask_sum,
-                    shares=live_shares,
-                    capital_used=live_capital,
-                    polymarket_fee=_pm_fee,
-                    kalshi_fee=_k_fee,
-                    total_fee=live_total_fee,
-                    total_cost=live_total_cost,
-                    expected_payout=live_shares,
-                    expected_profit=live_shares - live_total_cost,
-                )
-                self.engine.db.open_paper_position(live_opp, pm_price_to_beat=_pm_target)
-                if self.engine.notifier:
-                    self.engine.notifier.notify_open(
-                        symbol=live_opp.symbol,
-                        yes_venue=live_opp.buy_yes_venue,
-                        no_venue=live_opp.buy_no_venue,
-                        yes_ask=live_opp.yes_ask,
-                        no_ask=live_opp.no_ask,
-                        ask_sum=live_opp.ask_sum,
-                        edge=live_opp.edge_per_share,
-                        cost=live_opp.total_cost,
-                        expected_profit=live_opp.expected_profit,
-                        execution_status="paper",
-                        is_paper=True,
-                        kalshi_target=live_opp.kalshi_reference_price,
-                        pm_target=_pm_target,
+        # 4b. Fast oracle gap guard (из кэша, без сетевых запросов)
+        _k_ref = opp.kalshi_reference_price
+        _slug = getattr(opp, "pm_event_slug", None)
+        if _k_ref and _slug:
+            _cached_pm = self._pm_price_cache.get(_slug)
+            if _cached_pm is not None:
+                _max_gap = self.engine.config.get("safety", {}).get("max_oracle_gap_pct", 0.02)
+                _gap = abs(_cached_pm - _k_ref) / _k_ref * 100
+                if _gap > _max_gap:
+                    self._skip_log(
+                        pair_key,
+                        f"[fast-arb][SKIP] {opp.symbol} | oracle_gap_guard K={_k_ref:.2f} PM={_cached_pm:.2f} gap={_gap:.4f}%",
                     )
+                    return
+
+        # 5. (XRP и SOL торгуются как обычные пары)
+
+        # 6. Balance check
+        _bal = self._cached_balances
+        _min_pm = float(self.engine.safety.min_balance_polymarket)
+        _min_k = float(self.engine.safety.min_balance_kalshi)
+        _pm_bal = _bal.get("polymarket") or 0.0
+        _k_bal = _bal.get("kalshi") or 0.0
+        if _pm_bal > 0 and _pm_bal < _min_pm:
+            self._skip_log(pair_key, f"[fast-arb][HALT] {opp.symbol} | pm_balance_low (${_pm_bal:.2f} < ${_min_pm:.2f})")
+            return
+        if _k_bal > 0 and _k_bal < _min_k:
+            self._skip_log(pair_key, f"[fast-arb][HALT] {opp.symbol} | kalshi_balance_low (${_k_bal:.2f} < ${_min_k:.2f})")
             return
 
-        # 6. Loss limit check (SQL)
+        # 7. Loss limit check (SQL)
         halt, reason = self._check_loss_limits()
         if halt:
             self._skip_log(pair_key, f"[fast-arb][HALT] {opp.symbol} | {reason}")
@@ -1432,7 +1413,7 @@ class FastArbWatchRunner:
 
         if exec_status == "one_legged_kalshi":
             # Только Kalshi нога — не делаем PM redeem
-            kalshi_result, kalshi_snapshot = resolver._check_kalshi(position)
+            kalshi_result, kalshi_snapshot, _ = resolver._check_kalshi(position)
             if kalshi_result is None:
                 return  # Рынок ещё не разрешён
 
