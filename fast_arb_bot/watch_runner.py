@@ -1461,21 +1461,13 @@ class FastArbWatchRunner:
                 # Cancelled: re-enter Kalshi when PM leg price drops back
                 if pm_live_ask <= reenter_threshold:
                     shares = float(row["shares"] or 0)
-                    # Use current Kalshi live ask for re-entry price
-                    kalshi_live = self.live_books_kalshi.get(kalshi_market_id)
-                    if kalshi_live is None:
-                        continue
-                    kalshi_ask = kalshi_live.best_yes_ask if kalshi_side == "yes" else kalshi_live.best_no_ask
-                    if kalshi_ask <= 0:
-                        continue
+                    # Re-use original resting price: floor((1 - pm_fill - min_edge) * 100)
+                    # This preserves the original arb edge, same as executor formula.
                     max_price = min(
                         self.engine.safety.max_leg_price,
                         1.0 - pm_fill - min_edge,
                     )
-                    if kalshi_ask > max_price:
-                        continue
-                    price_cents = round(kalshi_ask * 100) + self.kalshi_slippage_cents
-                    price_cents = min(price_cents, 99)
+                    price_cents = max(1, min(99, math.floor(max_price * 100)))
                     count = max(1, math.floor(shares))
                     try:
                         order = self.executor._place_kalshi_order(
@@ -1484,14 +1476,14 @@ class FastArbWatchRunner:
                     except Exception as e:
                         print(f"[fast-arb][ONE-LEG] reenter error for {row['symbol']}: {e}")
                         continue
-                    if order is None or order.shares_matched <= 0:
-                        print(f"[fast-arb][ONE-LEG] {row['symbol']} | reenter not filled: {order.status if order else 'None'}")
+                    if order is None:
+                        print(f"[fast-arb][ONE-LEG] {row['symbol']} | reenter error: order=None")
                         continue
-                    # Mark as final — don't cancel again
+                    # Mark as final regardless of fill — order is placed at original price, don't cancel again
                     self._one_leg_pm_final.add(pos_id)
                     del self._one_leg_pm_cancelled[pos_id]
                     # Update DB with new Kalshi order
-                    fill_price = float(order.fill_price or kalshi_ask)
+                    fill_price = float(order.fill_price or (price_cents / 100))
                     fee = float(order.fee or 0.0)
                     new_status = "both_filled" if order.shares_matched + 1e-6 >= shares else "one_legged_polymarket"
                     self.engine.db.conn.execute(
