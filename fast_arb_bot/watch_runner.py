@@ -212,32 +212,33 @@ class FastArbWatchRunner:
                 continue
             if self._edge_above_max_allowed(opp.yes_ask, opp.no_ask):
                 continue
-            open_for_pair = self._count_open_positions_for_pair(opp.pair_key)
-            if open_for_pair >= int(self.engine.trading.get("max_entries_per_pair", 1)):
-                continue
-            halt, reason = self._check_loss_limits(new_position_cost=opp.total_cost)
-            if halt:
-                print(f"[fast-arb] HALT {reason} (немедленное открытие)")
-                if "realized_losses" in reason:
-                    self.engine.safety.dry_run = True
-                return
-            executed, yes_leg, no_leg = self._apply_execution_pricing_parallel(opp, matched)
-            if executed is None:
-                continue
-            if not self._prices_within_bounds(executed.yes_ask, executed.no_ask):
-                continue
-            if self._prices_in_blocked_zone(executed.yes_ask, executed.no_ask):
-                continue
-            if not self._prices_cross_midpoint(executed.yes_ask, executed.no_ask):
-                continue
-            if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
-                continue
-            if self._edge_above_max_allowed(executed.yes_ask, executed.no_ask):
-                continue
-            if executed.expected_profit <= 0:
-                continue
-            self._execute_and_record(executed, matched, yes_leg, no_leg)
-            self._cached_balances = self.engine.get_real_balances()
+            with self._signal_lock:
+                open_for_pair = self._count_open_positions_for_pair(opp.pair_key)
+                if open_for_pair >= int(self.engine.trading.get("max_entries_per_pair", 1)):
+                    continue
+                halt, reason = self._check_loss_limits(new_position_cost=opp.total_cost)
+                if halt:
+                    print(f"[fast-arb] HALT {reason} (немедленное открытие)")
+                    if "realized_losses" in reason:
+                        self.engine.safety.dry_run = True
+                    return
+                executed, yes_leg, no_leg = self._apply_execution_pricing_parallel(opp, matched)
+                if executed is None:
+                    continue
+                if not self._prices_within_bounds(executed.yes_ask, executed.no_ask):
+                    continue
+                if self._prices_in_blocked_zone(executed.yes_ask, executed.no_ask):
+                    continue
+                if not self._prices_cross_midpoint(executed.yes_ask, executed.no_ask):
+                    continue
+                if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
+                    continue
+                if self._edge_above_max_allowed(executed.yes_ask, executed.no_ask):
+                    continue
+                if executed.expected_profit <= 0:
+                    continue
+                self._execute_and_record(executed, matched, yes_leg, no_leg)
+                self._cached_balances = self.engine.get_real_balances()
 
     # ── Kalshi WS ──────────────────────────────────────────────────────
 
