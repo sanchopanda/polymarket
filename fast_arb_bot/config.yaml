@@ -3,6 +3,8 @@ trading:
   min_lock_edge: 0.06
   completion_min_edge: 0.05
   completion_skip_pm_if_price_above: 0.60
+  completion_cancel_kalshi_rise: 0.10     # отменить рестинг Kalshi если live_ask - pm_fill >= этого
+  completion_reenter_kalshi_rise: 0.08    # перевыставить когда live_ask - pm_fill <= этого (один раз, финально)
   max_lock_edge: 0.45
   stake_tier_half_above: 0.20
   stake_tier_third_above: 0.30

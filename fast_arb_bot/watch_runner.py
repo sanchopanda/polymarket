@@ -76,6 +76,11 @@ class FastArbWatchRunner:
         self._cached_balances: dict = {"polymarket": None, "kalshi": None}
         self._last_scan_ts: float = 0.0
         self._pm_price_cache: dict[str, float] = {}  # slug → openPrice
+        # one_legged_polymarket cancel/reenter state machine
+        # pos_id → cancel_trigger_price (Kalshi ask was >= this when we cancelled)
+        self._one_leg_pm_cancelled: dict[str, float] = {}
+        # pos_id → True means re-entered once, don't cancel again
+        self._one_leg_pm_final: set[str] = set()
 
         # Подменяем функцию статуса в Telegram-нотификаторе
         if engine.notifier:
@@ -99,6 +104,7 @@ class FastArbWatchRunner:
                     last_status = now
 
                 self._sync_one_legged_polymarket_orders()
+                self._monitor_one_leg_pm_cancel_reenter()
                 time.sleep(1)
         except KeyboardInterrupt:
             print("\n[fast-arb] Stopped.")
@@ -1368,6 +1374,117 @@ class FastArbWatchRunner:
                         f"edge итого={1.0 - final_ask_sum:.4f} | cost=${final_total_cost:.2f} | exp_profit=${final_expected_profit:.2f}\n"
                         f"позиция закрыта в both_filled"
                     )
+
+    def _monitor_one_leg_pm_cancel_reenter(self) -> None:
+        """Cancel/reenter logic for one_legged_polymarket resting Kalshi orders.
+
+        State machine per position:
+          watching → (Kalshi live ask rises ≥ pm_fill + cancel_rise) → cancelled
+          cancelled → (Kalshi live ask drops ≤ pm_fill + reenter_rise) → final (re-placed once)
+          final → no more cancellations
+        """
+        cancel_rise = float(self.engine.trading.get("completion_cancel_kalshi_rise", 0.10))
+        reenter_rise = float(self.engine.trading.get("completion_reenter_kalshi_rise", 0.08))
+        min_edge = float(self.engine.trading.get("completion_min_edge", self.engine.trading["min_lock_edge"]))
+
+        rows = self.engine.db.conn.execute(
+            "SELECT id, symbol, shares, venue_yes, venue_no, market_yes, market_no, "
+            "kalshi_order_id, polymarket_fill_price "
+            "FROM positions "
+            "WHERE status='open' AND execution_status='one_legged_polymarket' AND kalshi_order_id IS NOT NULL"
+        ).fetchall()
+
+        for row in rows:
+            pos_id = str(row["id"])
+            if pos_id in self._one_leg_pm_final:
+                continue
+
+            order_id = str(row["kalshi_order_id"] or "")
+            pm_fill = float(row["polymarket_fill_price"] or 0.0)
+            if pm_fill <= 0 or not order_id:
+                continue
+
+            venue_yes = str(row["venue_yes"] or "")
+            kalshi_market_id = str(row["market_yes"] if venue_yes == "kalshi" else row["market_no"])
+            kalshi_side = "yes" if venue_yes == "kalshi" else "no"
+
+            kalshi_live = self.live_books_kalshi.get(kalshi_market_id)
+            if kalshi_live is None:
+                continue
+            live_ask = kalshi_live.best_yes_ask if kalshi_side == "yes" else kalshi_live.best_no_ask
+            if live_ask <= 0:
+                continue
+
+            cancel_threshold = pm_fill + cancel_rise
+            reenter_threshold = pm_fill + reenter_rise
+
+            if pos_id not in self._one_leg_pm_cancelled:
+                # Watching: cancel if Kalshi rose too much
+                if live_ask >= cancel_threshold:
+                    try:
+                        ok = self.engine.kalshi_trader.cancel_order(order_id)
+                    except Exception as e:
+                        print(f"[fast-arb][ONE-LEG] cancel error for {row['symbol']}: {e}")
+                        continue
+                    if ok:
+                        self._one_leg_pm_cancelled[pos_id] = cancel_threshold
+                        self.engine.db.conn.execute(
+                            "UPDATE positions SET kalshi_order_status='cancelled_price_rose' WHERE id=?",
+                            (pos_id,),
+                        )
+                        self.engine.db.conn.commit()
+                        print(
+                            f"[fast-arb][ONE-LEG] {row['symbol']} | cancelled Kalshi resting order "
+                            f"pm_fill={pm_fill:.4f} live={live_ask:.4f} >= threshold={cancel_threshold:.4f}"
+                        )
+                        self.engine.db.audit("one_leg_kalshi_cancelled", pos_id, {
+                            "symbol": row["symbol"], "pm_fill": pm_fill,
+                            "live_ask": live_ask, "cancel_threshold": cancel_threshold,
+                        })
+            else:
+                # Cancelled: re-enter when Kalshi drops back
+                if live_ask <= reenter_threshold:
+                    shares = float(row["shares"] or 0)
+                    max_price = min(
+                        self.engine.safety.max_leg_price,
+                        1.0 - pm_fill - min_edge,
+                    )
+                    if live_ask > max_price:
+                        continue
+                    price_cents = round(live_ask * 100) + self.kalshi_slippage_cents
+                    price_cents = min(price_cents, 99)
+                    count = max(1, math.floor(shares))
+                    try:
+                        order = self.executor._place_kalshi_order(
+                            kalshi_market_id, kalshi_side, count, price_cents
+                        )
+                    except Exception as e:
+                        print(f"[fast-arb][ONE-LEG] reenter error for {row['symbol']}: {e}")
+                        continue
+                    if order is None or order.shares_matched <= 0:
+                        print(f"[fast-arb][ONE-LEG] {row['symbol']} | reenter not filled: {order.status if order else 'None'}")
+                        continue
+                    # Mark as final — don't cancel again
+                    self._one_leg_pm_final.add(pos_id)
+                    del self._one_leg_pm_cancelled[pos_id]
+                    # Update DB with new Kalshi order
+                    fill_price = float(order.fill_price or live_ask)
+                    fee = float(order.fee or 0.0)
+                    new_status = "both_filled" if order.shares_matched + 1e-6 >= shares else "one_legged_polymarket"
+                    self.engine.db.conn.execute(
+                        "UPDATE positions SET kalshi_order_id=?, kalshi_fill_price=?, kalshi_fill_shares=?, "
+                        "kalshi_order_fee=?, kalshi_order_status=?, execution_status=? WHERE id=?",
+                        (order.order_id, fill_price, order.shares_matched, fee, order.status, new_status, pos_id),
+                    )
+                    self.engine.db.conn.commit()
+                    print(
+                        f"[fast-arb][ONE-LEG] {row['symbol']} | re-entered Kalshi {kalshi_side.upper()} "
+                        f"fill={order.shares_matched:.2f}@{fill_price:.4f} | status={new_status} | FINAL"
+                    )
+                    self.engine.db.audit("one_leg_kalshi_reentered", pos_id, {
+                        "symbol": row["symbol"], "pm_fill": pm_fill,
+                        "live_ask": live_ask, "fill_price": fill_price, "final": True,
+                    })
 
     # ── Резолв одноногих позиций ───────────────────────────────────────
 
