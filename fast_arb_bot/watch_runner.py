@@ -389,26 +389,28 @@ class FastArbWatchRunner:
 
         # 5. (XRP и SOL торгуются как обычные пары)
 
-        # 6. Balance check
-        _bal = self._cached_balances
-        _min_pm = float(self.engine.safety.min_balance_polymarket)
-        _min_k = float(self.engine.safety.min_balance_kalshi)
-        _pm_bal = _bal.get("polymarket") or 0.0
-        _k_bal = _bal.get("kalshi") or 0.0
-        if _pm_bal > 0 and _pm_bal < _min_pm:
-            self._skip_log(pair_key, f"[fast-arb][HALT] {opp.symbol} | pm_balance_low (${_pm_bal:.2f} < ${_min_pm:.2f})")
-            return
-        if _k_bal > 0 and _k_bal < _min_k:
-            self._skip_log(pair_key, f"[fast-arb][HALT] {opp.symbol} | kalshi_balance_low (${_k_bal:.2f} < ${_min_k:.2f})")
-            return
+        # 6. Balance check (пропускаем в paper-режиме — реальные деньги не тратятся)
+        if not self.dry_run:
+            _bal = self._cached_balances
+            _min_pm = float(self.engine.safety.min_balance_polymarket)
+            _min_k = float(self.engine.safety.min_balance_kalshi)
+            _pm_bal = _bal.get("polymarket") or 0.0
+            _k_bal = _bal.get("kalshi") or 0.0
+            if _pm_bal > 0 and _pm_bal < _min_pm:
+                self._skip_log(pair_key, f"[fast-arb][HALT] {opp.symbol} | pm_balance_low (${_pm_bal:.2f} < ${_min_pm:.2f})")
+                return
+            if _k_bal > 0 and _k_bal < _min_k:
+                self._skip_log(pair_key, f"[fast-arb][HALT] {opp.symbol} | kalshi_balance_low (${_k_bal:.2f} < ${_min_k:.2f})")
+                return
 
-        # 7. Loss limit check (SQL)
-        halt, reason = self._check_loss_limits()
-        if halt:
-            self._skip_log(pair_key, f"[fast-arb][HALT] {opp.symbol} | {reason}")
-            if "realized_losses" in reason:
-                self.engine.safety.dry_run = True
-            return
+        # 7. Loss limit check (пропускаем в paper-режиме)
+        if not self.dry_run:
+            halt, reason = self._check_loss_limits()
+            if halt:
+                self._skip_log(pair_key, f"[fast-arb][HALT] {opp.symbol} | {reason}")
+                if "realized_losses" in reason:
+                    self.engine.safety.dry_run = True
+                return
 
         with self._signal_lock:
             open_for_pair = self._count_open_positions_for_pair(opp.pair_key)
@@ -463,13 +465,14 @@ class FastArbWatchRunner:
                 )
                 return
 
-            # Финальная проверка лимита с точной стоимостью позиции
-            halt2, reason2 = self._check_loss_limits(new_position_cost=executed.total_cost)
-            if halt2:
-                self._skip_log(pair_key, f"[fast-arb][HALT] {opp.symbol} | {reason2}")
-                if "realized_losses" in reason2:
-                    self.engine.safety.dry_run = True
-                return
+            # Финальная проверка лимита с точной стоимостью позиции (пропускаем в paper-режиме)
+            if not self.dry_run:
+                halt2, reason2 = self._check_loss_limits(new_position_cost=executed.total_cost)
+                if halt2:
+                    self._skip_log(pair_key, f"[fast-arb][HALT] {opp.symbol} | {reason2}")
+                    if "realized_losses" in reason2:
+                        self.engine.safety.dry_run = True
+                    return
 
             # 6. Выставляем ордера параллельно
             self._execute_and_record(executed, matched, yes_leg, no_leg)
