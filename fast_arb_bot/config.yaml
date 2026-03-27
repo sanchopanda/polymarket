@@ -22,7 +22,7 @@ safety:
   min_balance_kalshi: 30.0
   cooldown_seconds: 10.0
   require_confirmation: false
-  dry_run: false
+  dry_run: true
   balance_divergence_threshold: 5.0
   min_partial_fill_pct: 50
   kalshi_slippage_cents: 0

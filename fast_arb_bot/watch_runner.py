@@ -499,7 +499,27 @@ class FastArbWatchRunner:
         )
 
         if self.dry_run:
-            print("[fast-arb][DRY] Пропуск реального исполнения (dry_run)")
+            self.engine.db.open_paper_position(opp, pm_price_to_beat=_p_tgt)
+            print(
+                f"[fast-arb][PAPER] {opp.symbol} | {opp.buy_yes_venue}:YES@{opp.yes_ask:.4f} "
+                f"+ {opp.buy_no_venue}:NO@{opp.no_ask:.4f} | edge={opp.edge_per_share:.4f}{_tgt_str}"
+            )
+            if self.engine.notifier:
+                self.engine.notifier.notify_open(
+                    symbol=opp.symbol,
+                    yes_venue=opp.buy_yes_venue,
+                    no_venue=opp.buy_no_venue,
+                    yes_ask=opp.yes_ask,
+                    no_ask=opp.no_ask,
+                    ask_sum=opp.ask_sum,
+                    edge=opp.edge_per_share,
+                    cost=opp.total_cost,
+                    expected_profit=opp.expected_profit,
+                    execution_status="paper",
+                    is_paper=True,
+                    kalshi_target=_k_tgt,
+                    pm_target=_p_tgt,
+                )
             return
 
         # Прописываем правильные token_id для PM ног
