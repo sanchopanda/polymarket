@@ -40,7 +40,7 @@ class FastArbWatchRunner:
 
     def __init__(self, engine: RealArbEngine, dry_run: bool = False) -> None:
         self.engine = engine
-        self.dry_run = dry_run
+        self.dry_run = dry_run or bool(engine.safety.dry_run)
 
         fast_cfg = engine.config.get("fast_arb", {})
         self.budget_usd: float = float(fast_cfg.get("budget_usd", 40.0))
@@ -222,12 +222,13 @@ class FastArbWatchRunner:
                 open_for_pair = self._count_open_positions_for_pair(opp.pair_key)
                 if open_for_pair >= int(self.engine.trading.get("max_entries_per_pair", 1)):
                     continue
-                halt, reason = self._check_loss_limits(new_position_cost=opp.total_cost)
-                if halt:
-                    print(f"[fast-arb] HALT {reason} (немедленное открытие)")
-                    if "realized_losses" in reason:
-                        self.engine.safety.dry_run = True
-                    return
+                if not self.dry_run:
+                    halt, reason = self._check_loss_limits(new_position_cost=opp.total_cost)
+                    if halt:
+                        print(f"[fast-arb] HALT {reason} (немедленное открытие)")
+                        if "realized_losses" in reason:
+                            self.engine.safety.dry_run = True
+                        return
                 executed, yes_leg, no_leg = self._apply_execution_pricing_parallel(opp, matched)
                 if executed is None:
                     continue
