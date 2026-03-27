@@ -77,7 +77,7 @@ class FastArbWatchRunner:
         self._last_scan_ts: float = 0.0
         self._pm_price_cache: dict[str, float] = {}  # slug → openPrice
         # one_legged_polymarket cancel/reenter state machine
-        # pos_id → cancel_trigger_price (Kalshi ask was >= this when we cancelled)
+        # pos_id → pm_live_ask at cancellation time
         self._one_leg_pm_cancelled: dict[str, float] = {}
         # pos_id → True means re-entered once, don't cancel again
         self._one_leg_pm_final: set[str] = set()
@@ -1378,9 +1378,11 @@ class FastArbWatchRunner:
     def _monitor_one_leg_pm_cancel_reenter(self) -> None:
         """Cancel/reenter logic for one_legged_polymarket resting Kalshi orders.
 
+        Signal: live PM ask of our held PM leg (not Kalshi price).
+
         State machine per position:
-          watching → (Kalshi live ask rises ≥ pm_fill + cancel_rise) → cancelled
-          cancelled → (Kalshi live ask drops ≤ pm_fill + reenter_rise) → final (re-placed once)
+          watching → (PM live ask rises ≥ pm_fill + cancel_rise) → cancelled
+          cancelled → (PM live ask drops ≤ pm_fill + reenter_rise) → final (re-placed once)
           final → no more cancellations
         """
         cancel_rise = float(self.engine.trading.get("completion_cancel_kalshi_rise", 0.10))
@@ -1388,7 +1390,7 @@ class FastArbWatchRunner:
         min_edge = float(self.engine.trading.get("completion_min_edge", self.engine.trading["min_lock_edge"]))
 
         rows = self.engine.db.conn.execute(
-            "SELECT id, symbol, shares, venue_yes, venue_no, market_yes, market_no, "
+            "SELECT id, pair_key, symbol, shares, venue_yes, venue_no, market_yes, market_no, "
             "kalshi_order_id, polymarket_fill_price "
             "FROM positions "
             "WHERE status='open' AND execution_status='one_legged_polymarket' AND kalshi_order_id IS NOT NULL"
@@ -1408,26 +1410,40 @@ class FastArbWatchRunner:
             kalshi_market_id = str(row["market_yes"] if venue_yes == "kalshi" else row["market_no"])
             kalshi_side = "yes" if venue_yes == "kalshi" else "no"
 
-            kalshi_live = self.live_books_kalshi.get(kalshi_market_id)
-            if kalshi_live is None:
+            # PM side is the leg we hold
+            pm_side = "no" if venue_yes == "kalshi" else "yes"
+
+            # Look up live PM ask for our held leg via watch_by_pair_key
+            pair_key = str(row["pair_key"] or "")
+            watch_entry = self.watch_by_pair_key.get(pair_key)
+            if watch_entry is None:
                 continue
-            live_ask = kalshi_live.best_yes_ask if kalshi_side == "yes" else kalshi_live.best_no_ask
-            if live_ask <= 0:
+            pm_token_id = (
+                watch_entry.matched.polymarket.yes_token_id if pm_side == "yes"
+                else watch_entry.matched.polymarket.no_token_id
+            )
+            if not pm_token_id:
+                continue
+            pm_live = self.live_books.get(pm_token_id)
+            if pm_live is None:
+                continue
+            pm_live_ask = pm_live.best_ask
+            if pm_live_ask <= 0:
                 continue
 
             cancel_threshold = pm_fill + cancel_rise
             reenter_threshold = pm_fill + reenter_rise
 
             if pos_id not in self._one_leg_pm_cancelled:
-                # Watching: cancel if Kalshi rose too much
-                if live_ask >= cancel_threshold:
+                # Watching: cancel if our held PM leg price rose too much
+                if pm_live_ask >= cancel_threshold:
                     try:
                         ok = self.engine.kalshi_trader.cancel_order(order_id)
                     except Exception as e:
                         print(f"[fast-arb][ONE-LEG] cancel error for {row['symbol']}: {e}")
                         continue
                     if ok:
-                        self._one_leg_pm_cancelled[pos_id] = cancel_threshold
+                        self._one_leg_pm_cancelled[pos_id] = pm_live_ask
                         self.engine.db.conn.execute(
                             "UPDATE positions SET kalshi_order_status='cancelled_price_rose' WHERE id=?",
                             (pos_id,),
@@ -1435,23 +1451,30 @@ class FastArbWatchRunner:
                         self.engine.db.conn.commit()
                         print(
                             f"[fast-arb][ONE-LEG] {row['symbol']} | cancelled Kalshi resting order "
-                            f"pm_fill={pm_fill:.4f} live={live_ask:.4f} >= threshold={cancel_threshold:.4f}"
+                            f"pm_fill={pm_fill:.4f} pm_live={pm_live_ask:.4f} >= threshold={cancel_threshold:.4f}"
                         )
                         self.engine.db.audit("one_leg_kalshi_cancelled", pos_id, {
                             "symbol": row["symbol"], "pm_fill": pm_fill,
-                            "live_ask": live_ask, "cancel_threshold": cancel_threshold,
+                            "pm_live_ask": pm_live_ask, "cancel_threshold": cancel_threshold,
                         })
             else:
-                # Cancelled: re-enter when Kalshi drops back
-                if live_ask <= reenter_threshold:
+                # Cancelled: re-enter Kalshi when PM leg price drops back
+                if pm_live_ask <= reenter_threshold:
                     shares = float(row["shares"] or 0)
+                    # Use current Kalshi live ask for re-entry price
+                    kalshi_live = self.live_books_kalshi.get(kalshi_market_id)
+                    if kalshi_live is None:
+                        continue
+                    kalshi_ask = kalshi_live.best_yes_ask if kalshi_side == "yes" else kalshi_live.best_no_ask
+                    if kalshi_ask <= 0:
+                        continue
                     max_price = min(
                         self.engine.safety.max_leg_price,
                         1.0 - pm_fill - min_edge,
                     )
-                    if live_ask > max_price:
+                    if kalshi_ask > max_price:
                         continue
-                    price_cents = round(live_ask * 100) + self.kalshi_slippage_cents
+                    price_cents = round(kalshi_ask * 100) + self.kalshi_slippage_cents
                     price_cents = min(price_cents, 99)
                     count = max(1, math.floor(shares))
                     try:
@@ -1468,7 +1491,7 @@ class FastArbWatchRunner:
                     self._one_leg_pm_final.add(pos_id)
                     del self._one_leg_pm_cancelled[pos_id]
                     # Update DB with new Kalshi order
-                    fill_price = float(order.fill_price or live_ask)
+                    fill_price = float(order.fill_price or kalshi_ask)
                     fee = float(order.fee or 0.0)
                     new_status = "both_filled" if order.shares_matched + 1e-6 >= shares else "one_legged_polymarket"
                     self.engine.db.conn.execute(
@@ -1483,7 +1506,7 @@ class FastArbWatchRunner:
                     )
                     self.engine.db.audit("one_leg_kalshi_reentered", pos_id, {
                         "symbol": row["symbol"], "pm_fill": pm_fill,
-                        "live_ask": live_ask, "fill_price": fill_price, "final": True,
+                        "pm_live_ask": pm_live_ask, "fill_price": fill_price, "final": True,
                     })
 
     # ── Резолв одноногих позиций ───────────────────────────────────────
