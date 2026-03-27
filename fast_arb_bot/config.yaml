@@ -7,7 +7,7 @@ trading:
   stake_tier_half_above: 0.20
   stake_tier_third_above: 0.30
   max_open_pairs: 5
-  max_entries_per_pair: 2
+  max_entries_per_pair: 1
 
 safety:
   max_trade_size_usd: 25.0
