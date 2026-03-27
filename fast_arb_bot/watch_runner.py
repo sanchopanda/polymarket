@@ -1546,7 +1546,7 @@ class FastArbWatchRunner:
 
         if exec_status == "one_legged_kalshi":
             # Только Kalshi нога — не делаем PM redeem
-            kalshi_result, kalshi_snapshot, _ = resolver._check_kalshi(position)
+            kalshi_result, kalshi_snapshot, kalshi_close_price = resolver._check_kalshi(position)
             if kalshi_result is None:
                 return  # Рынок ещё не разрешён
 
@@ -1565,11 +1565,13 @@ class FastArbWatchRunner:
                 kalshi_result="won" if kalshi_won else "lost",
                 lock_valid=False,
                 kalshi_snapshot_resolved=kalshi_snapshot,
+                kalshi_close_price=kalshi_close_price,
             )
+            close_str = f" | K.close={kalshi_close_price:.4f}" if kalshi_close_price is not None else ""
             tag = f"WIN +${pnl:.2f}" if pnl > 0 else f"LOSE ${pnl:.2f}"
             print(
                 f"[fast-arb][resolve] {position.symbol} | one_legged_kalshi | "
-                f"kalshi={'WIN' if kalshi_won else 'LOSE'} {k_shares}x@{k_price} | pnl=${pnl:+.2f} ({tag})"
+                f"kalshi={'WIN' if kalshi_won else 'LOSE'} {k_shares}x@{k_price} | pnl=${pnl:+.2f} ({tag}){close_str}"
             )
 
         else:  # one_legged_polymarket
@@ -1611,6 +1613,7 @@ class FastArbWatchRunner:
                 pm_payout_real = redeem.payout_usdc if redeem.success else 0.0
 
             pnl = (pm_payout_real if pm_won and pm_shares > 0 else 0.0) - pm_cost
+            pm_close_price = resolver._fetch_pm_close_price(position)
 
             self.engine.db.resolve_position(
                 position_id=position.id,
@@ -1621,26 +1624,34 @@ class FastArbWatchRunner:
                 kalshi_result="not_traded",
                 lock_valid=False,
                 polymarket_snapshot_resolved=pm_snapshot,
+                pm_close_price=pm_close_price,
             )
+            close_str = f" | PM.close={pm_close_price:.4f}" if pm_close_price is not None else ""
             tag = f"WIN +${pnl:.2f}" if pnl > 0 else f"LOSE ${pnl:.2f}"
             print(
                 f"[fast-arb][resolve] {position.symbol} | one_legged_polymarket | "
-                f"pm={'WIN' if pm_won else 'LOSE'} {pm_shares:.2f}x@{pm_price} | pnl=${pnl:+.2f} ({tag})"
+                f"pm={'WIN' if pm_won else 'LOSE'} {pm_shares:.2f}x@{pm_price} | pnl=${pnl:+.2f} ({tag}){close_str}"
             )
 
         if self.engine.notifier:
             if exec_status == "one_legged_kalshi":
                 notify_pm = "not_traded"
                 notify_kalshi = "won" if kalshi_won else "lost"
+                notify_kalshi_close = kalshi_close_price
+                notify_pm_close = None
             else:
                 notify_pm = "won" if pm_won else "lost"
                 notify_kalshi = "not_traded"
+                notify_kalshi_close = None
+                notify_pm_close = pm_close_price
             self.engine.notifier.notify_resolve(
                 symbol=position.symbol,
                 pm_result=notify_pm,
                 kalshi_result=notify_kalshi,
                 pnl=pnl,
                 lock_valid=False,
+                kalshi_close_price=notify_kalshi_close,
+                pm_close_price=notify_pm_close,
             )
 
     def _print_status(self) -> None:
