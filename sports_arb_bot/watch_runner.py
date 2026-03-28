@@ -434,17 +434,15 @@ class SportsArbWatchRunner:
                         f"[sports-arb] Матч завершён: {pair_key} "
                         f"(Kalshi {ticker} yes_ask={book.best_yes_ask:.3f})"
                     )
-                # Mark pending one-legged positions for this pair as orphaned
+                # Stop retrying pending legs — match is over, resolve loop will handle P&L
                 for pos_id, pending in list(self._pending_pm.items()):
                     if pending.get("pair_key") == pair_key:
-                        self.db.mark_orphaned(pos_id, "match_over")
                         del self._pending_pm[pos_id]
-                        print(f"[sports-arb] REAL ORPHANED {pos_id} — match over, PM not filled")
+                        print(f"[sports-arb] REAL ONE_LEG_KA {pos_id} — match over, stop PM retry")
                 for pos_id, pending in list(self._pending_ka.items()):
                     if pending.get("pair_key") == pair_key:
-                        self.db.mark_orphaned(pos_id, "match_over")
                         del self._pending_ka[pos_id]
-                        print(f"[sports-arb] REAL ORPHANED {pos_id} — match over, Kalshi not filled")
+                        print(f"[sports-arb] REAL ONE_LEG_PM {pos_id} — match over, stop Ka polling")
             return
 
         for pair_key in list(self.pairs_by_ka_ticker.get(ticker, set())):
@@ -517,16 +515,31 @@ class SportsArbWatchRunner:
             if best_edge < self.min_edge:
                 return
 
-            # Per-pair cooldown: no more than once per minute
-            # Updated here (before depth check) so SKIPs also consume the cooldown
-            now_ts = time.time()
-            if now_ts - self._last_bet_ts.get(pair_key, 0.0) < self._bet_cooldown:
-                return
-            self._last_bet_ts[pair_key] = now_ts
-
             pm_token_id = self._token_for(wp, leg_pm_player)
             if not pm_token_id:
                 return
+
+            # Determine real vs paper mode before cooldown check
+            use_paper = True
+            paper_reason = "paper_mode"
+            if self._real_trading and self._executor:
+                use_paper, paper_reason = self._should_use_paper(
+                    pair.kalshi_event.event_ticker
+                )
+
+            # Per-pair cooldown: paper only (real trades have no cooldown)
+            if use_paper:
+                now_ts = time.time()
+                if now_ts - self._last_bet_ts.get(pair_key, 0.0) < self._bet_cooldown:
+                    return
+                self._last_bet_ts[pair_key] = now_ts
+
+            shares = math.floor(self.stake_usd / best_cost)
+            if shares < 1:
+                return
+
+            total_cost = shares * best_cost
+            expected_profit = shares * best_edge
 
             # Orderbook depth snapshot
             pm_depth = self._pm_depth_at_ask(pm_token_id, leg_pm_price)
@@ -545,40 +558,28 @@ class SportsArbWatchRunner:
                 ka_ask_depth_usd=ka_depth,
             )
 
-            # lock_valid: depth sufficient for full stake on both legs
-            min_depth = self.stake_usd * 0.8
+            # lock_valid: 1.5x the actual leg stake on each platform
+            pm_leg_stake = shares * leg_pm_price
+            ka_leg_stake = shares * leg_ka_price
             lock_valid = (
-                pm_depth is not None and pm_depth >= min_depth and
-                ka_depth is not None and ka_depth >= min_depth
+                pm_depth is not None and pm_depth >= pm_leg_stake * 1.5 and
+                ka_depth is not None and ka_depth >= ka_leg_stake * 1.5
             )
 
             # Skip trade if depth is insufficient
             if not lock_valid:
                 print(
                     f"[sports-arb] SKIP {pair_key} | depth insufficient "
-                    f"pm=${pm_depth or 0:.0f} ka=${ka_depth or 0:.0f}"
+                    f"pm=${pm_depth or 0:.0f}/{pm_leg_stake * 1.5:.0f} "
+                    f"ka=${ka_depth or 0:.0f}/{ka_leg_stake * 1.5:.0f}"
                 )
                 return
 
-            shares = math.floor(self.stake_usd / best_cost)
-            if shares < 1:
-                return
-
-            total_cost = shares * best_cost
-            expected_profit = shares * best_edge
             depth_str = (
                 f"pm_depth=${pm_depth:.0f} ka_depth=${ka_depth:.0f}"
                 if pm_depth is not None and ka_depth is not None
                 else "depth=unknown"
             )
-
-            # ── Определяем режим: real или paper ────────────────────────
-            use_paper = True
-            paper_reason = "paper_mode"
-            if self._real_trading and self._executor:
-                use_paper, paper_reason = self._should_use_paper(
-                    pair.kalshi_event.event_ticker
-                )
 
             if use_paper:
                 # ── Paper bet ────────────────────────────────────────────
@@ -790,9 +791,8 @@ class SportsArbWatchRunner:
                     f"{order.shares_matched:.1f}@{order.fill_price:.4f}"
                 )
             elif order.status.startswith("error") or order.status == "canceled":
-                self.db.mark_orphaned(pos_id, f"kalshi_order_{order.status}")
                 del self._pending_ka[pos_id]
-                print(f"[sports-arb] REAL ORPHANED {pos_id} — Kalshi order {order.status}")
+                print(f"[sports-arb] REAL ONE_LEG_PM {pos_id} — Kalshi order {order.status}, resolve loop will handle")
 
     # ── Orderbook depth ─────────────────────────────────────────────────
 
