@@ -44,7 +44,7 @@ runtime:
 #   - Если суммарные потери ≥ max_loss_usd → paper для всего
 #   - Если баланс < min_balance_pm/ka → paper
 real_trading:
-  enabled: false
+  enabled: true
   kalshi_slippage_cents: 2      # добавляем к цене Kalshi при выставлении ордера
   pm_price_buffer_cents: 2      # добавляем к цене PM при первой попытке
   min_fill_pct: 80              # минимальный процент заполнения (0–100)
