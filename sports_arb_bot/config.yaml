@@ -1,0 +1,24 @@
+trading:
+  stake_usd: 60.0
+  min_edge: 0.02
+  min_leg_price: 0.05
+  max_leg_price: 0.95
+  scan_interval_seconds: 900   # 15 мин
+
+sports: [wta, atp]
+
+matching:
+  use_llm: false  # TennisMatcher по умолчанию
+
+db:
+  path: "data/sports_arb_bot.db"
+
+polymarket:
+  clob_host: "https://clob.polymarket.com"
+
+kalshi:
+  base_url: "https://api.elections.kalshi.com/trade-api/v2"
+
+runtime:
+  status_interval_seconds: 30
+  resolve_interval_seconds: 300
