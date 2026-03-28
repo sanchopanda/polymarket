@@ -4,6 +4,7 @@ import re
 from datetime import timedelta
 from typing import Protocol, runtime_checkable
 
+from sports_arb_bot.feed_kalshi import SERIES_TO_SPORT
 from sports_arb_bot.models import KalshiMatchEvent, MatchResult, MatchedSportsPair, PMSportsEvent
 
 
@@ -55,6 +56,10 @@ class TennisMatcher:
                 if ka.event_ticker in seen_ka:
                     continue
                 if len(ka.markets) < 2:
+                    continue
+
+                # Pre-filter по виду спорта
+                if SERIES_TO_SPORT.get(ka.series_ticker) != pm.sport:
                     continue
 
                 # Pre-filter по дате

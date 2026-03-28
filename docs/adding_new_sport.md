@@ -83,26 +83,29 @@ matches = TennisMatcher().match(pm_events, ka_events)
 
 ## Шаг 4. Написать dump-скрипт для проверки списков
 
-Если серия совсем новая и нестандартная — копируем `scripts/dump_expiring_markets.py` →
-`scripts/dump_{sport}_markets.py`, меняем:
+Копируем `scripts/dump_r6_markets.py` → `scripts/dump_{sport}_markets.py`, меняем:
 
 ```python
-PM_SERIES_SLUG = "..."   # значение из events[0].seriesSlug
-KALSHI_SERIES  = "..."   # series_ticker из Kalshi
+PM_SERIES_SLUG = "..."   # значение из events[0].seriesSlug (Шаг 1)
+KALSHI_SERIES  = "..."   # series_ticker из Kalshi (Шаг 1)
 ```
 
-Если стандартный window ±5h не захватывает нужные игры для ручной проверки — добавляем `--hours N`.
-
-Запускаем:
+**Запускаем с датой конкретного матча** (из `gameStartTime` полученного на Шаге 1):
 ```bash
-python3 scripts/dump_{sport}_markets.py --hours 72
+python3 scripts/dump_{sport}_markets.py --date 2026-03-28T16:30:00+00:00
+```
+
+Окно устанавливается как `[gameStartTime - 2ч, gameStartTime + 10ч]` — точно покрывает
+нужный матч без лишней загрузки. Для обзора всех предстоящих игр:
+```bash
+python3 scripts/dump_{sport}_markets.py --hours 96
 ```
 
 Смотрим в `data/`:
 - `pm_{sport}.json` / `pm_{sport}_titles.json` — что нашли на PM
 - `kalshi_{sport}.json` / `kalshi_{sport}_titles.json` — что нашли на Kalshi
 
-Сверяем: одни и те же матчи с обеих сторон? Какие лиги есть только на одной платформе?
+Сверяем: матч из URL виден с обеих сторон? Имена команд совпадают с тем, что ожидали на Шаге 3?
 
 ---
 
@@ -198,16 +201,16 @@ matcher = get_matcher(sport)  # или get_matcher(pair.sport)
 ## Быстрая сводка — чеклист
 
 ```
-[ ] 1. Запросить PM ?slug= и Kalshi /events/ + /markets/?event_ticker=
-[ ] 2. Записать: PM seriesSlug, Kalshi series_ticker, delta exp-gameStart
-[ ] 3. Сравнить имена команд: TennisMatcher или нужен новый?
-[ ] 4. Написать/дополнить dump-скрипт, запустить, проверить покрытие
-[ ] 5. feed_polymarket.py  — добавить SERIES_SLUG_TO_SPORT или SLUG_PREFIX
-[ ] 6. feed_kalshi.py      — добавить SERIES_TO_SPORT
-[ ] 7. watch_runner.py     — добавить KALSHI_SERIES_BY_SPORT
-[ ] 8. config.yaml         — добавить в sports: []
-[ ] 9. matcher.py          — добавить SPORT_TO_KALSHI_SERIES (если нужен engine.py)
-[ ] 10. Тест: TennisMatcher().match(pm, ka) возвращает правильный outcome_map
+[ ] 1. Запросить PM ?slug= и Kalshi /markets/?event_ticker=
+[ ] 2. Записать: PM seriesSlug, Kalshi series_ticker, gameStartTime, expected_expiration_time, delta
+[ ] 3. Сравнить имена команд PM (outcomes) vs Kalshi (yes_sub_title): TennisMatcher или нужен новый?
+[ ] 4. Написать dump-скрипт (копия dump_r6_markets.py), запустить --date <gameStartTime>
+[ ] 5. Проверить: нужный матч виден в pm_titles и kalshi_titles с правильными именами
+[ ] 6. feed_polymarket.py  — добавить SERIES_SLUG_TO_SPORT или SLUG_PREFIX_TO_SPORT
+[ ] 7. feed_kalshi.py      — добавить SERIES_TO_SPORT
+[ ] 8. watch_runner.py     — добавить KALSHI_SERIES_BY_SPORT
+[ ] 9. config.yaml         — добавить в sports: [] с комментарием
+[ ] 10. Тест: TennisMatcher().match(pm, ka) с данными из dump — outcome_map корректен
 ```
 
 ---

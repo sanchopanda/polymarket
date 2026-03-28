@@ -14,6 +14,8 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 SLUG_PREFIX_TO_SPORT: dict[str, str] = {
     "wta-": "wta",
     "atp-": "atp",
+    "cwbb-": "cwbb",
+    "cbb-": "cbb",
 }
 
 # tag_slug для спортов без серий (бокс, mma и т.д.)

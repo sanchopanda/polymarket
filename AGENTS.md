@@ -173,6 +173,48 @@
 - `polymarket`
 - `kalshi`
 
+## sports_arb_bot — добавление нового спорта
+
+**ОБЯЗАТЕЛЬНО:** при добавлении нового спорта/лиги всегда следуй флоу из `docs/adding_new_sport.md`. Никогда не прописывай новый спорт в код без прохождения всех шагов.
+
+**Краткий обязательный флоу** (подробности в документации):
+
+1. **API запрос**: получи сырые данные по URL матча, который прислал пользователь:
+   ```bash
+   curl "https://gamma-api.polymarket.com/markets?slug={slug}"
+   curl "https://api.elections.kalshi.com/trade-api/v2/markets?event_ticker={event_ticker}&status=open"
+   ```
+   Запиши: `seriesSlug` (PM), `series_ticker` (Kalshi), `gameStartTime`, `expected_expiration_time`.
+
+2. **Временно́е окно**: вычисли `delta = expected_expiration - gameStartTime`. Убедись, что стандартное окно бота покрывает матч (PM: ±5h от gameStart, Kalshi: +15m…+7h до expiry). Если нет — флаг для изменения feed фильтров.
+
+3. **Имена команд**: сравни PM `outcomes` с Kalshi `yes_sub_title`. Проверь, что токены ≥4 символов из обоих списков пересекаются → TennisMatcher подходит.
+
+4. **Dump скрипт**: создай `scripts/dump_{sport}_markets.py` (копия `dump_r6_markets.py`). Запусти с `--date <gameStartTime>` — окно `[date-2h, date+10h]`. Проверь что нужный матч виден в обоих title-файлах.
+
+5. **Прописать в 4 файла**:
+   - `feed_polymarket.py`: `SLUG_PREFIX_TO_SPORT` или `SERIES_SLUG_TO_SPORT`
+   - `feed_kalshi.py`: `SERIES_TO_SPORT`
+   - `watch_runner.py`: `KALSHI_SERIES_BY_SPORT`
+   - `config.yaml`: добавить в `sports: []` с комментарием (PM seriesSlug + Kalshi series_ticker)
+
+6. **Тест матчера**: вызови `TennisMatcher().match(pm_events, ka_events)` с данными из dump. Убедись что `outcome_map` правильный.
+
+Добавление без dump скрипта и проверки матчера — **недопустимо**.
+
+## sports_arb_bot — команды
+
+```bash
+python3 -m sports_arb_bot watch    # запуск бота
+python3 -m sports_arb_bot status   # позиции и баланс
+python3 -m sports_arb_bot resolve  # резолюция истёкших позиций
+```
+
+Конфиг: `sports_arb_bot/config.yaml`
+База: `data/sports_arb_bot.db`
+
+Dump скрипты: `scripts/dump_r6_markets.py`, `scripts/dump_cwbb_markets.py`
+
 ## Практические замечания
 
 - В `pyproject.toml` сейчас не перечислены все библиотеки, которые реально используются скриптами.

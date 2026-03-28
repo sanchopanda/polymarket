@@ -14,7 +14,9 @@ trading:
 #   r6   — Rainbow Six Siege (esports)            PM: "rainbow-six-siege"      Ka: KXR6GAME
 #   ipl  — Indian Premier League (крикет)         PM: "indian-premier-league"  Ka: KXIPLGAME
 #   t20  — T20 International Cricket              PM: "international-cricket"  Ka: KXT20MATCH
-sports: [wta, atp, r6, ipl, t20]
+#   cwbb — NCAA Women's Basketball                PM: "cwbb"                   Ka: KXNCAAWBGAME
+#   cbb  — NCAA Men's Basketball                  PM: "ncaa-cbb"               Ka: KXNCAAMBGAME
+sports: [wta, atp, r6, ipl, t20, cwbb, cbb]
 
 matching:
   use_llm: false  # TennisMatcher по умолчанию

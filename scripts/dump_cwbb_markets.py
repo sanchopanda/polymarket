@@ -1,22 +1,30 @@
 """
-Скачивает активные R6 (Rainbow Six Siege) рынки с Polymarket и Kalshi.
+Скачивает активные CWBB (NCAA Women's Basketball) рынки с Polymarket и Kalshi.
 
-Окно: [now-2h, now+72h] — захватывает игры, запланированные на несколько дней вперёд.
+Временно́е окно конкретного матча (из API):
+  PM gameStartTime:              2026-03-28 16:30 UTC
+  Kalshi expected_expiration:    2026-03-28 20:00 UTC
+  Delta: ~3.5ч — покрывается стандартным окном бота
+    PM:    now-1h45m … now+5h   (по gameStartTime)
+    Kalshi: now+15m … now+7h    (по expected_expiration_time)
+
+Команды (проверено для KXNCAAWBGAME-26MAR28LOUMICH):
+  PM outcomes:       ["Louisville Cardinals", "Michigan Wolverines"]
+  Kalshi yes_sub_title: "Louisville", "Michigan"
+  Токены ≥4 символов: "louisville", "michigan" — TennisMatcher ✓
 
 Сохраняет:
-  data/pm_r6.json           — урезанные поля PM
-  data/kalshi_r6.json       — урезанные поля Kalshi
-  data/pm_r6_titles.json    — slug + question (для быстрого просмотра)
-  data/kalshi_r6_titles.json— event_ticker + title
-  data/pm_r6_example.json   — 2 полных сырых примера PM
-  data/kalshi_r6_example.json—2 полных сырых примера Kalshi
+  data/pm_cwbb.json             — урезанные поля PM
+  data/kalshi_cwbb.json         — урезанные поля Kalshi
+  data/pm_cwbb_titles.json      — slug + question (для быстрого просмотра)
+  data/kalshi_cwbb_titles.json  — event_ticker + title
 
 Usage:
     # Конкретная дата матча из API (Шаг 1 флоу):
-    python3 scripts/dump_r6_markets.py --date 2026-03-30T19:00:00+00:00
+    python3 scripts/dump_cwbb_markets.py --date 2026-03-28T16:30:00+00:00
 
     # Широкое окно для обзора всех доступных игр:
-    python3 scripts/dump_r6_markets.py --hours 96
+    python3 scripts/dump_cwbb_markets.py --hours 72
 """
 from __future__ import annotations
 
@@ -30,8 +38,8 @@ import httpx
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
-PM_SERIES_SLUG = "rainbow-six-siege"
-KALSHI_SERIES = "KXR6GAME"
+PM_SERIES_SLUG = "cwbb"
+KALSHI_SERIES = "KXNCAAWBGAME"
 
 OUT_DIR = Path(__file__).resolve().parents[1] / "data"
 
@@ -61,7 +69,6 @@ def _slim_pm(m: dict) -> dict:
         "question":         m.get("question"),
         "series_slug":      ev.get("seriesSlug"),
         "league":           meta.get("league"),
-        "serie":            meta.get("serie"),
         "game_start_time":  m.get("gameStartTime"),
         "end_date":         m.get("endDate"),
         "outcomes":         m.get("outcomes"),
@@ -71,7 +78,7 @@ def _slim_pm(m: dict) -> dict:
         "best_bid":         m.get("bestBid"),
         "best_ask":         m.get("bestAsk"),
         "liquidity":        m.get("liquidityNum"),
-        "url":              f"https://polymarket.com/esports/rainbow-six-siege/{m.get('slug','')}",
+        "url":              f"https://polymarket.com/sports/cwbb/{m.get('slug', '')}",
     }
 
 
@@ -93,12 +100,11 @@ def _slim_ka(m: dict) -> dict:
         "last_price":               m.get("last_price_dollars"),
         "liquidity":                m.get("liquidity_dollars"),
         "open_interest":            m.get("open_interest_fp"),
-        "url":                      f"https://kalshi.com/markets/{m.get('event_ticker','').lower()}",
+        "url":                      f"https://kalshi.com/markets/{(m.get('event_ticker') or '').lower()}",
     }
 
 
-def fetch_pm_r6(since: datetime, cutoff: datetime) -> tuple[list[dict], list[dict]]:
-
+def fetch_pm_cwbb(since: datetime, cutoff: datetime) -> tuple[list[dict], list[dict]]:
     result_raw: list[dict] = []
     offset = 0
 
@@ -146,8 +152,7 @@ def fetch_pm_r6(since: datetime, cutoff: datetime) -> tuple[list[dict], list[dic
     return [_slim_pm(m) for m in result_raw], result_raw
 
 
-def fetch_kalshi_r6(since: datetime, cutoff: datetime) -> tuple[list[dict], list[dict]]:
-
+def fetch_kalshi_cwbb(since: datetime, cutoff: datetime) -> tuple[list[dict], list[dict]]:
     result_raw: list[dict] = []
     cursor: str | None = None
 
@@ -181,13 +186,13 @@ def fetch_kalshi_r6(since: datetime, cutoff: datetime) -> tuple[list[dict], list
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Дамп R6 рынков")
+    parser = argparse.ArgumentParser(description="Дамп CWBB рынков")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--date", type=str,
-                       help="gameStartTime матча из API (ISO, напр. 2026-03-30T19:00:00+00:00). "
+                       help="gameStartTime матча из API (ISO, напр. 2026-03-28T16:30:00+00:00). "
                             "Окно: [date-2h, date+10h]")
-    group.add_argument("--hours", type=int, default=96,
-                       help="Горизонт вперёд от сейчас в часах (default 96)")
+    group.add_argument("--hours", type=int, default=72,
+                       help="Горизонт вперёд от сейчас в часах (default 72)")
     args = parser.parse_args()
 
     OUT_DIR.mkdir(exist_ok=True)
@@ -208,23 +213,21 @@ def main() -> None:
         print(f"Время: {now.strftime('%Y-%m-%d %H:%M UTC')}")
         print(f"Окно:  [{since.strftime('%m-%d %H:%M')} — {cutoff.strftime('%m-%d %H:%M')} UTC]\n")
 
-    print("[PM] Скачиваем R6...")
-    pm_slim, pm_raw = fetch_pm_r6(since, cutoff)
-    (OUT_DIR / "pm_r6.json").write_text(json.dumps(pm_slim, ensure_ascii=False, indent=2))
-    (OUT_DIR / "pm_r6_example.json").write_text(json.dumps(pm_raw[:2], ensure_ascii=False, indent=2))
+    print("[PM] Скачиваем CWBB...")
+    pm_slim, _ = fetch_pm_cwbb(since, cutoff)
+    (OUT_DIR / "pm_cwbb.json").write_text(json.dumps(pm_slim, ensure_ascii=False, indent=2))
     pm_titles = [{"slug": m.get("slug"), "question": m.get("question"),
-                  "game_start_time": m.get("game_start_time"), "league": m.get("league")}
+                  "game_start_time": m.get("game_start_time")}
                  for m in pm_slim]
-    (OUT_DIR / "pm_r6_titles.json").write_text(json.dumps(pm_titles, ensure_ascii=False, indent=2))
-    print(f"[PM] {len(pm_slim)} рынков → pm_r6.json, pm_r6_titles.json")
+    (OUT_DIR / "pm_cwbb_titles.json").write_text(json.dumps(pm_titles, ensure_ascii=False, indent=2))
+    print(f"[PM] {len(pm_slim)} рынков → pm_cwbb.json, pm_cwbb_titles.json")
     for m in sorted(pm_slim, key=lambda x: x.get("game_start_time") or ""):
         teams = " vs ".join(json.loads(m.get("outcomes") or "[]") or [])
-        print(f"  {str(m.get('game_start_time') or '?')[:16]}  [{m.get('league')}]  {teams}")
+        print(f"  {str(m.get('game_start_time') or '?')[:16]}  {teams}")
 
     print(f"\n[Kalshi] Скачиваем {KALSHI_SERIES}...")
-    ka_slim, ka_raw = fetch_kalshi_r6(since, cutoff)
-    (OUT_DIR / "kalshi_r6.json").write_text(json.dumps(ka_slim, ensure_ascii=False, indent=2))
-    (OUT_DIR / "kalshi_r6_example.json").write_text(json.dumps(ka_raw[:2], ensure_ascii=False, indent=2))
+    ka_slim, _ = fetch_kalshi_cwbb(since, cutoff)
+    (OUT_DIR / "kalshi_cwbb.json").write_text(json.dumps(ka_slim, ensure_ascii=False, indent=2))
 
     seen_events: set[str] = set()
     ka_titles = []
@@ -235,8 +238,8 @@ def main() -> None:
             ka_titles.append({"event_ticker": ev, "title": m.get("title"),
                                "expected_expiration_time": m.get("expected_expiration_time")})
             print(f"  {str(m.get('expected_expiration_time') or '?')[:16]}  {ev}  {m.get('yes_sub_title')}")
-    (OUT_DIR / "kalshi_r6_titles.json").write_text(json.dumps(ka_titles, ensure_ascii=False, indent=2))
-    print(f"[Kalshi] {len(ka_slim)} рынков, {len(ka_titles)} событий → kalshi_r6.json, kalshi_r6_titles.json")
+    (OUT_DIR / "kalshi_cwbb_titles.json").write_text(json.dumps(ka_titles, ensure_ascii=False, indent=2))
+    print(f"[Kalshi] {len(ka_slim)} рынков, {len(ka_titles)} событий → kalshi_cwbb.json, kalshi_cwbb_titles.json")
 
 
 if __name__ == "__main__":
