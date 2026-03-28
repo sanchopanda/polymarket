@@ -217,12 +217,16 @@ class MarketScanner:
         self._pm_ws.start()
         print(f"[scanner] PM WS (re)started: {len(new_asset_ids)} assets")
 
-    def _on_pm_message(self, payload: dict) -> None:
+    def _on_pm_message(self, payload) -> None:
         """Called from PM WS thread on each message."""
         if not self._price_callback:
             return
 
-        event_type = payload.get("event_type") or payload.get("type") or ""
+        # Top-level can be a list of events
+        if isinstance(payload, list):
+            for item in payload:
+                self._on_pm_message(item)
+            return
 
         # Handle list of changes (BBA / price_change events)
         changes = payload.get("changes") or []
