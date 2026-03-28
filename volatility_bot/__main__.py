@@ -5,6 +5,9 @@ import sys
 from pathlib import Path
 
 import yaml
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def _load_config(path: str, dry_run: bool) -> dict:
