@@ -1,0 +1,64 @@
+runtime:
+  scan_interval_seconds: 60
+  dry_run: true   # set false for live trading
+
+trading:
+  stake_usd: 25.0
+
+market_filter:
+  interval_minutes: [5, 15, 60]
+  min_days_to_expiry: 0
+  max_days_to_expiry: 0.1      # ~2.4h — covers 1h markets + buffer
+  min_volume: 500
+  min_liquidity: 100
+  fee_type: "crypto_fees"
+  symbol: ""                   # empty = all symbols
+
+strategy:
+  buckets:
+    - name: "0-0.1"
+      lo: 0.00
+      hi: 0.10
+      timing: "any"
+    - name: "0.2-0.4"
+      lo: 0.20
+      hi: 0.40
+      timing: "any"
+    - name: "0.85-0.95"
+      lo: 0.85
+      hi: 0.95
+      timing: "any"
+
+db:
+  path: "data/volatility_bot.db"
+
+polymarket:
+  gamma_base_url: "https://gamma-api.polymarket.com"
+  clob_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/"
+  page_size: 500
+  request_delay_ms: 100
+
+kalshi:
+  base_url: "https://api.elections.kalshi.com/trade-api/v2"
+  page_size: 200
+  max_pages: 10
+  request_timeout_seconds: 20
+  series_tickers:
+    - "KXBTC5M"
+    - "KXETH5M"
+    - "KXSOL5M"
+    - "KXXRP5M"
+    - "KXDOGE5M"
+    - "KXBNB5M"
+    - "KXBTC15M"
+    - "KXETH15M"
+    - "KXSOL15M"
+    - "KXXRP15M"
+    - "KXDOGE15M"
+    - "KXBNB15M"
+    - "KXBTC1H"
+    - "KXETH1H"
+    - "KXSOL1H"
+    - "KXXRP1H"
+    - "KXDOGE1H"
+    - "KXBNB1H"
