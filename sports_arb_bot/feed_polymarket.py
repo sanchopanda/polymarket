@@ -26,6 +26,7 @@ TAG_TO_SPORT: dict[str, str] = {
 SERIES_SLUG_TO_SPORT: dict[str, str] = {
     "rainbow-six-siege": "r6",
     "indian-premier-league": "ipl",
+    "international-cricket": "t20",
 }
 
 DEFAULT_WINDOW_HOURS = 24

@@ -31,6 +31,7 @@ KALSHI_SERIES_BY_SPORT: dict[str, list[str]] = {
     "atp": ["KXATPCHALLENGERMATCH", "KXATPMATCH"],
     "r6": ["KXR6GAME"],
     "ipl": ["KXIPLGAME"],
+    "t20": ["KXT20MATCH"],
 }
 
 
