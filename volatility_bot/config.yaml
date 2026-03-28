@@ -1,9 +1,9 @@
 runtime:
   scan_interval_seconds: 60
-  dry_run: true   # set false for live trading
+  dry_run: true
 
 trading:
-  stake_usd: 25.0
+  stake_usd: 10.0   # номинал для расчёта PnL в paper mode
 
 market_filter:
   interval_minutes: [5, 15, 60]
