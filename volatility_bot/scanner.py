@@ -252,24 +252,38 @@ class MarketScanner:
 
         market, side = entry
 
-        # Extract best ask from various event formats
+        event_type = item.get("event_type") or ""
         best_ask = None
-        # "price" field (BBA update)
-        raw_price = item.get("price")
-        if raw_price is not None:
+
+        if event_type == "best_bid_ask":
             try:
-                best_ask = float(raw_price)
+                best_ask = float(item.get("best_ask") or 0)
             except (TypeError, ValueError):
                 pass
-
-        # Fallback: "asks" list
-        if best_ask is None:
+        elif event_type == "book":
             asks = item.get("asks") or []
             if asks:
                 try:
-                    best_ask = min(float(a.get("price", 1.0)) for a in asks if a.get("price"))
-                except Exception:
+                    best_ask = float(asks[0]["price"])
+                except (TypeError, ValueError, KeyError, IndexError):
                     pass
+        else:
+            # Fallback for unknown formats
+            for field in ("best_ask", "price"):
+                raw = item.get(field)
+                if raw is not None:
+                    try:
+                        best_ask = float(raw)
+                        break
+                    except (TypeError, ValueError):
+                        pass
+            if best_ask is None:
+                asks = item.get("asks") or []
+                if asks:
+                    try:
+                        best_ask = float(asks[0]["price"])
+                    except Exception:
+                        pass
 
         if best_ask is None or best_ask <= 0:
             return
