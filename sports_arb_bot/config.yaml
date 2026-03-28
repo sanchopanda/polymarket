@@ -1,6 +1,6 @@
 trading:
   stake_usd: 60.0
-  min_edge: 0.02
+  min_edge: 0.05
   min_leg_price: 0.05
   max_leg_price: 0.95
   scan_interval_seconds: 900   # 15 мин
