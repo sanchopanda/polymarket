@@ -16,7 +16,8 @@ from sports_arb_bot.db import SportsArbDB
 from sports_arb_bot.feed_kalshi import KalshiSportsFeed
 from sports_arb_bot.feed_polymarket import PolymarketSportsFeed
 from sports_arb_bot.models import MatchedSportsPair
-from sports_arb_bot.sport_matcher import TennisMatcher
+from sports_arb_bot.feed_kalshi import SERIES_TO_SPORT as _KA_SERIES_TO_SPORT
+from sports_arb_bot.sport_matcher import get_matcher
 from src.api.clob import ClobClient
 
 if TYPE_CHECKING:
@@ -34,6 +35,7 @@ KALSHI_SERIES_BY_SPORT: dict[str, list[str]] = {
     "t20": ["KXT20MATCH"],
     "cwbb": ["KXNCAAWBGAME"],
     "cbb": ["KXNCAAMBGAME"],
+    "nba": ["KXNBAGAME"],
 }
 
 
@@ -166,7 +168,22 @@ class SportsArbWatchRunner:
         ka_events = KalshiSportsFeed().fetch(series_tickers=self._get_ka_series())
         print(f"  Kalshi: {len(ka_events)} событий")
 
-        matches = TennisMatcher().match(pm_events, ka_events)
+        # Группируем по спорту и применяем подходящий матчер
+        ka_by_sport: dict[str, list] = {}
+        for ka in ka_events:
+            sport = _KA_SERIES_TO_SPORT.get(ka.series_ticker, "")
+            if sport:
+                ka_by_sport.setdefault(sport, []).append(ka)
+        pm_by_sport: dict[str, list] = {}
+        for pm in pm_events:
+            pm_by_sport.setdefault(pm.sport, []).append(pm)
+
+        matches = []
+        for sport in set(pm_by_sport) | set(ka_by_sport):
+            pm_s = pm_by_sport.get(sport, [])
+            ka_s = ka_by_sport.get(sport, [])
+            if pm_s and ka_s:
+                matches.extend(get_matcher(sport).match(pm_s, ka_s))
         print(f"  Матчей: {len(matches)}")
 
         current_pair_keys = {

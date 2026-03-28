@@ -16,6 +16,7 @@ SLUG_PREFIX_TO_SPORT: dict[str, str] = {
     "atp-": "atp",
     "cwbb-": "cwbb",
     "cbb-": "cbb",
+    "nba-": "nba",
 }
 
 # tag_slug для спортов без серий (бокс, mma и т.д.)

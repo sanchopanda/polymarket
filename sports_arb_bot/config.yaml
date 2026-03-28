@@ -16,7 +16,8 @@ trading:
 #   t20  — T20 International Cricket              PM: "international-cricket"  Ka: KXT20MATCH
 #   cwbb — NCAA Women's Basketball                PM: "cwbb"                   Ka: KXNCAAWBGAME
 #   cbb  — NCAA Men's Basketball                  PM: "ncaa-cbb"               Ka: KXNCAAMBGAME
-sports: [wta, atp, r6, ipl, t20, cwbb, cbb]
+#   nba  — NBA (матчер: город→прозвище)           PM: "nba-*"                  Ka: KXNBAGAME
+sports: [wta, atp, r6, ipl, t20, cwbb, cbb, nba]
 
 matching:
   use_llm: false  # TennisMatcher по умолчанию
