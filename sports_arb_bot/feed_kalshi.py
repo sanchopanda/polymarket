@@ -15,6 +15,7 @@ SERIES_TO_SPORT: dict[str, str] = {
     "KXATPCHALLENGERMATCH": "atp",
     "KXBOXING": "boxing",
     "KXMMA": "mma",
+    "KXR6GAME": "r6",
 }
 
 

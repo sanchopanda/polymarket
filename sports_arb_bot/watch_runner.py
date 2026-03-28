@@ -29,6 +29,7 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 KALSHI_SERIES_BY_SPORT: dict[str, list[str]] = {
     "wta": ["KXWTACHALLENGERMATCH"],
     "atp": ["KXATPCHALLENGERMATCH", "KXATPMATCH"],
+    "r6": ["KXR6GAME"],
 }
 
 

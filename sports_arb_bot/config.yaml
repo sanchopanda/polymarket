@@ -5,7 +5,7 @@ trading:
   max_leg_price: 0.95
   scan_interval_seconds: 900   # 15 мин
 
-sports: [wta, atp]
+sports: [wta, atp, r6]
 
 matching:
   use_llm: false  # TennisMatcher по умолчанию

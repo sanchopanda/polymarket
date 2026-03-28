@@ -22,6 +22,11 @@ TAG_TO_SPORT: dict[str, str] = {
     "mma": "mma",
 }
 
+# PM seriesSlug → internal sport label (для эспорта и других серий с длинным slug)
+SERIES_SLUG_TO_SPORT: dict[str, str] = {
+    "rainbow-six-siege": "r6",
+}
+
 DEFAULT_WINDOW_HOURS = 24
 
 
@@ -68,6 +73,10 @@ def _sport_from_tags(tags: list[dict]) -> Optional[str]:
     return None
 
 
+def _sport_from_series_slug(series_slug: str) -> Optional[str]:
+    return SERIES_SLUG_TO_SPORT.get(series_slug)
+
+
 def _market_to_pm(raw: dict) -> Optional[PMSportsEvent]:
     """Преобразует сырой dict рынка из /markets в PMSportsEvent."""
     # Только moneyline рынки
@@ -76,6 +85,12 @@ def _market_to_pm(raw: dict) -> Optional[PMSportsEvent]:
 
     slug = raw.get("slug") or ""
     sport = _sport_from_slug(slug)
+
+    # Для эспорта и других серий с длинным seriesSlug
+    if not sport:
+        ev_list = raw.get("events") or []
+        series_slug = (ev_list[0].get("seriesSlug") or "") if ev_list else ""
+        sport = _sport_from_series_slug(series_slug)
 
     # Для бокса и других спортов без серий — ищем в tags
     if not sport:
@@ -191,7 +206,9 @@ class PolymarketSportsFeed:
                 if earliest_on_page is None or dt < earliest_on_page:
                     earliest_on_page = dt
                 ev = (m.get("events") or [{}])[0]
-                sport = ev.get("seriesSlug") or ""
+                series_slug = ev.get("seriesSlug") or ""
+                # Нормализуем: "rainbow-six-siege" → "r6", иначе используем как есть
+                sport = SERIES_SLUG_TO_SPORT.get(series_slug, series_slug)
                 if (since <= dt <= cutoff
                         and m.get("sportsMarketType") == "moneyline"
                         and sport in sports_set):
