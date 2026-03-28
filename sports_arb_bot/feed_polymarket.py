@@ -25,6 +25,7 @@ TAG_TO_SPORT: dict[str, str] = {
 # PM seriesSlug → internal sport label (для эспорта и других серий с длинным slug)
 SERIES_SLUG_TO_SPORT: dict[str, str] = {
     "rainbow-six-siege": "r6",
+    "indian-premier-league": "ipl",
 }
 
 DEFAULT_WINDOW_HOURS = 24
