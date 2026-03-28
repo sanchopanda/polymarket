@@ -80,52 +80,6 @@ class TelegramNotifier:
         except Exception as e:
             print(f"[Telegram] Ошибка статуса: {e}")
 
-    # ── Уведомления ──────────────────────────────────────────────────────
-
-    def notify_bet(
-        self,
-        venue: str,
-        symbol: str,
-        interval_minutes: int,
-        side: str,
-        entry_price: float,
-        trigger_bucket: str,
-        market_quarter: int,
-        market_minute: int,
-        shares: float,
-        total_cost: float,
-        is_paper: bool,
-    ) -> None:
-        tag = " [PAPER]" if is_paper else ""
-        icon = "📝" if is_paper else "🎯"
-        text = (
-            f"{icon} <b>СТАВКА{tag}: {symbol} {interval_minutes}m</b>\n"
-            f"{venue} | {side.upper()} @ {entry_price:.3f}\n"
-            f"бакет: {trigger_bucket} | Q{market_quarter} мин={market_minute}\n"
-            f"shares={shares:.2f} | cost=${total_cost:.2f}"
-        )
-        self._send(text)
-
-    def notify_resolve(
-        self,
-        venue: str,
-        symbol: str,
-        side: str,
-        winning_side: str,
-        entry_price: float,
-        pnl: float,
-        is_paper: bool,
-    ) -> None:
-        tag = " [PAPER]" if is_paper else ""
-        won = winning_side == side
-        icon = "💰" if won else "📉"
-        text = (
-            f"{icon} <b>РЕЗОЛВ{tag}: {symbol}</b>\n"
-            f"{venue} | {side.upper()} @ {entry_price:.3f} → {winning_side.upper()}\n"
-            f"P&L: <b>${pnl:+.2f}</b>"
-        )
-        self._send(text)
-
     def _send(self, text: str) -> None:
         if self.chat_id is None:
             return

@@ -171,20 +171,6 @@ class VolatilityBot:
             f"{side} {bucket} @{entry_price:.3f} | Q{market_quarter} min={market_minute} "
             f"| shares={shares:.2f} cost=${total_cost:.2f}"
         )
-        if self._tg:
-            self._tg.notify_bet(
-                venue=market.venue,
-                symbol=market.symbol,
-                interval_minutes=market.interval_minutes,
-                side=side,
-                entry_price=entry_price,
-                trigger_bucket=bucket,
-                market_quarter=market_quarter,
-                market_minute=market_minute,
-                shares=shares,
-                total_cost=total_cost,
-                is_paper=result.is_paper,
-            )
 
     # ── Resolution ────────────────────────────────────────────────────────
 
@@ -220,16 +206,6 @@ class VolatilityBot:
             f"[bot][resolve] {bet.venue} {bet.symbol} {bet.side} → {result} "
             f"| {tag} | pnl=${pnl:+.2f}"
         )
-        if self._tg:
-            self._tg.notify_resolve(
-                venue=bet.venue,
-                symbol=bet.symbol,
-                side=bet.side,
-                winning_side=result,
-                entry_price=bet.entry_price,
-                pnl=round(pnl, 4),
-                is_paper=bool(bet.is_paper),
-            )
 
     def _check_kalshi(self, ticker: str) -> Optional[str]:
         try:
@@ -280,18 +256,31 @@ class VolatilityBot:
 
     def _build_status(self) -> str:
         stats = self._db.stats()
+        bucket_rows = self._db.bucket_stats()
         markets = self._scanner.all_markets()
         by_venue: dict[str, int] = {}
         for m in markets:
             by_venue[m.venue] = by_venue.get(m.venue, 0) + 1
         venue_str = " | ".join(f"{v}:{n}" for v, n in sorted(by_venue.items()))
         mode = "PAPER" if self._dry_run else "LIVE"
-        return (
-            f"📊 <b>volatility_bot [{mode}]</b>\n"
-            f"Активных рынков: {len(markets)} ({venue_str or '—'})\n"
-            f"Всего ставок: {stats['total']} | открыто: {stats['open']}\n"
-            f"Resolved: {stats['resolved']} | PnL: <b>${stats['realized_pnl']:+.2f}</b>"
-        )
+
+        lines = [
+            f"📊 <b>volatility_bot [{mode}]</b>",
+            f"Рынков: {len(markets)} ({venue_str or '—'})",
+            f"Ставок: {stats['total'] - stats['legacy']} новых | открыто: {stats['open']}",
+            "",
+            "<b>Бакеты (новые ставки):</b>",
+        ]
+        if bucket_rows:
+            for r in bucket_rows:
+                wr = f"{r['wins']}/{r['resolved']}" if r["resolved"] else "—"
+                pnl = f"${r['pnl']:+.2f}" if r["resolved"] else "—"
+                lines.append(f"  {r['trigger_bucket']:12s} n={r['total']:3d}  wr={wr}  pnl={pnl}")
+        else:
+            lines.append("  нет данных")
+
+        lines += ["", f"Total PnL: <b>${stats['realized_pnl']:+.2f}</b>"]
+        return "\n".join(lines)
 
     def _load_placed_from_db(self) -> None:
         for bet in self._db.get_open_bets():

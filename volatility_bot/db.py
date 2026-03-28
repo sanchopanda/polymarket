@@ -174,6 +174,22 @@ class VolatilityDB:
             "legacy": legacy,
         }
 
+    def bucket_stats(self) -> list[dict]:
+        """Per-bucket stats for non-legacy bets only."""
+        rows = self.conn.execute("""
+            SELECT
+                trigger_bucket,
+                COUNT(*) AS total,
+                SUM(CASE WHEN status='resolved' THEN 1 ELSE 0 END) AS resolved,
+                SUM(CASE WHEN status='resolved' AND pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN status='resolved' THEN pnl ELSE 0 END) AS pnl
+            FROM bets
+            WHERE is_legacy = 0
+            GROUP BY trigger_bucket
+            ORDER BY trigger_bucket
+        """).fetchall()
+        return [dict(r) for r in rows]
+
     def _row_to_bet(self, row: sqlite3.Row) -> Bet:
         return Bet(
             id=row["id"],

@@ -134,8 +134,7 @@ class MarketScanner:
         self._update_pm_ws()
         self._update_kalshi_ws()
 
-        if new_markets:
-            print(f"[scanner] +{len(new_markets)} new markets | total active: {len(self._active_markets)}")
+        print(f"[scanner] scan done | active={len(self._active_markets)} new={len(new_markets)} expired={len(expired)}")
         return new_markets
 
     # ── Normalization ─────────────────────────────────────────────────────
