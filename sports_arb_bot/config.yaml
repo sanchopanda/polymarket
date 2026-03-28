@@ -5,6 +5,15 @@ trading:
   max_leg_price: 0.95
   scan_interval_seconds: 900   # 15 мин
 
+# Активные спорты. Каждое значение — internal sport label.
+# PM: фильтруется через SERIES_SLUG_TO_SPORT (feed_polymarket.py)
+# Kalshi: маппится на series_ticker через KALSHI_SERIES_BY_SPORT (watch_runner.py)
+#
+#   wta  — WTA Challenger (теннис, женщины)       PM: "wta"                    Ka: KXWTACHALLENGERMATCH
+#   atp  — ATP Challenger + ATP Tour (теннис)     PM: "atp"                    Ka: KXATPCHALLENGERMATCH, KXATPMATCH
+#   r6   — Rainbow Six Siege (esports)            PM: "rainbow-six-siege"      Ka: KXR6GAME
+#   ipl  — Indian Premier League (крикет)         PM: "indian-premier-league"  Ka: KXIPLGAME
+#   t20  — T20 International Cricket              PM: "international-cricket"  Ka: KXT20MATCH
 sports: [wta, atp, r6, ipl, t20]
 
 matching:
