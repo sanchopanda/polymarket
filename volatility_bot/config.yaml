@@ -44,12 +44,6 @@ kalshi:
   max_pages: 10
   request_timeout_seconds: 20
   series_tickers:
-    - "KXBTC5M"
-    - "KXETH5M"
-    - "KXSOL5M"
-    - "KXXRP5M"
-    - "KXDOGE5M"
-    - "KXBNB5M"
     - "KXBTC15M"
     - "KXETH15M"
     - "KXSOL15M"

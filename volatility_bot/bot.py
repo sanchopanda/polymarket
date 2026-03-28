@@ -50,12 +50,18 @@ class VolatilityBot:
             dry_run=self._dry_run,
         )
 
-        # Kalshi feed for resolution checks (unauthenticated)
-        self._kalshi_feed = None
-        self._pm_feed = None
+        # Telegram
+        self._tg: TelegramNotifier | None = None
+        try:
+            from volatility_bot.telegram_notify import TelegramNotifier
+            self._tg = TelegramNotifier(get_status_fn=self._build_status)
+        except Exception as exc:
+            print(f"[bot] Telegram недоступен: {exc}")
 
     def run(self) -> None:
         print(f"[bot] Starting volatility_bot | dry_run={self._dry_run} | stake=${self._stake_usd}")
+        if self._tg:
+            self._tg.start()
         while True:
             try:
                 self._scanner.scan_and_subscribe()
@@ -165,6 +171,20 @@ class VolatilityBot:
             f"{side} {bucket} @{entry_price:.3f} | Q{market_quarter} min={market_minute} "
             f"| shares={shares:.2f} cost=${total_cost:.2f}"
         )
+        if self._tg:
+            self._tg.notify_bet(
+                venue=market.venue,
+                symbol=market.symbol,
+                interval_minutes=market.interval_minutes,
+                side=side,
+                entry_price=entry_price,
+                trigger_bucket=bucket,
+                market_quarter=market_quarter,
+                market_minute=market_minute,
+                shares=shares,
+                total_cost=total_cost,
+                is_paper=result.is_paper,
+            )
 
     # ── Resolution ────────────────────────────────────────────────────────
 
@@ -200,6 +220,16 @@ class VolatilityBot:
             f"[bot][resolve] {bet.venue} {bet.symbol} {bet.side} → {result} "
             f"| {tag} | pnl=${pnl:+.2f}"
         )
+        if self._tg:
+            self._tg.notify_resolve(
+                venue=bet.venue,
+                symbol=bet.symbol,
+                side=bet.side,
+                winning_side=result,
+                entry_price=bet.entry_price,
+                pnl=round(pnl, 4),
+                is_paper=bool(bet.is_paper),
+            )
 
     def _check_kalshi(self, ticker: str) -> Optional[str]:
         try:
@@ -247,6 +277,21 @@ class VolatilityBot:
         return None
 
     # ── Helpers ───────────────────────────────────────────────────────────
+
+    def _build_status(self) -> str:
+        stats = self._db.stats()
+        markets = self._scanner.all_markets()
+        by_venue: dict[str, int] = {}
+        for m in markets:
+            by_venue[m.venue] = by_venue.get(m.venue, 0) + 1
+        venue_str = " | ".join(f"{v}:{n}" for v, n in sorted(by_venue.items()))
+        mode = "PAPER" if self._dry_run else "LIVE"
+        return (
+            f"📊 <b>volatility_bot [{mode}]</b>\n"
+            f"Активных рынков: {len(markets)} ({venue_str or '—'})\n"
+            f"Всего ставок: {stats['total']} | открыто: {stats['open']}\n"
+            f"Resolved: {stats['resolved']} | PnL: <b>${stats['realized_pnl']:+.2f}</b>"
+        )
 
     def _load_placed_from_db(self) -> None:
         for bet in self._db.get_open_bets():
