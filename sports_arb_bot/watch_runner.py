@@ -199,6 +199,19 @@ class SportsArbWatchRunner:
             for ticker in ka_ticker_map:
                 self.pairs_by_ka_ticker.setdefault(ticker, set()).add(pair_key)
 
+            self.db.upsert_matched_pair(
+                pair_key=pair_key,
+                sport=pair.sport,
+                pm_slug=pair.pm_event.slug,
+                pm_title=pair.pm_event.title,
+                ka_event_ticker=pair.kalshi_event.event_ticker,
+                ka_title=pair.kalshi_event.title,
+                player_a=pair.pm_event.players[0],
+                player_b=pair.pm_event.players[1],
+                match_confidence=pair.match_result.confidence,
+                game_date=pair.pm_event.game_date,
+            )
+
             # Verbose log: show player names and initial prices
             players_str = " vs ".join(pair.pm_event.players)
             prices_str = " / ".join(f"{p:.2f}" for p in pair.pm_event.prices)

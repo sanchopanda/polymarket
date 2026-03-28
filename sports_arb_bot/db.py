@@ -62,6 +62,21 @@ class SportsArbDB:
                 ka_ask_depth_usd REAL
             );
 
+            CREATE TABLE IF NOT EXISTS matched_pairs (
+                pair_key TEXT PRIMARY KEY,
+                sport TEXT NOT NULL,
+                pm_slug TEXT NOT NULL,
+                pm_title TEXT NOT NULL,
+                ka_event_ticker TEXT NOT NULL,
+                ka_title TEXT NOT NULL,
+                player_a TEXT NOT NULL,
+                player_b TEXT NOT NULL,
+                match_confidence REAL NOT NULL,
+                game_date TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS virtual_balance (
                 id INTEGER PRIMARY KEY,
                 initial_balance REAL NOT NULL,
@@ -224,3 +239,37 @@ class SportsArbDB:
 
     def get_balance(self) -> sqlite3.Row:
         return self.conn.execute("SELECT * FROM virtual_balance WHERE id = 1").fetchone()
+
+    def upsert_matched_pair(
+        self,
+        pair_key: str,
+        sport: str,
+        pm_slug: str,
+        pm_title: str,
+        ka_event_ticker: str,
+        ka_title: str,
+        player_a: str,
+        player_b: str,
+        match_confidence: float,
+        game_date: datetime,
+    ) -> None:
+        now = datetime.now(tz=timezone.utc).isoformat()
+        self.conn.execute(
+            """INSERT INTO matched_pairs (
+                pair_key, sport, pm_slug, pm_title, ka_event_ticker, ka_title,
+                player_a, player_b, match_confidence, game_date,
+                first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(pair_key) DO UPDATE SET last_seen_at = excluded.last_seen_at""",
+            (
+                pair_key, sport, pm_slug, pm_title, ka_event_ticker, ka_title,
+                player_a, player_b, match_confidence, game_date.isoformat(),
+                now, now,
+            ),
+        )
+        self.conn.commit()
+
+    def get_matched_pairs(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM matched_pairs ORDER BY last_seen_at DESC"
+        ).fetchall()
