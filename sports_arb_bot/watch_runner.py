@@ -927,8 +927,9 @@ class SportsArbWatchRunner:
         bal = self.db.get_balance()
         open_pos = self.db.get_open_positions()
         ts = datetime.now(tz=timezone.utc).strftime("%H:%M UTC")
-        paper_net = bal["current_balance"] - bal["initial_balance"]
-        paper_sign = "+" if paper_net >= 0 else ""
+        paper_pnl = self.db.get_paper_pnl()
+        paper_sign = "+" if paper_pnl >= 0 else ""
+        paper_in_play = sum(float(p["total_cost"]) for p in open_pos if p["is_paper"] or p["is_paper"] is None)
 
         paper_open = [p for p in open_pos if p["is_paper"] or p["is_paper"] is None]
         real_open = [p for p in open_pos if not p["is_paper"] and p["is_paper"] is not None]
@@ -936,8 +937,9 @@ class SportsArbWatchRunner:
         lines = [
             f"🎾 <b>sports_arb_bot</b> [{ts}]",
             f"Пар: {len(self.watchlist)} | Открытых: {len(open_pos)} (paper: {len(paper_open)}, real: {len(real_open)})",
-            f"📄 Paper: <b>${bal['current_balance']:.2f}</b> P&amp;L {paper_sign}${paper_net:.2f} | "
-            f"ставок ${bal['total_wagered']:.2f} | +${bal['total_won']:.2f} / -${bal['total_lost']:.2f}",
+            f"📄 Paper P&amp;L: <b>{paper_sign}${paper_pnl:.2f}</b> | "
+            f"в игре ${paper_in_play:.2f} | ставок ${bal['total_wagered']:.2f} | "
+            f"+${bal['total_won']:.2f} / -${bal['total_lost']:.2f}",
         ]
         if self._real_trading:
             real_pnl = self.db.get_total_real_pnl()

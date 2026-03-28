@@ -295,6 +295,13 @@ class SportsArbDB:
         ).fetchone()
         return float(row["total"] or 0.0)
 
+    def get_paper_pnl(self) -> float:
+        """Суммарный P&L по закрытым paper позициям."""
+        row = self.conn.execute(
+            "SELECT SUM(pnl) AS total FROM positions WHERE status='resolved' AND (is_paper=1 OR is_paper IS NULL)"
+        ).fetchone()
+        return float(row["total"] or 0.0)
+
     def audit(self, event_type: str, position_id: Optional[str], details: dict) -> None:
         self.conn.execute(
             "INSERT INTO audit_log (timestamp, event_type, position_id, details) VALUES (?,?,?,?)",
