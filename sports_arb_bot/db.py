@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -86,7 +87,32 @@ class SportsArbDB:
                 total_lost REAL NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                position_id TEXT,
+                details TEXT
+            );
         """)
+        # Add real-trading columns to existing positions table (idempotent)
+        for col, definition in [
+            ("is_paper", "INTEGER NOT NULL DEFAULT 1"),
+            ("execution_status", "TEXT"),
+            ("ka_order_id", "TEXT"),
+            ("ka_fill_price", "REAL"),
+            ("ka_fill_shares", "REAL"),
+            ("pm_order_id", "TEXT"),
+            ("pm_fill_price", "REAL"),
+            ("pm_fill_shares", "REAL"),
+        ]:
+            try:
+                self.conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {definition}")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
+
         now = datetime.now(tz=timezone.utc).isoformat()
         self.conn.execute(
             "INSERT OR IGNORE INTO virtual_balance "
@@ -153,6 +179,113 @@ class SportsArbDB:
         )
         self.conn.commit()
         return pos_id
+
+    def open_real_position(
+        self,
+        sport: str,
+        pm_slug: str,
+        pm_title: str,
+        pm_market_id: str,
+        ka_event_ticker: str,
+        ka_title: str,
+        match_confidence: float,
+        player_a: str,
+        player_b: str,
+        leg_pm_player: str,
+        leg_pm_token_id: str,
+        leg_pm_price: float,
+        leg_ka_player: str,
+        leg_ka_ticker: str,
+        leg_ka_price: float,
+        cost: float,
+        edge: float,
+        shares: int,
+        game_date: datetime,
+        execution_status: str,
+        ka_order_id: str = "",
+        ka_fill_price: float = 0.0,
+        ka_fill_shares: float = 0.0,
+        pm_order_id: str = "",
+        pm_fill_price: float = 0.0,
+        pm_fill_shares: float = 0.0,
+    ) -> str:
+        """Record a real (non-paper) trade. Does not touch virtual_balance."""
+        pos_id = str(uuid.uuid4())[:8]
+        total_cost = shares * cost
+        expected_profit = shares * edge
+        now = datetime.now(tz=timezone.utc).isoformat()
+        self.conn.execute(
+            """INSERT INTO positions (
+                id, sport, pm_slug, pm_title, pm_market_id,
+                ka_event_ticker, ka_title, match_confidence,
+                player_a, player_b,
+                leg_pm_player, leg_pm_token_id, leg_pm_price,
+                leg_ka_player, leg_ka_ticker, leg_ka_price,
+                cost, edge, shares, total_cost, expected_profit,
+                game_date, opened_at, status, lock_valid,
+                is_paper, execution_status,
+                ka_order_id, ka_fill_price, ka_fill_shares,
+                pm_order_id, pm_fill_price, pm_fill_shares
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 1, 0, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                pos_id, sport, pm_slug, pm_title, pm_market_id,
+                ka_event_ticker, ka_title, match_confidence,
+                player_a, player_b,
+                leg_pm_player, leg_pm_token_id, leg_pm_price,
+                leg_ka_player, leg_ka_ticker, leg_ka_price,
+                cost, edge, shares, total_cost, expected_profit,
+                game_date.isoformat(), now,
+                execution_status,
+                ka_order_id, ka_fill_price, ka_fill_shares,
+                pm_order_id, pm_fill_price, pm_fill_shares,
+            ),
+        )
+        self.conn.commit()
+        self.audit("real_position_opened", pos_id, {
+            "execution_status": execution_status,
+            "ka_order_id": ka_order_id,
+            "ka_fill_shares": ka_fill_shares,
+        })
+        return pos_id
+
+    def update_pm_filled(
+        self,
+        pos_id: str,
+        pm_order_id: str,
+        pm_fill_price: float,
+        pm_fill_shares: float,
+    ) -> None:
+        now = datetime.now(tz=timezone.utc).isoformat()
+        self.conn.execute(
+            """UPDATE positions SET
+                execution_status = 'both_filled',
+                pm_order_id = ?,
+                pm_fill_price = ?,
+                pm_fill_shares = ?
+            WHERE id = ?""",
+            (pm_order_id, pm_fill_price, pm_fill_shares, pos_id),
+        )
+        self.conn.commit()
+        self.audit("pm_leg_filled", pos_id, {
+            "pm_order_id": pm_order_id,
+            "pm_fill_price": pm_fill_price,
+            "pm_fill_shares": pm_fill_shares,
+        })
+
+    def mark_orphaned(self, pos_id: str, reason: str) -> None:
+        self.conn.execute(
+            "UPDATE positions SET execution_status = 'orphaned_kalshi' WHERE id = ?",
+            (pos_id,),
+        )
+        self.conn.commit()
+        self.audit("position_orphaned", pos_id, {"reason": reason})
+
+    def audit(self, event_type: str, position_id: Optional[str], details: dict) -> None:
+        self.conn.execute(
+            "INSERT INTO audit_log (timestamp, event_type, position_id, details) VALUES (?,?,?,?)",
+            (datetime.now(tz=timezone.utc).isoformat(), event_type, position_id, json.dumps(details)),
+        )
+        self.conn.commit()
 
     def resolve_position(
         self,

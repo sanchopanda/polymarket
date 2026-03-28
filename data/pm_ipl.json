@@ -1,0 +1,18 @@
+[
+  {
+    "slug": "cricipl-roy-sun-2026-03-28",
+    "question": "Indian Premier League: Royal Challengers Bengaluru vs Sunrisers Hyderabad",
+    "series_slug": "indian-premier-league",
+    "league": "Indian Premier League",
+    "game_start_time": "2026-03-28 14:00:00+00",
+    "end_date": "2026-04-04T10:00:00Z",
+    "outcomes": "[\"Royal Challengers Bengaluru\", \"Sunrisers Hyderabad\"]",
+    "outcome_prices": "[\"0.59\", \"0.41\"]",
+    "clob_token_ids": "[\"74615597040283352897795352626330171816386924270607744256890957021327469545601\", \"8110181234290531578434481130562650569021983344806109560925184291893518018647\"]",
+    "accepting_orders": true,
+    "best_bid": 0.57,
+    "best_ask": 0.61,
+    "liquidity": 10740.7209,
+    "url": "https://polymarket.com/sports/cricipl/cricipl-roy-sun-2026-03-28"
+  }
+]

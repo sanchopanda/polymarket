@@ -1,0 +1,27 @@
+[
+  {
+    "slug": "nba-uta-phx-2026-03-28",
+    "question": "Jazz vs. Suns",
+    "game_start_time": "2026-03-29 02:00:00+00"
+  },
+  {
+    "slug": "nba-chi-mem-2026-03-28",
+    "question": "Bulls vs. Grizzlies",
+    "game_start_time": "2026-03-29 00:00:00+00"
+  },
+  {
+    "slug": "nba-sac-atl-2026-03-28",
+    "question": "Kings vs. Hawks",
+    "game_start_time": "2026-03-28 23:30:00+00"
+  },
+  {
+    "slug": "nba-phi-cha-2026-03-28",
+    "question": "76ers vs. Hornets",
+    "game_start_time": "2026-03-28 22:00:00+00"
+  },
+  {
+    "slug": "nba-det-min-2026-03-28",
+    "question": "Pistons vs. Timberwolves",
+    "game_start_time": "2026-03-28 21:30:00+00"
+  }
+]

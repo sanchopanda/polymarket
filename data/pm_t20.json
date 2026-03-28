@@ -1,0 +1,50 @@
+[
+  {
+    "slug": "crint-sai-mwi-2026-03-29",
+    "question": "T20 World Cup, Sub Regional Africa, Qualifier B: Saint Helena vs Malawi",
+    "series_slug": "international-cricket",
+    "league": "T20 World Cup, Sub Regional Africa, Qualifier B",
+    "game_start_time": "2026-03-29 13:50:00+00",
+    "end_date": "2026-04-05T09:50:00Z",
+    "outcomes": "[\"Saint Helena\", \"Malawi\"]",
+    "outcome_prices": "[\"0.48\", \"0.52\"]",
+    "clob_token_ids": "[\"26810911389415771547035850753615674078595740926922598951967127596066231851710\", \"40735801447800865158314003818415142713193691883003704566952674826468447515258\"]",
+    "accepting_orders": true,
+    "best_bid": 0.34,
+    "best_ask": 0.62,
+    "liquidity": 225.4904,
+    "url": "https://polymarket.com/sports/crict20/crint-sai-mwi-2026-03-29"
+  },
+  {
+    "slug": "crint-gha-tza-2026-03-29",
+    "question": "T20 World Cup, Sub Regional Africa, Qualifier B: Ghana vs Tanzania",
+    "series_slug": "international-cricket",
+    "league": "T20 World Cup, Sub Regional Africa, Qualifier B",
+    "game_start_time": "2026-03-29 13:50:00+00",
+    "end_date": "2026-04-05T09:50:00Z",
+    "outcomes": "[\"Ghana\", \"Tanzania\"]",
+    "outcome_prices": "[\"0.255\", \"0.745\"]",
+    "clob_token_ids": "[\"38534142449278984818409668623258725420725862702230845238770907593318799358273\", \"108567055122382488341736697122859052673750436781792139576375901121862240990746\"]",
+    "accepting_orders": true,
+    "best_bid": 0.25,
+    "best_ask": 0.26,
+    "liquidity": 151.0877,
+    "url": "https://polymarket.com/sports/crict20/crint-gha-tza-2026-03-29"
+  },
+  {
+    "slug": "crint-syc-swz-2026-03-29",
+    "question": "T20 World Cup, Sub Regional Africa, Qualifier B: Seychelles vs Eswatini",
+    "series_slug": "international-cricket",
+    "league": "T20 World Cup, Sub Regional Africa, Qualifier B",
+    "game_start_time": "2026-03-29 09:30:00+00",
+    "end_date": "2026-04-05T05:30:00Z",
+    "outcomes": "[\"Seychelles\", \"Eswatini\"]",
+    "outcome_prices": "[\"0.505\", \"0.495\"]",
+    "clob_token_ids": "[\"65838787592209394084055035361031983440361784056959112743425823723082430111479\", \"55758877223174687416250760266573006936655559871721923988424718441837382003605\"]",
+    "accepting_orders": true,
+    "best_bid": 0.34,
+    "best_ask": 0.67,
+    "liquidity": 126.0908,
+    "url": "https://polymarket.com/sports/crict20/crint-syc-swz-2026-03-29"
+  }
+]

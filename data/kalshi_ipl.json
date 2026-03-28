@@ -1,0 +1,40 @@
+[
+  {
+    "ticker": "KXIPLGAME-26MAR28SRHRCB-SRH",
+    "event_ticker": "KXIPLGAME-26MAR28SRHRCB",
+    "series_ticker": null,
+    "title": "Royal Challengers Bengaluru vs Sunrisers Hyderabad Winner?",
+    "yes_sub_title": "Sunrisers Hyderabad",
+    "no_sub_title": "Sunrisers Hyderabad",
+    "expected_expiration_time": "2026-03-28T17:00:00Z",
+    "close_time": "2026-03-31T14:00:00Z",
+    "status": "active",
+    "yes_ask": "0.4300",
+    "yes_bid": "0.4200",
+    "no_ask": "0.5800",
+    "no_bid": "0.5700",
+    "last_price": "0.4300",
+    "liquidity": "0.0000",
+    "open_interest": "457710.00",
+    "url": "https://kalshi.com/markets/kxiplgame-26mar28srhrcb"
+  },
+  {
+    "ticker": "KXIPLGAME-26MAR28SRHRCB-RCB",
+    "event_ticker": "KXIPLGAME-26MAR28SRHRCB",
+    "series_ticker": null,
+    "title": "Royal Challengers Bengaluru vs Sunrisers Hyderabad Winner?",
+    "yes_sub_title": "Royal Challengers Bengaluru",
+    "no_sub_title": "Royal Challengers Bengaluru",
+    "expected_expiration_time": "2026-03-28T17:00:00Z",
+    "close_time": "2026-03-31T14:00:00Z",
+    "status": "active",
+    "yes_ask": "0.6000",
+    "yes_bid": "0.5900",
+    "no_ask": "0.4100",
+    "no_bid": "0.4000",
+    "last_price": "0.6100",
+    "liquidity": "0.0000",
+    "open_interest": "429780.00",
+    "url": "https://kalshi.com/markets/kxiplgame-26mar28srhrcb"
+  }
+]

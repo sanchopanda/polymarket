@@ -1,0 +1,32 @@
+[
+  {
+    "event_ticker": "KXNBAGAME-26MAR28SASMIL",
+    "title": "San Antonio at Milwaukee Winner?",
+    "expected_expiration_time": "2026-03-28T22:00:00Z"
+  },
+  {
+    "event_ticker": "KXNBAGAME-26MAR28DETMIN",
+    "title": "Detroit at Minnesota Winner?",
+    "expected_expiration_time": "2026-03-29T00:30:00Z"
+  },
+  {
+    "event_ticker": "KXNBAGAME-26MAR28PHICHA",
+    "title": "Philadelphia at Charlotte Winner?",
+    "expected_expiration_time": "2026-03-29T01:00:00Z"
+  },
+  {
+    "event_ticker": "KXNBAGAME-26MAR28SACATL",
+    "title": "Sacramento at Atlanta Winner?",
+    "expected_expiration_time": "2026-03-29T02:30:00Z"
+  },
+  {
+    "event_ticker": "KXNBAGAME-26MAR28CHIMEM",
+    "title": "Chicago at Memphis Winner?",
+    "expected_expiration_time": "2026-03-29T03:00:00Z"
+  },
+  {
+    "event_ticker": "KXNBAGAME-26MAR28UTAPHX",
+    "title": "Utah at Phoenix Winner?",
+    "expected_expiration_time": "2026-03-29T05:00:00Z"
+  }
+]

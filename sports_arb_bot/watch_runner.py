@@ -106,6 +106,24 @@ class SportsArbWatchRunner:
         self._last_bet_ts: dict[str, float] = {}
         self._bet_cooldown: float = 60.0
 
+        # Real trading
+        real_cfg = config.get("real_trading", {})
+        self._real_trading: bool = bool(real_cfg.get("enabled", False))
+        self._executor: Optional["SportsRealExecutor"] = None
+        if self._real_trading:
+            from real_arb_bot.clients import KalshiTrader, PolymarketTrader
+            from sports_arb_bot.real_executor import SportsRealExecutor
+            self._executor = SportsRealExecutor(
+                pm_trader=PolymarketTrader(),
+                kalshi_trader=KalshiTrader(),
+                slippage_cents=int(real_cfg.get("kalshi_slippage_cents", 2)),
+                pm_buffer=float(real_cfg.get("pm_price_buffer_cents", 1)) / 100.0,
+                min_fill_pct=float(real_cfg.get("min_fill_pct", 80)) / 100.0,
+            )
+            print("[sports-arb] Real trading ENABLED")
+        # pending_pm[real_pos_id] = {pair_key, pm_token_id, shares, pm_price_limit}
+        self._pending_pm: dict[str, dict] = {}
+
     # ── Main loop ───────────────────────────────────────────────────────
 
     def run(self) -> None:
@@ -346,6 +364,8 @@ class SportsArbWatchRunner:
             best_bid=best_bid, best_ask=best_ask, updated_at_ms=timestamp
         )
 
+        self._try_retry_pending(asset_id)
+
         for pair_key in list(self.pairs_by_pm_token.get(asset_id, set())):
             self._maybe_open_pair(pair_key)
 
@@ -362,6 +382,15 @@ class SportsArbWatchRunner:
                         f"[sports-arb] Матч завершён: {pair_key} "
                         f"(Kalshi {ticker} yes_ask={book.best_yes_ask:.3f})"
                     )
+                # Mark any pending PM positions for this pair as orphaned
+                for pos_id, pending in list(self._pending_pm.items()):
+                    if pending.get("pair_key") == pair_key:
+                        self.db.mark_orphaned(pos_id, "match_over")
+                        del self._pending_pm[pos_id]
+                        print(
+                            f"[sports-arb] REAL ORPHANED {pos_id} — "
+                            f"match ended before PM leg filled"
+                        )
             return
 
         for pair_key in list(self.pairs_by_ka_ticker.get(ticker, set())):
@@ -538,11 +567,95 @@ class SportsArbWatchRunner:
                     lock_valid=lock_valid,
                 )
 
+            # ── Real execution ───────────────────────────────────────────
+            if self._real_trading and self._executor:
+                result = self._executor.execute(
+                    ka_ticker=leg_ka_ticker,
+                    pm_token_id=pm_token_id,
+                    shares=shares,
+                    ka_ask=leg_ka_price,
+                    pm_ask=leg_pm_price,
+                )
+                real_pos_id = self.db.open_real_position(
+                    sport=pair.sport,
+                    pm_slug=pair.pm_event.slug,
+                    pm_title=pair.pm_event.title,
+                    pm_market_id=pair.pm_event.market_id,
+                    ka_event_ticker=pair.kalshi_event.event_ticker,
+                    ka_title=pair.kalshi_event.title,
+                    match_confidence=pair.match_result.confidence,
+                    player_a=player_a,
+                    player_b=player_b,
+                    leg_pm_player=leg_pm_player,
+                    leg_pm_token_id=pm_token_id,
+                    leg_pm_price=leg_pm_price,
+                    leg_ka_player=leg_ka_player,
+                    leg_ka_ticker=leg_ka_ticker,
+                    leg_ka_price=leg_ka_price,
+                    cost=best_cost,
+                    edge=best_edge,
+                    shares=shares,
+                    game_date=pair.pm_event.game_date,
+                    execution_status=result.status,
+                    ka_order_id=result.ka_order_id,
+                    ka_fill_price=result.ka_fill_price,
+                    ka_fill_shares=result.ka_fill_shares,
+                    pm_order_id=result.pm_order_id,
+                    pm_fill_price=result.pm_fill_price,
+                    pm_fill_shares=result.pm_fill_shares,
+                )
+                print(
+                    f"[sports-arb] REAL {result.status.upper()} {real_pos_id} | "
+                    f"{pair.pm_event.slug}"
+                )
+                if result.status == "pending_pm":
+                    pm_price_limit = round(1.0 - result.ka_fill_price - self.min_edge, 4)
+                    self._pending_pm[real_pos_id] = {
+                        "pair_key": pair_key,
+                        "pm_token_id": pm_token_id,
+                        "shares": int(result.ka_fill_shares),
+                        "pm_price_limit": pm_price_limit,
+                    }
+                    print(
+                        f"[sports-arb] REAL PENDING_PM {real_pos_id} | "
+                        f"pm_limit={pm_price_limit:.4f} retrying on WS updates"
+                    )
+
     def _token_for(self, wp: WatchedSportsPair, player: str) -> str:
         for token_id, name in wp.pm_token_map.items():
             if name == player:
                 return token_id
         return ""
+
+    def _try_retry_pending(self, pm_token_id: str) -> None:
+        """Try to fill pending PM legs when a matching WS price update arrives."""
+        if not self._executor or not self._pending_pm:
+            return
+        live = self.live_books.get(pm_token_id)
+        if not live or live.best_ask <= 0:
+            return
+        for pos_id, pending in list(self._pending_pm.items()):
+            if pending["pm_token_id"] != pm_token_id:
+                continue
+            if live.best_ask > pending["pm_price_limit"]:
+                continue  # PM still too expensive to maintain edge — wait
+            result = self._executor.retry_pm(
+                pm_token_id=pm_token_id,
+                shares=pending["shares"],
+                pm_price_limit=pending["pm_price_limit"],
+            )
+            if result and result.shares_matched >= pending["shares"] * self._executor.min_fill_pct:
+                self.db.update_pm_filled(
+                    pos_id,
+                    pm_order_id=result.order_id,
+                    pm_fill_price=result.fill_price,
+                    pm_fill_shares=result.shares_matched,
+                )
+                del self._pending_pm[pos_id]
+                print(
+                    f"[sports-arb] REAL PM_FILLED {pos_id} | "
+                    f"{result.shares_matched:.1f}@{result.fill_price:.4f}"
+                )
 
     # ── Orderbook depth ─────────────────────────────────────────────────
 

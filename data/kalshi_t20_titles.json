@@ -1,0 +1,17 @@
+[
+  {
+    "event_ticker": "KXT20MATCH-26MAR29ESWSEY",
+    "title": "Seychelles vs Eswatini Winner?",
+    "expected_expiration_time": "2026-03-29T12:30:00Z"
+  },
+  {
+    "event_ticker": "KXT20MATCH-26MAR29MALSAI",
+    "title": "Saint Helena vs Malawi Winner?",
+    "expected_expiration_time": "2026-03-29T16:50:00Z"
+  },
+  {
+    "event_ticker": "KXT20MATCH-26MAR29TANGHA",
+    "title": "Ghana vs Tanzania Winner?",
+    "expected_expiration_time": "2026-03-29T16:50:00Z"
+  }
+]

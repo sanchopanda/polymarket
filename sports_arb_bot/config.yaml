@@ -34,3 +34,15 @@ kalshi:
 runtime:
   status_interval_seconds: 30
   resolve_interval_seconds: 300
+
+# Реальная торговля. Требует env-переменных:
+#   WALLET_PRIVATE_KEY, WALLET_PROXY (опц.)       — Polymarket
+#   KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY_PATH    — Kalshi
+# При pending_pm (Kalshi заполнен, PM не заполнен):
+#   бот не разматывает позицию, а повторяет PM-ногу на каждом WS-обновлении
+#   пока цена PM ≤ 1 - ka_fill_price - min_edge
+real_trading:
+  enabled: false
+  kalshi_slippage_cents: 2   # добавляем к цене Kalshi при выставлении ордера
+  pm_price_buffer_cents: 1   # добавляем к цене PM при первой попытке
+  min_fill_pct: 80           # минимальный процент заполнения (0–100)

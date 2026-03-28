@@ -1,0 +1,37 @@
+[
+  {
+    "event_ticker": "KXR6GAME-26MAR30HERETICSSHI",
+    "title": "Will Shifters win the Heretics vs. Shifters R6 match?",
+    "expected_expiration_time": "2026-03-30T20:00:00Z"
+  },
+  {
+    "event_ticker": "KXR6GAME-26MAR30EXTGE",
+    "title": "Will Geekay Esports win the ex-Team Secret Academy vs. Geekay Esports R6 match?",
+    "expected_expiration_time": "2026-03-30T21:00:00Z"
+  },
+  {
+    "event_ticker": "KXR6GAME-26MAR30VPFNC",
+    "title": "Will Virtus.pro win the Virtus.pro vs. Fnatic R6 match?",
+    "expected_expiration_time": "2026-03-30T22:00:00Z"
+  },
+  {
+    "event_ticker": "KXR6GAME-26MAR30TMSECRET",
+    "title": "Will Twisted Minds win the Twisted Minds vs. Team Secret R6 match?",
+    "expected_expiration_time": "2026-03-30T23:00:00Z"
+  },
+  {
+    "event_ticker": "KXR6GAME-26MAR31LOSFAZE",
+    "title": "Will LOS win the LOS vs. FaZe Clan R6 match?",
+    "expected_expiration_time": "2026-04-01T01:00:00Z"
+  },
+  {
+    "event_ticker": "KXR6GAME-26MAR31BDLIQUID",
+    "title": "Will Team Liquid win the Black Dragons e-Sports vs. Team Liquid R6 match?",
+    "expected_expiration_time": "2026-04-01T02:15:00Z"
+  },
+  {
+    "event_ticker": "KXR6GAME-26MAR31LOUDFLU",
+    "title": "Will LOUD win the LOUD vs. Fluxo W7M R6 match?",
+    "expected_expiration_time": "2026-04-01T03:30:00Z"
+  }
+]

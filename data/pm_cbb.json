@@ -1,0 +1,34 @@
+[
+  {
+    "slug": "cbb-pur-arz-2026-03-28",
+    "question": "Purdue Boilermakers vs. Arizona Wildcats",
+    "series_slug": "ncaa-cbb",
+    "league": null,
+    "game_start_time": "2026-03-29 00:49:00+00",
+    "end_date": "2026-03-29T00:49:00Z",
+    "outcomes": "[\"Purdue Boilermakers\", \"Arizona Wildcats\"]",
+    "outcome_prices": "[\"0.305\", \"0.695\"]",
+    "clob_token_ids": "[\"78514933453541516935187387600874432418436460096129547384891808930037790284911\", \"64024535238733125841763079646903083308933520686600379980978305341937621090800\"]",
+    "accepting_orders": true,
+    "best_bid": 0.3,
+    "best_ask": 0.31,
+    "liquidity": 4732405.1111,
+    "url": "https://polymarket.com/sports/criccbb/cbb-pur-arz-2026-03-28"
+  },
+  {
+    "slug": "cbb-ill-iowa-2026-03-28",
+    "question": "Illinois Fighting Illini vs. Iowa Hawkeyes",
+    "series_slug": "ncaa-cbb",
+    "league": null,
+    "game_start_time": "2026-03-28 22:09:00+00",
+    "end_date": "2026-03-28T22:09:00Z",
+    "outcomes": "[\"Illinois Fighting Illini\", \"Iowa Hawkeyes\"]",
+    "outcome_prices": "[\"0.735\", \"0.265\"]",
+    "clob_token_ids": "[\"51016507619180924665597559307500966371300359990730628147295374239685630001225\", \"94447182302194482310220356455575365299769150002438081485821221492788471804424\"]",
+    "accepting_orders": true,
+    "best_bid": 0.73,
+    "best_ask": 0.74,
+    "liquidity": 6941461.6269,
+    "url": "https://polymarket.com/sports/criccbb/cbb-ill-iowa-2026-03-28"
+  }
+]

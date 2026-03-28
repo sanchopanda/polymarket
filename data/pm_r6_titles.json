@@ -1,0 +1,62 @@
+[
+  {
+    "slug": "r6siege-furia-nip-2026-03-31",
+    "question": "Rainbow Six Siege: FURIA Esports vs Ninjas in Pyjamas (BO1) - South America League Kickoff Group B",
+    "game_start_time": "2026-04-01 00:45:00+00",
+    "league": "South America League"
+  },
+  {
+    "slug": "r6siege-fluxow-loud-2026-03-31",
+    "question": "Rainbow Six Siege: Fluxo W7M vs LOUD (BO1) - South America League Kickoff Group B",
+    "game_start_time": "2026-03-31 23:30:00+00",
+    "league": "South America League"
+  },
+  {
+    "slug": "r6siege-liquid-bd-2026-03-31",
+    "question": "Rainbow Six Siege: Team Liquid vs Black Dragons e-Sports (BO1) - South America League Kickoff Group A",
+    "game_start_time": "2026-03-31 22:15:00+00",
+    "league": "South America League"
+  },
+  {
+    "slug": "r6siege-secret-tm-2026-03-30",
+    "question": "Rainbow Six Siege: Team Secret vs Twisted Minds (BO1) - Europe MENA League Kickoff Group B",
+    "game_start_time": "2026-03-30 19:00:00+00",
+    "league": "Europe MENA League"
+  },
+  {
+    "slug": "r6siege-fnc-vp-2026-03-30",
+    "question": "Rainbow Six Siege: Fnatic vs Virtus.pro (BO1) - Europe MENA League Kickoff Group A",
+    "game_start_time": "2026-03-30 18:00:00+00",
+    "league": "Europe MENA League"
+  },
+  {
+    "slug": "r6siege-ge-teamse-2026-03-30",
+    "question": "Rainbow Six Siege: Geekay Esports vs ex-Team Secret Academy (BO1) - Europe MENA League Kickoff Group B",
+    "game_start_time": "2026-03-30 17:00:00+00",
+    "league": "Europe MENA League"
+  },
+  {
+    "slug": "r6siege-shifte-gli-2026-03-30",
+    "question": "Rainbow Six Siege: Shifters vs Giggioletti (BO1) - Europe MENA League Kickoff Group A",
+    "game_start_time": "2026-03-30 16:00:00+00",
+    "league": "Europe MENA League"
+  },
+  {
+    "slug": "r6siege-man-rocklf-2026-03-29",
+    "question": "Rainbow Six Siege: Man eSports LFO vs Rock LFO (BO3) - Asia-Pacific League Kickoff: Oceania Playoffs",
+    "game_start_time": "2026-03-29 08:00:00+00",
+    "league": "Asia-Pacific League"
+  },
+  {
+    "slug": "r6siege-bb-ep-2026-03-28",
+    "question": "Rainbow Six Siege: Barbie Boys vs ENTERPRISE Esports (BO3) - Asia-Pacific League Kickoff: Oceania Playoffs",
+    "game_start_time": "2026-03-29 02:00:00+00",
+    "league": "Asia-Pacific League"
+  },
+  {
+    "slug": "r6siege-de-elv1-2026-03-28",
+    "question": "Rainbow Six Siege:  Dolphin Esport vs Elevate (BO3) - Asia-Pacific League Kickoff: Asia Playoffs",
+    "game_start_time": "2026-03-28 10:00:00+00",
+    "league": "Asia-Pacific League"
+  }
+]
