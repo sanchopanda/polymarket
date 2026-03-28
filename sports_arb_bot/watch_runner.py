@@ -401,9 +401,11 @@ class SportsArbWatchRunner:
                 return
 
             # Per-pair cooldown: no more than once per minute
+            # Updated here (before depth check) so SKIPs also consume the cooldown
             now_ts = time.time()
             if now_ts - self._last_bet_ts.get(pair_key, 0.0) < self._bet_cooldown:
                 return
+            self._last_bet_ts[pair_key] = now_ts
 
             pm_token_id = self._token_for(wp, leg_pm_player)
             if not pm_token_id:
@@ -444,8 +446,6 @@ class SportsArbWatchRunner:
             shares = math.floor(self.stake_usd / best_cost)
             if shares < 1:
                 return
-
-            self._last_bet_ts[pair_key] = now_ts
 
             pos_id = self.db.open_position(
                 sport=pair.sport,
