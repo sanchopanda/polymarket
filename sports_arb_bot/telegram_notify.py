@@ -142,6 +142,61 @@ class SportsTelegramNotifier:
         )
         self._send(text)
 
+    def notify_real_bet(
+        self,
+        pos_id: str,
+        pm_slug: str,
+        leg_pm_player: str,
+        leg_ka_player: str,
+        leg_ka_ticker: str,
+        execution_status: str,
+        ka_fill_price: float,
+        ka_fill_shares: float,
+        pm_fill_price: float,
+        pm_fill_shares: float,
+        edge: float,
+        total_cost: float,
+        pm_balance: Optional[float] = None,
+        ka_balance: Optional[float] = None,
+    ) -> None:
+        status_icons = {
+            "both_filled": "✅",
+            "one_legged_kalshi": "⚡",
+            "one_legged_polymarket": "⚡",
+        }
+        icon = status_icons.get(execution_status, "⚠️")
+        status_label = {
+            "both_filled": "ОБЕ НОГИ",
+            "one_legged_kalshi": "ТОЛЬКО KALSHI (ждём PM)",
+            "one_legged_polymarket": "ТОЛЬКО PM (ждём Kalshi)",
+        }.get(execution_status, execution_status.upper())
+
+        pm_url = f"https://polymarket.com/event/{pm_slug}"
+        ka_event_ticker = leg_ka_ticker.rsplit("-", 1)[0]
+        ka_url = f"https://kalshi.com/markets/{ka_event_ticker}"
+
+        balance_str = ""
+        if pm_balance is not None and ka_balance is not None:
+            balance_str = f"\n💼 PM: ${pm_balance:.2f} | Kalshi: ${ka_balance:.2f}"
+
+        text = (
+            f"{icon} <b>REAL BET {pos_id}</b> — {status_label}\n"
+            f"PM: {leg_pm_player} @ {pm_fill_price:.3f} × {pm_fill_shares:.1f}\n"
+            f"Kalshi: {leg_ka_player} ({leg_ka_ticker}) @ {ka_fill_price:.3f} × {ka_fill_shares:.1f}\n"
+            f"edge={edge:.4f} stake≈${total_cost:.2f}"
+            f"{balance_str}\n"
+            f'<a href="{pm_url}">PM</a> | <a href="{ka_url}">Kalshi</a>'
+        )
+        self._send(text)
+
+    def notify_real_filled(self, pos_id: str, leg: str, fill_price: float, fill_shares: float) -> None:
+        """Уведомление о заполнении зависшей ноги."""
+        label = "PM" if leg == "pm" else "Kalshi"
+        self._send(
+            f"✅ <b>REAL {pos_id}</b> — {label} нога заполнена\n"
+            f"{fill_shares:.1f} @ {fill_price:.4f} → обе ноги закрыты"
+        )
+
     def notify_resolve(
         self,
         pos_id: str,

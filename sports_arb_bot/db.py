@@ -226,7 +226,7 @@ class SportsArbDB:
                 is_paper, execution_status,
                 ka_order_id, ka_fill_price, ka_fill_shares,
                 pm_order_id, pm_fill_price, pm_fill_shares
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 1, 0, ?, ?, ?, ?, ?, ?, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 1, 0, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 pos_id, sport, pm_slug, pm_title, pm_market_id,
                 ka_event_ticker, ka_title, match_confidence,
@@ -280,6 +280,21 @@ class SportsArbDB:
         self.conn.commit()
         self.audit("position_orphaned", pos_id, {"reason": reason})
 
+    def count_real_positions_for_pair(self, pair_key: str) -> int:
+        """Количество реальных (не paper) позиций по паре рынков."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM positions WHERE ka_event_ticker=? AND is_paper=0",
+            (pair_key,),
+        ).fetchone()
+        return int(row["cnt"] or 0)
+
+    def get_total_real_pnl(self) -> float:
+        """Суммарный P&L по закрытым реальным позициям (отрицательный = потери)."""
+        row = self.conn.execute(
+            "SELECT SUM(pnl) AS total FROM positions WHERE status='resolved' AND is_paper=0"
+        ).fetchone()
+        return float(row["total"] or 0.0)
+
     def audit(self, event_type: str, position_id: Optional[str], details: dict) -> None:
         self.conn.execute(
             "INSERT INTO audit_log (timestamp, event_type, position_id, details) VALUES (?,?,?,?)",
@@ -296,7 +311,7 @@ class SportsArbDB:
     ) -> float:
         """Resolve position. Fetches shares/total_cost from DB. Returns pnl."""
         pos = self.conn.execute(
-            "SELECT shares, total_cost, lock_valid FROM positions WHERE id = ?", (pos_id,)
+            "SELECT shares, total_cost, lock_valid, is_paper FROM positions WHERE id = ?", (pos_id,)
         ).fetchone()
         if pos is None:
             return 0.0
@@ -304,6 +319,7 @@ class SportsArbDB:
         shares = int(pos["shares"])
         total_cost = float(pos["total_cost"])
         lock_valid = bool(pos["lock_valid"])
+        is_paper = bool(pos["is_paper"] if pos["is_paper"] is not None else 1)
 
         # Lock arb: exactly one of the two YES legs wins → payout = shares * $1
         payout = float(shares) if lock_valid else 0.0
@@ -317,19 +333,20 @@ class SportsArbDB:
             WHERE id = ?""",
             (now, winner, pm_result, ka_result, pnl, pos_id),
         )
-        # Add payout back to balance
-        self.conn.execute(
-            "UPDATE virtual_balance SET "
-            "current_balance = current_balance + ?, "
-            "total_won = total_won + ?, "
-            "updated_at = ? WHERE id = 1",
-            (payout, payout, now),
-        )
-        if not lock_valid:
+        # Touch virtual_balance only for paper positions
+        if is_paper:
             self.conn.execute(
-                "UPDATE virtual_balance SET total_lost = total_lost + ?, updated_at = ? WHERE id = 1",
-                (total_cost, now),
+                "UPDATE virtual_balance SET "
+                "current_balance = current_balance + ?, "
+                "total_won = total_won + ?, "
+                "updated_at = ? WHERE id = 1",
+                (payout, payout, now),
             )
+            if not lock_valid:
+                self.conn.execute(
+                    "UPDATE virtual_balance SET total_lost = total_lost + ?, updated_at = ? WHERE id = 1",
+                    (total_cost, now),
+                )
         self.conn.commit()
         return pnl
 

@@ -1,5 +1,5 @@
 trading:
-  stake_usd: 60.0
+  stake_usd: 20.0
   min_edge: 0.05
   min_leg_price: 0.05
   max_leg_price: 0.95
@@ -38,11 +38,18 @@ runtime:
 # Реальная торговля. Требует env-переменных:
 #   WALLET_PRIVATE_KEY, WALLET_PROXY (опц.)       — Polymarket
 #   KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY_PATH    — Kalshi
-# При pending_pm (Kalshi заполнен, PM не заполнен):
-#   бот не разматывает позицию, а повторяет PM-ногу на каждом WS-обновлении
-#   пока цена PM ≤ 1 - ka_fill_price - min_edge
+#
+# Логика переключения paper/real:
+#   - Если real_per_pair достиг max_real_per_pair → дальше paper для этой пары
+#   - Если суммарные потери ≥ max_loss_usd → paper для всего
+#   - Если баланс < min_balance_pm/ka → paper
 real_trading:
   enabled: false
-  kalshi_slippage_cents: 2   # добавляем к цене Kalshi при выставлении ордера
-  pm_price_buffer_cents: 1   # добавляем к цене PM при первой попытке
-  min_fill_pct: 80           # минимальный процент заполнения (0–100)
+  kalshi_slippage_cents: 2      # добавляем к цене Kalshi при выставлении ордера
+  pm_price_buffer_cents: 2      # добавляем к цене PM при первой попытке
+  min_fill_pct: 80              # минимальный процент заполнения (0–100)
+  ka_poll_interval_seconds: 2   # как часто опрашиваем Kalshi resting ордера
+  max_real_per_pair: 2          # макс реальных арбитражей на одну пару рынков
+  max_loss_usd: 20.0            # макс суммарные потери по реальным позициям
+  min_balance_pm: 10.0          # мин баланс Polymarket для реальной торговли
+  min_balance_ka: 10.0          # мин баланс Kalshi для реальной торговли
