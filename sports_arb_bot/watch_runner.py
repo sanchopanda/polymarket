@@ -117,12 +117,18 @@ class SportsArbWatchRunner:
                 pm_trader=PolymarketTrader(),
                 kalshi_trader=KalshiTrader(),
                 slippage_cents=int(real_cfg.get("kalshi_slippage_cents", 2)),
-                pm_buffer=float(real_cfg.get("pm_price_buffer_cents", 1)) / 100.0,
+                pm_buffer=float(real_cfg.get("pm_price_buffer_cents", 2)) / 100.0,
                 min_fill_pct=float(real_cfg.get("min_fill_pct", 80)) / 100.0,
             )
             print("[sports-arb] Real trading ENABLED")
-        # pending_pm[real_pos_id] = {pair_key, pm_token_id, shares, pm_price_limit}
+        # one_legged_kalshi: Kalshi заполнен, PM нет → retry PM при WS-обновлении
+        # {pos_id: {pair_key, pm_token_id, shares, pm_price_limit}}
         self._pending_pm: dict[str, dict] = {}
+        # one_legged_polymarket: PM заполнен, Kalshi resting → polling каждые N сек
+        # {pos_id: {ka_order_id, ka_ticker, shares}}
+        self._pending_ka: dict[str, dict] = {}
+        self._last_ka_sync_ts: float = 0.0
+        self._KA_SYNC_INTERVAL: float = float(real_cfg.get("ka_poll_interval_seconds", 2.0))
 
     # ── Main loop ───────────────────────────────────────────────────────
 
@@ -146,6 +152,9 @@ class SportsArbWatchRunner:
                 if now - self._last_resolve_ts >= self.resolve_interval:
                     self._resolve_expired()
                     self._last_resolve_ts = now
+                if self._pending_ka and now - self._last_ka_sync_ts >= self._KA_SYNC_INTERVAL:
+                    self._sync_pending_kalshi()
+                    self._last_ka_sync_ts = now
                 time.sleep(1)
         except KeyboardInterrupt:
             print("\n[sports-arb] Остановлен.")
@@ -364,7 +373,7 @@ class SportsArbWatchRunner:
             best_bid=best_bid, best_ask=best_ask, updated_at_ms=timestamp
         )
 
-        self._try_retry_pending(asset_id)
+        self._try_retry_pm(asset_id)
 
         for pair_key in list(self.pairs_by_pm_token.get(asset_id, set())):
             self._maybe_open_pair(pair_key)
@@ -382,15 +391,17 @@ class SportsArbWatchRunner:
                         f"[sports-arb] Матч завершён: {pair_key} "
                         f"(Kalshi {ticker} yes_ask={book.best_yes_ask:.3f})"
                     )
-                # Mark any pending PM positions for this pair as orphaned
+                # Mark pending one-legged positions for this pair as orphaned
                 for pos_id, pending in list(self._pending_pm.items()):
                     if pending.get("pair_key") == pair_key:
                         self.db.mark_orphaned(pos_id, "match_over")
                         del self._pending_pm[pos_id]
-                        print(
-                            f"[sports-arb] REAL ORPHANED {pos_id} — "
-                            f"match ended before PM leg filled"
-                        )
+                        print(f"[sports-arb] REAL ORPHANED {pos_id} — match over, PM not filled")
+                for pos_id, pending in list(self._pending_ka.items()):
+                    if pending.get("pair_key") == pair_key:
+                        self.db.mark_orphaned(pos_id, "match_over")
+                        del self._pending_ka[pos_id]
+                        print(f"[sports-arb] REAL ORPHANED {pos_id} — match over, Kalshi not filled")
             return
 
         for pair_key in list(self.pairs_by_ka_ticker.get(ticker, set())):
@@ -576,50 +587,71 @@ class SportsArbWatchRunner:
                     ka_ask=leg_ka_price,
                     pm_ask=leg_pm_price,
                 )
-                real_pos_id = self.db.open_real_position(
-                    sport=pair.sport,
-                    pm_slug=pair.pm_event.slug,
-                    pm_title=pair.pm_event.title,
-                    pm_market_id=pair.pm_event.market_id,
-                    ka_event_ticker=pair.kalshi_event.event_ticker,
-                    ka_title=pair.kalshi_event.title,
-                    match_confidence=pair.match_result.confidence,
-                    player_a=player_a,
-                    player_b=player_b,
-                    leg_pm_player=leg_pm_player,
-                    leg_pm_token_id=pm_token_id,
-                    leg_pm_price=leg_pm_price,
-                    leg_ka_player=leg_ka_player,
-                    leg_ka_ticker=leg_ka_ticker,
-                    leg_ka_price=leg_ka_price,
-                    cost=best_cost,
-                    edge=best_edge,
-                    shares=shares,
-                    game_date=pair.pm_event.game_date,
-                    execution_status=result.status,
-                    ka_order_id=result.ka_order_id,
-                    ka_fill_price=result.ka_fill_price,
-                    ka_fill_shares=result.ka_fill_shares,
-                    pm_order_id=result.pm_order_id,
-                    pm_fill_price=result.pm_fill_price,
-                    pm_fill_shares=result.pm_fill_shares,
-                )
-                print(
-                    f"[sports-arb] REAL {result.status.upper()} {real_pos_id} | "
-                    f"{pair.pm_event.slug}"
-                )
-                if result.status == "pending_pm":
-                    pm_price_limit = round(1.0 - result.ka_fill_price - self.min_edge, 4)
-                    self._pending_pm[real_pos_id] = {
-                        "pair_key": pair_key,
-                        "pm_token_id": pm_token_id,
-                        "shares": int(result.ka_fill_shares),
-                        "pm_price_limit": pm_price_limit,
-                    }
+                if result.status == "failed":
                     print(
-                        f"[sports-arb] REAL PENDING_PM {real_pos_id} | "
-                        f"pm_limit={pm_price_limit:.4f} retrying on WS updates"
+                        f"[sports-arb] REAL FAILED | {pair.pm_event.slug} | "
+                        f"ka={result.ka_status} pm={result.pm_status}"
                     )
+                else:
+                    real_pos_id = self.db.open_real_position(
+                        sport=pair.sport,
+                        pm_slug=pair.pm_event.slug,
+                        pm_title=pair.pm_event.title,
+                        pm_market_id=pair.pm_event.market_id,
+                        ka_event_ticker=pair.kalshi_event.event_ticker,
+                        ka_title=pair.kalshi_event.title,
+                        match_confidence=pair.match_result.confidence,
+                        player_a=player_a,
+                        player_b=player_b,
+                        leg_pm_player=leg_pm_player,
+                        leg_pm_token_id=pm_token_id,
+                        leg_pm_price=leg_pm_price,
+                        leg_ka_player=leg_ka_player,
+                        leg_ka_ticker=leg_ka_ticker,
+                        leg_ka_price=leg_ka_price,
+                        cost=best_cost,
+                        edge=best_edge,
+                        shares=shares,
+                        game_date=pair.pm_event.game_date,
+                        execution_status=result.status,
+                        ka_order_id=result.ka_order_id,
+                        ka_fill_price=result.ka_fill_price,
+                        ka_fill_shares=result.ka_fill_shares,
+                        pm_order_id=result.pm_order_id,
+                        pm_fill_price=result.pm_fill_price,
+                        pm_fill_shares=result.pm_fill_shares,
+                    )
+                    print(
+                        f"[sports-arb] REAL {result.status.upper()} {real_pos_id} | "
+                        f"{pair.pm_event.slug}"
+                    )
+                    if result.status == "one_legged_kalshi":
+                        # Kalshi заполнен, PM нет — retry при WS-обновлении цены PM
+                        pm_price_limit = round(
+                            1.0 - result.ka_fill_price - self.min_edge, 4
+                        )
+                        self._pending_pm[real_pos_id] = {
+                            "pair_key": pair_key,
+                            "pm_token_id": pm_token_id,
+                            "shares": int(result.ka_fill_shares),
+                            "pm_price_limit": pm_price_limit,
+                        }
+                        print(
+                            f"[sports-arb] REAL ONE_LEG_KA {real_pos_id} | "
+                            f"pm_limit={pm_price_limit:.4f} — retry on WS price update"
+                        )
+                    elif result.status == "one_legged_polymarket" and result.ka_order_id:
+                        # PM заполнен, Kalshi resting — polling
+                        self._pending_ka[real_pos_id] = {
+                            "pair_key": pair_key,
+                            "ka_order_id": result.ka_order_id,
+                            "ka_ticker": leg_ka_ticker,
+                            "shares": shares,
+                        }
+                        print(
+                            f"[sports-arb] REAL ONE_LEG_PM {real_pos_id} | "
+                            f"ka_order={result.ka_order_id[:16]}... — polling Kalshi fill"
+                        )
 
     def _token_for(self, wp: WatchedSportsPair, player: str) -> str:
         for token_id, name in wp.pm_token_map.items():
@@ -627,8 +659,8 @@ class SportsArbWatchRunner:
                 return token_id
         return ""
 
-    def _try_retry_pending(self, pm_token_id: str) -> None:
-        """Try to fill pending PM legs when a matching WS price update arrives."""
+    def _try_retry_pm(self, pm_token_id: str) -> None:
+        """Retry PM leg (one_legged_kalshi) when WS price update arrives."""
         if not self._executor or not self._pending_pm:
             return
         live = self.live_books.get(pm_token_id)
@@ -638,7 +670,7 @@ class SportsArbWatchRunner:
             if pending["pm_token_id"] != pm_token_id:
                 continue
             if live.best_ask > pending["pm_price_limit"]:
-                continue  # PM still too expensive to maintain edge — wait
+                continue  # PM ещё слишком дорогой — ждём
             result = self._executor.retry_pm(
                 pm_token_id=pm_token_id,
                 shares=pending["shares"],
@@ -656,6 +688,43 @@ class SportsArbWatchRunner:
                     f"[sports-arb] REAL PM_FILLED {pos_id} | "
                     f"{result.shares_matched:.1f}@{result.fill_price:.4f}"
                 )
+
+    def _sync_pending_kalshi(self) -> None:
+        """Poll Kalshi resting orders (one_legged_polymarket) to check for fills."""
+        if not self._executor or not self._pending_ka:
+            return
+        for pos_id, pending in list(self._pending_ka.items()):
+            order = self._executor.check_kalshi_order(pending["ka_order_id"])
+            if order is None:
+                continue
+            if order.shares_matched >= pending["shares"] * self._executor.min_fill_pct:
+                self.db.update_pm_filled(  # reuse — updates execution_status to both_filled
+                    pos_id,
+                    pm_order_id="",  # PM already recorded
+                    pm_fill_price=0.0,
+                    pm_fill_shares=0.0,
+                )
+                # Actually update Kalshi fill specifically
+                self.db.conn.execute(
+                    "UPDATE positions SET execution_status='both_filled', "
+                    "ka_fill_price=?, ka_fill_shares=? WHERE id=?",
+                    (order.fill_price, order.shares_matched, pos_id),
+                )
+                self.db.conn.commit()
+                self.db.audit("kalshi_resting_filled", pos_id, {
+                    "ka_order_id": pending["ka_order_id"],
+                    "ka_fill_shares": order.shares_matched,
+                    "ka_fill_price": order.fill_price,
+                })
+                del self._pending_ka[pos_id]
+                print(
+                    f"[sports-arb] REAL KA_FILLED {pos_id} | "
+                    f"{order.shares_matched:.1f}@{order.fill_price:.4f}"
+                )
+            elif order.status.startswith("error") or order.status == "canceled":
+                self.db.mark_orphaned(pos_id, f"kalshi_order_{order.status}")
+                del self._pending_ka[pos_id]
+                print(f"[sports-arb] REAL ORPHANED {pos_id} — Kalshi order {order.status}")
 
     # ── Orderbook depth ─────────────────────────────────────────────────
 
