@@ -83,8 +83,8 @@ class KalshiSportsFeed:
             return []
 
         now = datetime.now(tz=timezone.utc)
-        exp_since  = now + timedelta(minutes=15)  # матч заканчивается не раньше чем через 15м
-        exp_cutoff = now + timedelta(hours=7)      # и не позже чем через 7ч
+        exp_since  = now - timedelta(hours=5)   # берём и уже идущие матчи
+        exp_cutoff = now + timedelta(hours=10)  # и матчи на 10ч вперёд
 
         groups = _group_by_event(markets_raw)
         events: list[KalshiMatchEvent] = []

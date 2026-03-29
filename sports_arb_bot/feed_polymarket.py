@@ -173,8 +173,8 @@ class PolymarketSportsFeed:
         """
         sports_set = set(sports)
         now = datetime.now(tz=timezone.utc)
-        since = now - timedelta(hours=1, minutes=45)
-        cutoff = now + timedelta(hours=5)
+        since = now - timedelta(hours=6)
+        cutoff = now + timedelta(hours=8)
 
         result_raw: list[dict] = []
         offset = 0
