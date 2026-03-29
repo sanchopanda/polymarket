@@ -12,7 +12,9 @@ KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 # Kalshi series_ticker → sport label
 SERIES_TO_SPORT: dict[str, str] = {
     "KXWTACHALLENGERMATCH": "wta",
+    "KXWTAMATCH": "wta",
     "KXATPCHALLENGERMATCH": "atp",
+    "KXATPMATCH": "atp",
     "KXBOXING": "boxing",
     "KXMMA": "mma",
     "KXR6GAME": "r6",
