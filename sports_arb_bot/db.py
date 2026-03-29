@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -11,7 +12,13 @@ class SportsArbDB:
     def __init__(self, path: str) -> None:
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self._lock = threading.RLock()
         self._migrate()
+
+    def _commit(self) -> None:
+        """Commit only if a transaction is active (safe across DDL/executescript)."""
+        if self.conn.in_transaction:
+            self._commit()
 
     def _migrate(self) -> None:
         self.conn.executescript("""
@@ -109,7 +116,7 @@ class SportsArbDB:
         ]:
             try:
                 self.conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {definition}")
-                self.conn.commit()
+                self._commit()
             except sqlite3.OperationalError:
                 pass  # column already exists
 
@@ -120,7 +127,7 @@ class SportsArbDB:
             "VALUES (1, 10000.0, 10000.0, 0, 0, 0, ?)",
             (now,),
         )
-        self.conn.commit()
+        self._commit()
 
     def open_position(
         self,
@@ -177,7 +184,7 @@ class SportsArbDB:
             "updated_at = ? WHERE id = 1",
             (total_cost, total_cost, now),
         )
-        self.conn.commit()
+        self._commit()
         return pos_id
 
     def open_real_position(
@@ -240,7 +247,7 @@ class SportsArbDB:
                 pm_order_id, pm_fill_price, pm_fill_shares,
             ),
         )
-        self.conn.commit()
+        self._commit()
         self.audit("real_position_opened", pos_id, {
             "execution_status": execution_status,
             "ka_order_id": ka_order_id,
@@ -265,7 +272,7 @@ class SportsArbDB:
             WHERE id = ?""",
             (pm_order_id, pm_fill_price, pm_fill_shares, pos_id),
         )
-        self.conn.commit()
+        self._commit()
         self.audit("pm_leg_filled", pos_id, {
             "pm_order_id": pm_order_id,
             "pm_fill_price": pm_fill_price,
@@ -277,7 +284,7 @@ class SportsArbDB:
             "UPDATE positions SET execution_status = 'orphaned_kalshi' WHERE id = ?",
             (pos_id,),
         )
-        self.conn.commit()
+        self._commit()
         self.audit("position_orphaned", pos_id, {"reason": reason})
 
     def count_real_positions_for_pair(self, pair_key: str) -> int:
@@ -307,7 +314,7 @@ class SportsArbDB:
             "INSERT INTO audit_log (timestamp, event_type, position_id, details) VALUES (?,?,?,?)",
             (datetime.now(tz=timezone.utc).isoformat(), event_type, position_id, json.dumps(details)),
         )
-        self.conn.commit()
+        self._commit()
 
     def resolve_position(
         self,
@@ -354,7 +361,7 @@ class SportsArbDB:
                     "UPDATE virtual_balance SET total_lost = total_lost + ?, updated_at = ? WHERE id = 1",
                     (total_cost, now),
                 )
-        self.conn.commit()
+        self._commit()
         return pnl
 
     def get_open_positions(self) -> list[sqlite3.Row]:
@@ -392,7 +399,7 @@ class SportsArbDB:
                 ka_ticker, ka_player, ka_yes_ask, ka_ask_depth_usd,
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def get_balance(self) -> sqlite3.Row:
         return self.conn.execute("SELECT * FROM virtual_balance WHERE id = 1").fetchone()
@@ -424,7 +431,7 @@ class SportsArbDB:
                 now, now,
             ),
         )
-        self.conn.commit()
+        self._commit()
 
     def get_matched_pairs(self) -> list[sqlite3.Row]:
         return self.conn.execute(
