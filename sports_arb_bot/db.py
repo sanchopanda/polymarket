@@ -233,7 +233,7 @@ class SportsArbDB:
                 is_paper, execution_status,
                 ka_order_id, ka_fill_price, ka_fill_shares,
                 pm_order_id, pm_fill_price, pm_fill_shares
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 1, 0, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 1, 0, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 pos_id, sport, pm_slug, pm_title, pm_market_id,
                 ka_event_ticker, ka_title, match_confidence,
