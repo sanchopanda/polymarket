@@ -18,7 +18,7 @@ class SportsArbDB:
     def _commit(self) -> None:
         """Commit only if a transaction is active (safe across DDL/executescript)."""
         if self.conn.in_transaction:
-            self._commit()
+            self.conn.commit()
 
     def _migrate(self) -> None:
         self.conn.executescript("""
