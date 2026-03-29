@@ -111,6 +111,7 @@ class SportsArbWatchRunner:
         self._real_trading: bool = bool(real_cfg.get("enabled", False))
         self._executor: Optional["SportsRealExecutor"] = None
         self._max_real_per_pair: int = int(real_cfg.get("max_real_per_pair", 2))
+        self._max_positions_per_pair: int = int(real_cfg.get("max_positions_per_pair", 4))
         self._max_loss_usd: float = float(real_cfg.get("max_loss_usd", 20.0))
         self._min_balance_pm: float = float(real_cfg.get("min_balance_pm", 10.0))
         self._min_balance_ka: float = float(real_cfg.get("min_balance_ka", 10.0))
@@ -517,6 +518,13 @@ class SportsArbWatchRunner:
 
             pm_token_id = self._token_for(wp, leg_pm_player)
             if not pm_token_id:
+                return
+
+            # Hard cap: total positions (real + paper) per pair
+            total_for_pair = self.db.count_all_positions_for_pair(
+                pair.kalshi_event.event_ticker
+            )
+            if total_for_pair >= self._max_positions_per_pair:
                 return
 
             # Determine real vs paper mode before cooldown check

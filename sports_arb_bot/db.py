@@ -295,6 +295,14 @@ class SportsArbDB:
         ).fetchone()
         return int(row["cnt"] or 0)
 
+    def count_all_positions_for_pair(self, pair_key: str) -> int:
+        """Общее количество позиций (real + paper) по паре рынков."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM positions WHERE ka_event_ticker=?",
+            (pair_key,),
+        ).fetchone()
+        return int(row["cnt"] or 0)
+
     def get_total_real_pnl(self) -> float:
         """Суммарный P&L по закрытым реальным позициям (отрицательный = потери)."""
         row = self.conn.execute(

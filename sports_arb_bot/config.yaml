@@ -50,6 +50,7 @@ real_trading:
   min_fill_pct: 80              # минимальный процент заполнения (0–100)
   ka_poll_interval_seconds: 2   # как часто опрашиваем Kalshi resting ордера
   max_real_per_pair: 2          # макс реальных арбитражей на одну пару рынков
+  max_positions_per_pair: 4     # макс всего позиций (real + paper) на одну пару рынков
   max_loss_usd: 20.0            # макс суммарные потери по реальным позициям
   min_balance_pm: 10.0          # мин баланс Polymarket для реальной торговли
   min_balance_ka: 10.0          # мин баланс Kalshi для реальной торговли
