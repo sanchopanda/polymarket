@@ -55,7 +55,7 @@ class PolymarketFeed:
             if market.liquidity_num < self.market_filter["min_liquidity"]:
                 continue
             fee_type = self.market_filter.get("fee_type") or ""
-            if fee_type and market.fee_type != fee_type:
+            if fee_type and not (market.fee_type or "").startswith(fee_type):
                 continue
             if symbol_filter and normalized.symbol.lower() != symbol_filter:
                 continue

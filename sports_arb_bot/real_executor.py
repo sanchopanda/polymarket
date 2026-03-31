@@ -140,9 +140,14 @@ class SportsRealExecutor:
             )
 
         else:
-            # Ни один не заполнился — отменяем Kalshi resting если есть
+            # Ни один не заполнился — отменяем resting ордера на обоих платформах
             if ka_resting:
                 self.kalshi_trader.cancel_order(ka_result.order_id)
+            if pm_result is not None and pm_result.order_id and pm_result.shares_matched == 0:
+                try:
+                    self.pm_trader.cancel_order(pm_result.order_id)
+                except Exception as e:
+                    print(f"[real-exec] PM cancel error: {e}")
             return RealExecResult(
                 status="failed",
                 ka_status="failed" if ka_result is None else ka_result.status,

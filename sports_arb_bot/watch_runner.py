@@ -66,6 +66,8 @@ class SportsArbWatchRunner:
         self.min_edge: float = float(trading.get("min_edge", 0.02))
         self.min_leg_price: float = float(trading.get("min_leg_price", 0.05))
         self.max_leg_price: float = float(trading.get("max_leg_price", 0.95))
+        self.pm_max_leg_price: float = float(trading.get("pm_max_leg_price", 0.48))
+        self.high_edge_threshold: float = float(trading.get("high_edge_threshold", 0.15))
         self.scan_interval: float = float(trading.get("scan_interval_seconds", 900))
 
         runtime = config.get("runtime", {})
@@ -105,6 +107,8 @@ class SportsArbWatchRunner:
         # Per-pair cooldown: don't bet more than once per minute per pair
         self._last_bet_ts: dict[str, float] = {}
         self._bet_cooldown: float = 60.0
+        # Последнее состояние depth для дедупликации SKIP-логов
+        self._last_skip_state: dict[str, tuple] = {}
 
         # Real trading
         real_cfg = config.get("real_trading", {})
@@ -508,6 +512,8 @@ class SportsArbWatchRunner:
             return
         if not (self.min_leg_price <= leg_pm_price <= self.max_leg_price):
             return
+        if best_edge > self.high_edge_threshold and leg_pm_price > self.pm_max_leg_price:
+            return
         if not (self.min_leg_price <= leg_ka_price <= self.max_leg_price):
             return
 
@@ -549,9 +555,25 @@ class SportsArbWatchRunner:
             total_cost = shares * best_cost
             expected_profit = shares * best_edge
 
-            # Orderbook depth snapshot
+            # Найти лучшую цену Kalshi с достаточной ликвидностью
+            ka_liquid = self._ka_find_liquid_ask(leg_ka_ticker, leg_pm_price)
+            if ka_liquid is not None:
+                eff_ka_price, ka_depth = ka_liquid
+                if eff_ka_price > leg_ka_price + 0.001:
+                    # Глубже чем best ask — пересчитываем
+                    leg_ka_price = eff_ka_price
+                    best_edge = 1.0 - leg_pm_price - leg_ka_price
+                    if best_edge < self.min_edge:
+                        return
+                    best_cost = leg_pm_price + leg_ka_price
+                    shares = math.floor(self.stake_usd / best_cost)
+                    if shares < 1:
+                        return
+            else:
+                ka_depth = 0.0
+
+            # PM depth
             pm_depth = self._pm_depth_at_ask(pm_token_id, leg_pm_price)
-            ka_depth = self._ka_depth_at_ask(leg_ka_ticker, leg_ka_price)
 
             self.db.save_orderbook_snapshot(
                 sport=pair.sport,
@@ -570,17 +592,20 @@ class SportsArbWatchRunner:
             pm_leg_stake = shares * leg_pm_price
             ka_leg_stake = shares * leg_ka_price
             lock_valid = (
-                pm_depth is not None and pm_depth >= pm_leg_stake * 1.5 and
-                ka_depth is not None and ka_depth >= ka_leg_stake * 1.5
+                ka_liquid is not None and
+                pm_depth is not None and pm_depth >= pm_leg_stake * 1.5
             )
 
-            # Skip trade if depth is insufficient
+            # Skip trade if depth is insufficient — логируем только при изменении цен
             if not lock_valid:
-                print(
-                    f"[sports-arb] SKIP {pair_key} | depth insufficient "
-                    f"pm=${pm_depth or 0:.0f}/{pm_leg_stake * 1.5:.0f} "
-                    f"ka=${ka_depth or 0:.0f}/{ka_leg_stake * 1.5:.0f}"
-                )
+                skip_state = (round(pm_depth or 0, 1), round(ka_depth or 0, 1))
+                if self._last_skip_state.get(pair_key) != skip_state:
+                    self._last_skip_state[pair_key] = skip_state
+                    print(
+                        f"[sports-arb] SKIP {pair_key} | depth insufficient "
+                        f"pm=${pm_depth or 0:.0f}/{pm_leg_stake * 1.5:.0f} "
+                        f"ka=${ka_depth or 0:.0f}/{ka_leg_stake * 1.5:.0f}"
+                    )
                 return
 
             depth_str = (
@@ -837,6 +862,44 @@ class SportsArbWatchRunner:
         except Exception:
             return None
 
+    def _ka_find_liquid_ask(
+        self, ticker: str, leg_pm_price: float
+    ) -> Optional[tuple[float, float]]:
+        """Ищет наилучшую цену на Kalshi с достаточной ликвидностью.
+        Сканирует уровни от дешёвых к дорогим; останавливается когда edge < min_edge.
+        Возвращает (ka_price, cumulative_depth_usd) или None если ликвидности нет.
+        """
+        try:
+            resp = self._ka_http.get(f"{self._ka_base}/markets/{ticker}/orderbook")
+            resp.raise_for_status()
+            data = resp.json()
+            orderbook = data.get("orderbook_fp") or data.get("orderbook") or {}
+            no_bids_raw = orderbook.get("no_dollars") or orderbook.get("no") or []
+
+            # Сортируем no_bids по убыванию цены (высокий no_bid = дешёвый yes_ask)
+            levels = sorted(
+                [(float(item[0]), float(item[1])) for item in no_bids_raw],
+                key=lambda x: -x[0],
+            )
+
+            cumulative_depth = 0.0
+            for no_bid_price, size in levels:
+                yes_ask = 1.0 - no_bid_price
+                edge = 1.0 - leg_pm_price - yes_ask
+                if edge < self.min_edge:
+                    break  # дальше только дороже → edge только хуже
+                shares = math.floor(self.stake_usd / (leg_pm_price + yes_ask))
+                if shares < 1:
+                    continue
+                cumulative_depth += yes_ask * size
+                required = shares * yes_ask * 1.5
+                if cumulative_depth >= required:
+                    return (yes_ask, cumulative_depth)
+
+            return None
+        except Exception:
+            return None
+
     # ── Resolution ──────────────────────────────────────────────────────
 
     def resolve_expired(self) -> None:
@@ -850,6 +913,8 @@ class SportsArbWatchRunner:
 
         now = datetime.now(tz=timezone.utc)
         resolved = 0
+        cancelled_count = 0
+        cancelled_pnl = 0.0
 
         for pos in positions:
             game_date_raw = pos["game_date"]
@@ -869,33 +934,54 @@ class SportsArbWatchRunner:
             if pm_winner is None or ka_result is None:
                 continue  # рынок ещё не зарезолвился
 
-            pnl = self.db.resolve_position(
-                pos_id=pos["id"],
-                winner=pm_winner,
-                pm_result=pm_winner,
-                ka_result=ka_result,
-            )
-            sign = "+" if pnl >= 0 else ""
-            print(
-                f"[sports-arb] RESOLVED {pos['id']} | "
-                f"{pos['pm_slug']} | winner={pm_winner} | "
-                f"pnl={sign}${pnl:.2f}"
-            )
-            if self.tg:
-                self.tg.notify_resolve(
+            cancelled = pm_winner == "n/a" or ka_result == "void"
+
+            if cancelled:
+                pnl = self.db.resolve_cancelled_position(
                     pos_id=pos["id"],
-                    pm_slug=pos["pm_slug"],
-                    winner=pm_winner,
-                    pnl=pnl,
+                    pm_result=pm_winner,
+                    ka_result=ka_result,
                 )
+                cancelled_count += 1
+                cancelled_pnl += pnl
+                # Для реальных позиций с PM N/A — запускаем redeem
+                if not pos["is_paper"] and pm_winner == "n/a" and self._executor:
+                    try:
+                        self._executor.pm_trader.redeem(pos["pm_market_id"])
+                        print(f"[sports-arb] REDEEM sent for {pos['id']} market={pos['pm_market_id']}")
+                    except Exception as e:
+                        print(f"[sports-arb] redeem FAILED {pos['id']}: {e}")
+            else:
+                pnl = self.db.resolve_position(
+                    pos_id=pos["id"],
+                    winner=pm_winner,
+                    pm_result=pm_winner,
+                    ka_result=ka_result,
+                )
+                sign = "+" if pnl >= 0 else ""
+                print(
+                    f"[sports-arb] RESOLVED {pos['id']} | "
+                    f"{pos['pm_slug']} | winner={pm_winner} | "
+                    f"pnl={sign}${pnl:.2f}"
+                )
+                if self.tg:
+                    self.tg.notify_resolve(
+                        pos_id=pos["id"],
+                        pm_slug=pos["pm_slug"],
+                        winner=pm_winner,
+                        pnl=pnl,
+                    )
             resolved += 1
 
+        if cancelled_count:
+            sign = "+" if cancelled_pnl >= 0 else ""
+            print(f"[sports-arb] {cancelled_count} ставок по отменённым матчам | pnl={sign}${cancelled_pnl:.2f}")
         if resolved:
             bal = self.db.get_balance()
             print(f"[sports-arb] Баланс: ${bal['current_balance']:.2f}")
 
     def _pm_winner(self, market_id: str) -> Optional[str]:
-        """Возвращает имя победителя или None если рынок не закрыт."""
+        """Возвращает имя победителя, 'n/a' при отмене, или None если рынок ещё не закрыт."""
         try:
             resp = self._http.get(f"{GAMMA_BASE}/markets/{market_id}")
             resp.raise_for_status()
@@ -911,19 +997,22 @@ class SportsArbWatchRunner:
             prices = [float(p) for p in prices_raw]
             if not prices or not outcomes:
                 return None
-            winner_idx = prices.index(max(prices))
+            max_price = max(prices)
+            if max_price < 0.95:
+                return "n/a"  # отменён / нет явного победителя (N/A резолв)
+            winner_idx = prices.index(max_price)
             return outcomes[winner_idx] if winner_idx < len(outcomes) else None
         except Exception:
             return None
 
     def _ka_result(self, ticker: str) -> Optional[str]:
-        """Возвращает 'yes' или 'no' или None если рынок не зарезолвился."""
+        """Возвращает 'yes', 'no', 'void', или None если рынок не зарезолвился."""
         try:
             resp = self._ka_http.get(f"{self._ka_base}/markets/{ticker}")
             resp.raise_for_status()
             m = resp.json().get("market") or {}
             result = m.get("result")
-            if result in ("yes", "no"):
+            if result in ("yes", "no", "void"):
                 return result
             return None
         except Exception:
@@ -961,16 +1050,34 @@ class SportsArbWatchRunner:
                 ka_str = f"${self._ka_balance:.2f}" if self._ka_balance is not None else "?"
                 lines.append(f"💼 PM: {pm_str} | Kalshi: {ka_str}")
         if open_pos:
-            lines.append("")
-            lines.append("<b>Открытые позиции:</b>")
+            now_dt = datetime.now(tz=timezone.utc)
+            active, pending_settle = [], []
             for p in open_pos:
-                mode = "paper" if (p["is_paper"] or p["is_paper"] is None) else "real"
-                exec_st = f" [{p['execution_status']}]" if p["execution_status"] else ""
-                lines.append(
-                    f"  {p['id']} [{mode}]{exec_st} {p['pm_slug'][:28]}\n"
-                    f"    edge={p['edge']:.3f} ${p['total_cost']:.2f} | "
-                    f"{p['opened_at'][5:16]}"
-                )
+                try:
+                    gd = datetime.fromisoformat(p["game_date"])
+                    if gd.tzinfo is None:
+                        gd = gd.replace(tzinfo=timezone.utc)
+                    if now_dt - gd > timedelta(hours=3):
+                        pending_settle.append(p)
+                        continue
+                except Exception:
+                    pass
+                active.append(p)
+
+            if active:
+                lines.append("")
+                lines.append("<b>Открытые позиции:</b>")
+                for p in active:
+                    mode = "paper" if (p["is_paper"] or p["is_paper"] is None) else "real"
+                    exec_st = f" [{p['execution_status']}]" if p["execution_status"] else ""
+                    lines.append(
+                        f"  {p['id']} [{mode}]{exec_st} {p['pm_slug'][:28]}\n"
+                        f"    edge={p['edge']:.3f} ${p['total_cost']:.2f} | "
+                        f"{p['opened_at'][5:16]}"
+                    )
+            if pending_settle:
+                total_cost = sum(float(p["total_cost"]) for p in pending_settle)
+                lines.append(f"⏳ Ожидают резолва: {len(pending_settle)} позиций (${total_cost:.2f})")
         return "\n".join(lines)
 
     def _print_status(self) -> None:

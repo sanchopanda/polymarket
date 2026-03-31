@@ -1,0 +1,68 @@
+price_source: "chainlink"  # "chainlink" | "binance"
+
+runtime:
+  scan_interval_seconds: 300   # граница сканирования: 300 = каждые 5 мин (:00, :05, :10, ...)
+
+trading:
+  stake_usd: 5.0          # paper bet size
+  max_price: 0.48         # максимальная цена входа для paper (после округления вверх)
+
+real_trading:
+  enabled: true             # реальные ставки включены
+  stake_usd: 1.0           # $1 за ставку
+  initial_deposit: 8.0     # начальный депозит
+  floor_buffer: 8.0        # trailing floor = max(0, peak - floor_buffer)
+  max_price: 0.49          # максимальная цена входа для реала
+
+market_filter:
+  interval_minutes: [5, 15]
+  symbols: ["BTC", "ETH", "SOL", "XRP"]
+  min_days_to_expiry: 0
+  max_days_to_expiry: 0.1
+  min_volume: 0
+  min_liquidity: 100
+  fee_type: "crypto_fees"
+
+strategy:
+  delta_threshold_pct: 0.05  # минимальная |дельта| для ставки
+  max_entry_price: 0.48      # PM yes/no ask должен быть ниже этого порога
+  min_orderbook_usd: 5.0     # минимальная ликвидность в стакане для входа
+
+chainlink:
+  rpc_urls:
+    - "https://polygon-bor-rpc.publicnode.com"
+    - "https://1rpc.io/matic"
+    - "https://polygon-rpc.com"
+    - "https://rpc.ankr.com/polygon"
+  poll_interval_seconds: 2
+
+binance:
+  symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+
+polymarket:
+  paper: true               # бумажные ставки на Polymarket
+  real: true                # реальные ставки на Polymarket
+  gamma_base_url: "https://gamma-api.polymarket.com"
+  clob_base_url: "https://clob.polymarket.com"
+  clob_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+  page_size: 500
+  request_delay_ms: 100
+
+kalshi:
+  paper: false              # бумажные ставки на Kalshi (выключено)
+  real: false               # реальные ставки на Kalshi (не реализовано)
+  base_url: "https://api.elections.kalshi.com/trade-api/v2"
+  page_size: 200
+  max_pages: 10
+  request_timeout_seconds: 20
+  series_tickers:
+    - "KXBTC15M"
+    - "KXETH15M"
+    - "KXSOL15M"
+    - "KXXRP15M"
+
+db:
+  path: "data/oracle_arb_bot.db"
+
+telegram:
+  enabled: true

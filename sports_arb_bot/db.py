@@ -306,16 +306,81 @@ class SportsArbDB:
     def get_total_real_pnl(self) -> float:
         """Суммарный P&L по закрытым реальным позициям (отрицательный = потери)."""
         row = self.conn.execute(
-            "SELECT SUM(pnl) AS total FROM positions WHERE status='resolved' AND is_paper=0"
+            "SELECT SUM(pnl) AS total FROM positions "
+            "WHERE status IN ('resolved','cancelled') AND is_paper=0"
         ).fetchone()
         return float(row["total"] or 0.0)
 
     def get_paper_pnl(self) -> float:
         """Суммарный P&L по закрытым paper позициям."""
         row = self.conn.execute(
-            "SELECT SUM(pnl) AS total FROM positions WHERE status='resolved' AND (is_paper=1 OR is_paper IS NULL)"
+            "SELECT SUM(pnl) AS total FROM positions "
+            "WHERE status IN ('resolved','cancelled') AND (is_paper=1 OR is_paper IS NULL)"
         ).fetchone()
         return float(row["total"] or 0.0)
+
+    def resolve_cancelled_position(
+        self,
+        pos_id: str,
+        pm_result: str,   # "n/a" или имя победителя (PM зарезолвился нормально)
+        ka_result: str,   # "void" | "yes" | "no"
+    ) -> float:
+        """Рассчитывает P&L при отмене/void рынков.
+        PM N/A → 50¢/токен. Kalshi void → полный возврат стоимости.
+        """
+        pos = self.conn.execute(
+            "SELECT shares, leg_pm_player, leg_pm_price, leg_ka_price, "
+            "total_cost, is_paper FROM positions WHERE id = ?",
+            (pos_id,),
+        ).fetchone()
+        if pos is None:
+            return 0.0
+
+        shares = int(pos["shares"])
+        leg_pm_price = float(pos["leg_pm_price"])
+        leg_ka_price = float(pos["leg_ka_price"])
+        leg_pm_player = pos["leg_pm_player"]
+        total_cost = float(pos["total_cost"])
+        is_paper = bool(pos["is_paper"] if pos["is_paper"] is not None else 1)
+
+        # PM payout
+        if pm_result == "n/a":
+            pm_payout = 0.50 * shares
+        else:
+            pm_payout = float(shares) if pm_result == leg_pm_player else 0.0
+
+        # Kalshi payout
+        if ka_result == "void":
+            ka_payout = leg_ka_price * shares  # полный возврат
+        else:
+            ka_payout = float(shares) if ka_result == "yes" else 0.0
+
+        total_return = pm_payout + ka_payout
+        pnl = total_return - total_cost
+
+        now = datetime.now(tz=timezone.utc).isoformat()
+        self.conn.execute(
+            """UPDATE positions SET
+                status = 'cancelled', resolved_at = ?, winner = 'cancelled',
+                pm_result = ?, ka_result = ?, pnl = ?
+            WHERE id = ?""",
+            (now, pm_result, ka_result, pnl, pos_id),
+        )
+        if is_paper:
+            self.conn.execute(
+                "UPDATE virtual_balance SET "
+                "current_balance = current_balance + ?, "
+                "total_won = total_won + ?, "
+                "updated_at = ? WHERE id = 1",
+                (total_return, total_return, now),
+            )
+            if pnl < 0:
+                self.conn.execute(
+                    "UPDATE virtual_balance SET total_lost = total_lost + ?, updated_at = ? WHERE id = 1",
+                    (abs(pnl), now),
+                )
+        self._commit()
+        return pnl
 
     def audit(self, event_type: str, position_id: Optional[str], details: dict) -> None:
         self.conn.execute(

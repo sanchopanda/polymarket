@@ -29,6 +29,8 @@ GAMMA_URL = "https://gamma-api.polymarket.com"
 CHAIN_ID = 137
 USDC_E = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
+NEG_RISK_WCOL = "0x3A3BD7bb9528E159577F7C2e685CC81A765002E2"
 POLYGON_RPCS = [
     "https://polygon-bor-rpc.publicnode.com",
     "https://1rpc.io/matic",
@@ -55,6 +57,50 @@ ERC20_BALANCE_ABI = [
         "stateMutability": "view",
         "type": "function",
     }
+]
+NEG_RISK_REDEEM_ABI = [
+    {
+        "inputs": [
+            {"name": "_conditionId", "type": "bytes32"},
+            {"name": "_amounts", "type": "uint256[]"},
+        ],
+        "name": "redeemPositions",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+CTF_ERC1155_ABI = [
+    {
+        "inputs": [
+            {"name": "account", "type": "address"},
+            {"name": "id", "type": "uint256"},
+        ],
+        "name": "balanceOf",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"name": "account", "type": "address"},
+            {"name": "operator", "type": "address"},
+        ],
+        "name": "isApprovedForAll",
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"name": "operator", "type": "address"},
+            {"name": "approved", "type": "bool"},
+        ],
+        "name": "setApprovalForAll",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
 ]
 
 # ── Dataclass-ы результатов ─────────────────────────────────────────────
@@ -86,6 +132,14 @@ class RedeemResult:
 
 
 # ── PolymarketTrader ────────────────────────────────────────────────────
+
+
+def _ctf_position_id(collateral: str, condition_id: bytes, index_set: int) -> int:
+    """Compute CTF ERC1155 token ID: keccak(address ++ keccak(conditionId ++ indexSet))."""
+    collection_id = Web3.keccak(condition_id + index_set.to_bytes(32, "big"))
+    return int.from_bytes(
+        Web3.keccak(bytes.fromhex(collateral.replace("0x", "")) + collection_id), "big"
+    )
 
 
 def _polymarket_fee(shares: float, price: float) -> float:
@@ -283,21 +337,26 @@ class PolymarketTrader:
 
         return status, order_id, fill_price, shares_matched, shares_requested, fee
 
-    def redeem(self, market_id: str, pending_tx_hash: str = "") -> RedeemResult:
-        try:
-            data = httpx.get(f"{GAMMA_URL}/markets/{market_id}", timeout=10).json()
-            condition_id = data.get("conditionId", "")
-            neg_risk = data.get("negRisk", False)
-        except Exception as e:
-            return RedeemResult(success=False, error=str(e))
+    def redeem(self, market_id: str, pending_tx_hash: str = "",
+               condition_id: str | None = None, neg_risk: bool | None = None) -> RedeemResult:
+        if condition_id and neg_risk is not None:
+            pass  # caller already provided market data, skip Gamma
+        else:
+            try:
+                data = httpx.get(f"{GAMMA_URL}/markets/{market_id}", timeout=10).json()
+                condition_id = data.get("conditionId", "")
+                neg_risk = data.get("negRisk", False)
+            except Exception as e:
+                return RedeemResult(success=False, error=str(e))
 
         if not condition_id:
             return RedeemResult(success=False, error="conditionId не найден")
-        if neg_risk:
-            return RedeemResult(success=False, error="neg-risk market")
 
         condition_bytes = bytes.fromhex(condition_id.replace("0x", ""))
         addr_cs = Web3.to_checksum_address(self._address)
+
+        if neg_risk:
+            return self._redeem_neg_risk(condition_bytes, addr_cs)
 
         for rpc in POLYGON_RPCS:
             try:
@@ -323,8 +382,11 @@ class PolymarketTrader:
                     t0 = time.time()
                 else:
                     ctf = w3.eth.contract(address=Web3.to_checksum_address(CTF_ADDRESS), abi=REDEEM_ABI)
-                    gas_price = max(w3.eth.gas_price, w3.to_wei(50, "gwei"))
-                    nonce = w3.eth.get_transaction_count(addr_cs, "latest")
+                    # Используем pending nonce чтобы не конфликтовать с застрявшими TX
+                    nonce = w3.eth.get_transaction_count(addr_cs, "pending")
+                    network_gas = w3.eth.gas_price
+                    # Для замены застрявших TX используем 2x от текущей цены сети
+                    gas_price = max(network_gas * 2, w3.to_wei(50, "gwei"))
                     t0 = time.time()
                     tx = ctf.functions.redeemPositions(
                         Web3.to_checksum_address(USDC_E), bytes(32), condition_bytes, [1, 2]
@@ -333,12 +395,29 @@ class PolymarketTrader:
                         "gasPrice": gas_price, "gas": 200000, "chainId": CHAIN_ID,
                     })
                     signed = w3.eth.account.sign_transaction(tx, self._pk)
-                    tx_hash_bytes = w3.eth.send_raw_transaction(signed.raw_transaction)
+                    try:
+                        tx_hash_bytes = w3.eth.send_raw_transaction(signed.raw_transaction)
+                    except Exception as send_err:
+                        err_msg = str(send_err)
+                        if "underpriced" in err_msg or "already known" in err_msg:
+                            # Застрявшая TX — пробуем с ещё более высоким gas
+                            nonce = w3.eth.get_transaction_count(addr_cs, "latest")
+                            gas_price = max(network_gas * 3, w3.to_wei(100, "gwei"))
+                            print(f"[pm-redeem] retry nonce={nonce} gas={gas_price/1e9:.0f} gwei")
+                            tx = ctf.functions.redeemPositions(
+                                Web3.to_checksum_address(USDC_E), bytes(32), condition_bytes, [1, 2]
+                            ).build_transaction({
+                                "from": addr_cs, "nonce": nonce,
+                                "gasPrice": gas_price, "gas": 200000, "chainId": CHAIN_ID,
+                            })
+                            signed = w3.eth.account.sign_transaction(tx, self._pk)
+                            tx_hash_bytes = w3.eth.send_raw_transaction(signed.raw_transaction)
+                        else:
+                            raise
                     tx_hex = "0x" + tx_hash_bytes.hex()
                     try:
                         receipt = w3.eth.wait_for_transaction_receipt(tx_hash_bytes, timeout=90)
                     except Exception:
-                        # TX ушла но не замайнена за 90с — вернём pending
                         elapsed = (time.time() - t0) * 1000
                         print(f"[pm-redeem] TX в pending ({elapsed:.0f}ms), tx={tx_hex[:16]}...")
                         return RedeemResult(success=False, pending=True, tx_hash=tx_hex)
@@ -361,6 +440,112 @@ class PolymarketTrader:
                 )
             except Exception as e:
                 print(f"[pm-redeem] RPC {rpc}: {e}")
+        return RedeemResult(success=False, error="все RPC недоступны")
+
+    def _redeem_neg_risk(self, condition_bytes: bytes, addr_cs: str) -> RedeemResult:
+        """Redeem positions on a neg-risk market via NegRiskAdapter."""
+        adapter_cs = Web3.to_checksum_address(NEG_RISK_ADAPTER)
+        ctf_cs = Web3.to_checksum_address(CTF_ADDRESS)
+
+        for rpc in POLYGON_RPCS:
+            try:
+                w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 15}))
+                usdc_contract = w3.eth.contract(
+                    address=Web3.to_checksum_address(USDC_E), abi=ERC20_BALANCE_ABI
+                )
+                ctf = w3.eth.contract(address=ctf_cs, abi=CTF_ERC1155_ABI)
+
+                # Query YES/NO token balances
+                yes_id = _ctf_position_id(NEG_RISK_WCOL, condition_bytes, 1)
+                no_id = _ctf_position_id(NEG_RISK_WCOL, condition_bytes, 2)
+                yes_bal = ctf.functions.balanceOf(addr_cs, yes_id).call()
+                no_bal = ctf.functions.balanceOf(addr_cs, no_id).call()
+
+                if yes_bal == 0 and no_bal == 0:
+                    return RedeemResult(success=False, error="no tokens to redeem (yes=0, no=0)")
+
+                print(f"[pm-redeem-neg] YES={yes_bal / 1e6:.2f} NO={no_bal / 1e6:.2f}")
+
+                balance_before = usdc_contract.functions.balanceOf(addr_cs).call() / 1e6
+
+                # Ensure ERC1155 approval for NegRiskAdapter
+                approved = ctf.functions.isApprovedForAll(addr_cs, adapter_cs).call()
+                if not approved:
+                    print("[pm-redeem-neg] setting ERC1155 approval for NegRiskAdapter...")
+                    nonce = w3.eth.get_transaction_count(addr_cs, "pending")
+                    gas_price = max(w3.eth.gas_price * 2, w3.to_wei(50, "gwei"))
+                    approve_tx = ctf.functions.setApprovalForAll(
+                        adapter_cs, True
+                    ).build_transaction({
+                        "from": addr_cs, "nonce": nonce,
+                        "gasPrice": gas_price, "gas": 60000, "chainId": CHAIN_ID,
+                    })
+                    signed = w3.eth.account.sign_transaction(approve_tx, self._pk)
+                    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+                    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+                    if receipt.status != 1:
+                        return RedeemResult(success=False, error="approval tx failed")
+                    print("[pm-redeem-neg] approval OK")
+
+                # Build and send redeem TX
+                adapter = w3.eth.contract(address=adapter_cs, abi=NEG_RISK_REDEEM_ABI)
+                nonce = w3.eth.get_transaction_count(addr_cs, "pending")
+                network_gas = w3.eth.gas_price
+                gas_price = max(network_gas * 2, w3.to_wei(50, "gwei"))
+                t0 = time.time()
+
+                tx = adapter.functions.redeemPositions(
+                    condition_bytes, [yes_bal, no_bal]
+                ).build_transaction({
+                    "from": addr_cs, "nonce": nonce,
+                    "gasPrice": gas_price, "gas": 300000, "chainId": CHAIN_ID,
+                })
+                signed = w3.eth.account.sign_transaction(tx, self._pk)
+                try:
+                    tx_hash_bytes = w3.eth.send_raw_transaction(signed.raw_transaction)
+                except Exception as send_err:
+                    err_msg = str(send_err)
+                    if "underpriced" in err_msg or "already known" in err_msg:
+                        nonce = w3.eth.get_transaction_count(addr_cs, "latest")
+                        gas_price = max(network_gas * 3, w3.to_wei(100, "gwei"))
+                        print(f"[pm-redeem-neg] retry nonce={nonce} gas={gas_price / 1e9:.0f} gwei")
+                        tx = adapter.functions.redeemPositions(
+                            condition_bytes, [yes_bal, no_bal]
+                        ).build_transaction({
+                            "from": addr_cs, "nonce": nonce,
+                            "gasPrice": gas_price, "gas": 300000, "chainId": CHAIN_ID,
+                        })
+                        signed = w3.eth.account.sign_transaction(tx, self._pk)
+                        tx_hash_bytes = w3.eth.send_raw_transaction(signed.raw_transaction)
+                    else:
+                        raise
+
+                tx_hex = "0x" + tx_hash_bytes.hex()
+                try:
+                    receipt = w3.eth.wait_for_transaction_receipt(tx_hash_bytes, timeout=90)
+                except Exception:
+                    elapsed = (time.time() - t0) * 1000
+                    print(f"[pm-redeem-neg] TX в pending ({elapsed:.0f}ms), tx={tx_hex[:16]}...")
+                    return RedeemResult(success=False, pending=True, tx_hash=tx_hex)
+
+                total_ms = (time.time() - t0) * 1000
+                gas_cost = receipt.gasUsed * gas_price / 1e18
+                success = receipt.status == 1
+                balance_after = usdc_contract.functions.balanceOf(addr_cs).call() / 1e6
+                payout = round(balance_after - balance_before, 6)
+
+                print(f"[pm-redeem-neg] {'OK' if success else 'FAIL'} | {total_ms:.0f}ms | gas={receipt.gasUsed} ({gas_cost:.6f} POL) | payout=${payout:.2f}")
+                return RedeemResult(
+                    success=success,
+                    tx_hash=tx_hex,
+                    total_ms=round(total_ms, 1),
+                    gas_used=receipt.gasUsed,
+                    gas_price_gwei=round(gas_price / 1e9, 1),
+                    gas_cost_pol=round(gas_cost, 6),
+                    payout_usdc=payout,
+                )
+            except Exception as e:
+                print(f"[pm-redeem-neg] RPC {rpc}: {e}")
         return RedeemResult(success=False, error="все RPC недоступны")
 
 
