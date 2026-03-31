@@ -96,18 +96,20 @@ class OracleArbBot:
 
         # Real trading (создаём до Telegram чтобы передать get_balance_info)
         rcfg = config.get("real_trading", {})
+        self._real = None
         if rcfg.get("enabled"):
-            self._real: Optional[OracleRealTrader] = OracleRealTrader(
-                db=db,
-                stake_usd=rcfg.get("stake_usd", 1.0),
-                initial_deposit=rcfg.get("initial_deposit", 8.0),
-                floor_buffer=rcfg.get("floor_buffer", 8.0),
-                tg=None,  # будет установлен ниже
-                price_10s_fn=self._record_price_after_delay,
-                max_price=rcfg.get("max_price", 0.48),
-            )
-        else:
-            self._real = None
+            try:
+                self._real = OracleRealTrader(
+                    db=db,
+                    stake_usd=rcfg.get("stake_usd", 1.0),
+                    initial_deposit=rcfg.get("initial_deposit", 8.0),
+                    floor_buffer=rcfg.get("floor_buffer", 8.0),
+                    tg=None,  # будет установлен ниже
+                    price_10s_fn=self._record_price_after_delay,
+                    max_price=rcfg.get("max_price", 0.48),
+                )
+            except Exception as exc:
+                print(f"[oracle] real trading disabled: init failed: {exc}")
 
         # Telegram
         def _status_fn() -> str:
