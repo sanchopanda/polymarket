@@ -204,6 +204,11 @@ class OracleRealTrader:
                 print(f"[real] skip {market.symbol} {signal.side}: {reason}")
                 return
 
+            if market_price > best_ask + 0.03:
+                print(f"[real] skip {market.symbol} {signal.side}: "
+                      f"fill price {market_price:.3f} > best_ask {best_ask:.3f} + 0.03")
+                return
+
             if market_price < 0.50 and abs(delta_pct) < cheap_delta:
                 print(f"[real] skip cheap {market.symbol} {signal.side}: "
                       f"price {market_price:.3f} < 0.50, delta {abs(delta_pct):.4f}% < {cheap_delta}%")
