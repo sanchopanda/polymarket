@@ -172,16 +172,19 @@ class OracleRealTrader:
         requested_price = market.yes_ask if signal.side == "yes" else market.no_ask
 
         import time as _time
+        from decimal import Decimal, ROUND_DOWN, ROUND_UP
         try:
             # Лимитный ордер: ставим по WS-цене + до 3 центов слиппейджа
-            limit_price = round(min(requested_price + 0.03, self._max_price), 2)
+            limit_price = float(Decimal(str(min(requested_price + 0.03, self._max_price)))
+                                .quantize(Decimal("0.01"), rounding=ROUND_UP))
 
             if limit_price < 0.50 and abs(delta_pct) < cheap_delta:
                 print(f"[real] skip cheap {market.symbol} {signal.side}: "
                       f"price {limit_price:.3f} < 0.50, delta {abs(delta_pct):.4f}% < {cheap_delta}%")
                 return
 
-            size = round(self._stake / limit_price, 2)
+            size = float(Decimal(str(self._stake / limit_price))
+                         .quantize(Decimal("0.01"), rounding=ROUND_DOWN))
             if size <= 0:
                 return
 
