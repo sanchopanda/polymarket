@@ -337,6 +337,100 @@ Research notes:
 - `run` / `live`
   - непрерывный цикл со статусом и live-решениями
 
+## `oracle_arb_bot`
+
+Oracle-based momentum bot для short-term crypto markets на Polymarket.
+Отслеживает цены через Binance aggTrade WebSocket, ищет 5-секундные импульсы
+и ставит в направлении движения на 5m/15m Up or Down рынки.
+
+Запуск:
+
+```bash
+python -m oracle_arb_bot
+```
+
+Конфиг: `oracle_arb_bot/config.yaml`.
+База: `data/oracle_arb_bot.db`.
+
+### Стратегия: Binance Momentum
+
+1. Binance aggTrade WebSocket → агрегация в 5-секундные бакеты
+2. Сравнение close[N] vs close[N-1] → delta_pct
+3. Если |delta_pct| >= порога → сигнал YES (рост) или NO (падение)
+4. Ставка на Polymarket в направлении сигнала
+
+### Адаптивный порог дельты
+
+Порог автоматически повышается при частых сигналах (choppy market):
+
+| Сигналов за 10 мин (n) | Порог дельты | Режим рынка |
+|---|---|---|
+| n ≤ 2 | 0.05% | Спокойный |
+| n ≤ 5 | 0.08% | Умеренный |
+| n > 5 | 0.12% | Choppy |
+
+Считаются сигналы ≥ 0.05% за скользящее окно (по умолчанию 600 секунд) по каждому символу отдельно.
+
+Результаты бэктеста:
+- Без адаптива: WR 70%, на choppy данных 50.2%
+- С адаптивом: WR 74.2%, на choppy данных 60.6%
+
+### Real Trading
+
+Депозит с trailing floor:
+
+```
+delta = max(initial_deposit, peak * floor_pct)
+floor = max(0, peak - delta)
+```
+
+При депозите $6 и пике $6: floor = $0 (можно потерять всё).
+При пике $100: delta = max(6, 20) = $20, floor = $80.
+
+Ордера: FOK market order через CLOB API, $1/ставка.
+
+### Ключевые параметры конфига
+
+```yaml
+strategy:
+  mode: "binance_momentum"
+  momentum_delta_pct: 0.05        # базовый порог
+  momentum_min_minute: 1          # не ставить на 1-й минуте рынка
+  momentum_adaptive: true         # адаптивный порог
+  momentum_adaptive_window: 600   # окно подсчёта (сек)
+  momentum_adaptive_rules:        # [max_n, threshold]
+    - [2, 0.05]
+    - [5, 0.08]
+    - [999, 0.12]
+  min_orderbook_usd: 5.0          # мин. ликвидность в стакане
+  depth_slippage_cents: 4.0       # глубина стакана до best_ask + Nc
+
+real_trading:
+  enabled: true
+  stake_usd: 1.0
+  initial_deposit: 6.0
+  floor_pct: 0.20
+  max_price: 0.49
+
+trading:
+  stake_usd: 5.0                  # paper bet size
+  max_price: 0.48
+```
+
+### Research / Backtest
+
+```bash
+# Загрузить кэш рынков
+python3 -m research_bot.fetch_markets --limit 5000
+
+# Бэктест Binance momentum
+python3 -m research_bot.backtest_binance_momentum
+python3 -m research_bot.backtest_binance_momentum --adaptive
+python3 -m research_bot.backtest_binance_momentum --adaptive --adaptive-rules "2:0.05,5:0.08,999:0.12"
+python3 -m research_bot.backtest_binance_momentum --delta 0.10
+python3 -m research_bot.backtest_binance_momentum --symbols BTC,ETH --intervals 5
+```
+
 ## `momentum_bot`
 
 Paper momentum bot для short-term crypto markets между `Polymarket` и `Kalshi`.

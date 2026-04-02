@@ -104,6 +104,7 @@ class OracleBet:
     depth_usd: Optional[float] = None       # orderbook liquidity available at max_price
     volume: Optional[float] = None          # market volume at bet time
     binance_price_at_close: Optional[float] = None  # Binance price at resolution time
+    strategy: str = "crossing"               # "crossing" | "cl_contradiction"
     status: str = "open"
     resolved_at: Optional[datetime] = None
     winning_side: Optional[str] = None

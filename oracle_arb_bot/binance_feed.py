@@ -28,7 +28,7 @@ class BinanceFeed:
     def __init__(
         self,
         symbols: list[str],             # ["BTCUSDT", "ETHUSDT", ...]
-        on_price: Callable[[str, float, int], None],
+        on_price: Optional[Callable[[str, float, int], None]],
     ) -> None:
         self._binance_symbols = symbols
         self._on_price = on_price
@@ -99,4 +99,5 @@ class BinanceFeed:
         with self._lock:
             self._prices[symbol] = price
 
-        self._on_price(symbol, price, ts_ms)
+        if self._on_price is not None:
+            self._on_price(symbol, price, ts_ms)

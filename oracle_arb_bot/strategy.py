@@ -60,3 +60,48 @@ def evaluate_oracle_signal(
         return SignalResult(False, "", delta_pct, position_pct, market_minute, "price_not_stale")
 
     return SignalResult(False, "", delta_pct, position_pct, market_minute, "threshold_not_met")
+
+
+def evaluate_cl_contradiction_signal(
+    market: OracleMarket,
+    cl_price: float,
+    cl_prev_price: Optional[float],
+    binance_price: Optional[float],
+    now: datetime,
+    last_bet_side: Optional[str] = None,
+    min_cl_delta_pct: float = 0.0,
+) -> SignalResult:
+    """
+    Сигнал "Binance противоречит CL тику":
+      - CL тикнул вниз (cl_price < cl_prev_price) И Binance > CL → покупаем NO
+      - CL тикнул вверх (cl_price > cl_prev_price) И Binance < CL → покупаем YES
+
+    min_cl_delta_pct: минимальный |Δ%| CL тика (фильтр шумовых тиков).
+    Нет ограничения по max_entry_price — проверка ликвидности снаружи.
+    """
+    market_minute = compute_market_minute(now, market.market_start)
+    position_pct = compute_position_pct(now, market.market_start, market.interval_minutes)
+
+    if cl_prev_price is None:
+        return SignalResult(False, "", 0.0, position_pct, market_minute, "no_prev_price")
+    if binance_price is None:
+        return SignalResult(False, "", 0.0, position_pct, market_minute, "no_binance_price")
+
+    cl_delta_pct = (cl_price - cl_prev_price) / cl_prev_price * 100
+
+    if min_cl_delta_pct > 0 and abs(cl_delta_pct) < min_cl_delta_pct:
+        return SignalResult(False, "", cl_delta_pct, position_pct, market_minute, "delta_too_small")
+
+    # CL тикнул вниз, Binance выше CL → покупаем NO
+    if cl_price < cl_prev_price and binance_price > cl_price:
+        if last_bet_side == "no":
+            return SignalResult(False, "no", cl_delta_pct, position_pct, market_minute, "same_side")
+        return SignalResult(True, "no", cl_delta_pct, position_pct, market_minute, "cl_contradiction_no")
+
+    # CL тикнул вверх, Binance ниже CL → покупаем YES
+    if cl_price > cl_prev_price and binance_price < cl_price:
+        if last_bet_side == "yes":
+            return SignalResult(False, "yes", cl_delta_pct, position_pct, market_minute, "same_side")
+        return SignalResult(True, "yes", cl_delta_pct, position_pct, market_minute, "cl_contradiction_yes")
+
+    return SignalResult(False, "", cl_delta_pct, position_pct, market_minute, "no_contradiction")

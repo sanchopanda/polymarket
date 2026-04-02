@@ -112,7 +112,7 @@ class OracleDB:
                 resolved_at         TEXT,
                 winning_side        TEXT,
                 pnl                 REAL,
-                UNIQUE (market_id, side)
+                pm_price_10s        REAL
             );
 
             CREATE TABLE IF NOT EXISTS audit_log (
@@ -138,6 +138,7 @@ class OracleDB:
             "ALTER TABLE bets ADD COLUMN depth_usd REAL",
             "ALTER TABLE bets ADD COLUMN volume REAL",
             "ALTER TABLE bets ADD COLUMN binance_price_at_close REAL",
+            "ALTER TABLE bets ADD COLUMN strategy TEXT DEFAULT 'crossing'",
         ]:
             try:
                 self.conn.execute(sql)
@@ -181,7 +182,8 @@ class OracleDB:
                     opposite_ask            REAL,
                     depth_usd               REAL,
                     volume                  REAL,
-                    binance_price_at_close  REAL
+                    binance_price_at_close  REAL,
+                    strategy                TEXT    DEFAULT 'crossing'
                 );
                 INSERT INTO bets_new SELECT
                     id, market_id, symbol, interval_minutes,
@@ -192,10 +194,48 @@ class OracleDB:
                     delta_pct, pm_open_price, pm_close_price,
                     status, resolved_at, winning_side, pnl,
                     pm_price_10s, crossing_seq, 'polymarket',
-                    NULL, NULL, NULL, NULL, NULL
+                    NULL, NULL, NULL, NULL, NULL, 'crossing'
                 FROM bets;
                 DROP TABLE bets;
                 ALTER TABLE bets_new RENAME TO bets;
+            """)
+
+        # Снимаем UNIQUE(market_id, side) с real_bets
+        row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='real_bets'"
+        ).fetchone()
+        if row and "UNIQUE" in (row[0] or ""):
+            self.conn.executescript("""
+                CREATE TABLE IF NOT EXISTS real_bets_new (
+                    id                  TEXT    PRIMARY KEY,
+                    market_id           TEXT    NOT NULL,
+                    symbol              TEXT    NOT NULL,
+                    interval_minutes    INTEGER NOT NULL,
+                    market_start        TEXT    NOT NULL,
+                    market_end          TEXT    NOT NULL,
+                    placed_at           TEXT    NOT NULL,
+                    market_minute       INTEGER NOT NULL,
+                    side                TEXT    NOT NULL,
+                    requested_price     REAL    NOT NULL,
+                    fill_price          REAL    NOT NULL,
+                    shares_requested    REAL    NOT NULL,
+                    shares_filled       REAL    NOT NULL,
+                    stake_usd           REAL    NOT NULL,
+                    order_id            TEXT,
+                    order_status        TEXT    NOT NULL,
+                    delta_pct           REAL    NOT NULL,
+                    pm_open_price       REAL    NOT NULL,
+                    binance_price_at_bet REAL   NOT NULL,
+                    pm_close_price      REAL,
+                    status              TEXT    NOT NULL DEFAULT 'open',
+                    resolved_at         TEXT,
+                    winning_side        TEXT,
+                    pnl                 REAL,
+                    pm_price_10s        REAL
+                );
+                INSERT INTO real_bets_new SELECT * FROM real_bets;
+                DROP TABLE real_bets;
+                ALTER TABLE real_bets_new RENAME TO real_bets;
             """)
 
     # ── Write ─────────────────────────────────────────────────────────────
@@ -237,9 +277,10 @@ class OracleDB:
                 binance_price_at_start, binance_price_at_bet, delta_pct, pm_open_price,
                 pm_close_price, status, resolved_at, winning_side, pnl,
                 crossing_seq, venue,
-                seconds_to_close, opposite_ask, depth_usd, volume
+                seconds_to_close, opposite_ask, depth_usd, volume,
+                strategy
             ) VALUES (
-                ?,?,?,?,  ?,?,?,  ?,?,  ?,?,?,?,  ?,?,?,?,  ?,?,?,?,?,  ?,?,  ?,?,?,?
+                ?,?,?,?,  ?,?,?,  ?,?,  ?,?,?,?,  ?,?,?,?,  ?,?,?,?,?,  ?,?,  ?,?,?,?,  ?
             )
             """,
             (
@@ -253,6 +294,7 @@ class OracleDB:
                 bet.winning_side, bet.pnl,
                 crossing_seq, bet.venue,
                 bet.seconds_to_close, bet.opposite_ask, bet.depth_usd, bet.volume,
+                bet.strategy,
             ),
         )
         self.conn.commit()
@@ -297,6 +339,13 @@ class OracleDB:
         row = self.conn.execute(
             "SELECT 1 FROM bets WHERE market_id=? AND side=?",
             (market_id, side),
+        ).fetchone()
+        return row is not None
+
+    def has_any_bet(self, market_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM bets WHERE market_id=?",
+            (market_id,),
         ).fetchone()
         return row is not None
 
@@ -392,6 +441,11 @@ class OracleDB:
             (round(balance, 6), round(peak, 6), _iso(datetime.utcnow())),
         )
         self.conn.commit()
+
+    def set_real_balance(self, balance: float) -> None:
+        """Синхронизирует баланс с реальным значением, обновляет peak если нужно."""
+        _, peak = self.get_real_deposit()
+        self._update_real_deposit(balance, max(peak, balance))
 
     def deduct_real_deposit(self, amount: float) -> None:
         bal, peak = self.get_real_deposit()
@@ -543,6 +597,7 @@ class OracleDB:
             depth_usd=row["depth_usd"] if "depth_usd" in keys else None,
             volume=row["volume"] if "volume" in keys else None,
             binance_price_at_close=row["binance_price_at_close"] if "binance_price_at_close" in keys else None,
+            strategy=row["strategy"] if "strategy" in keys else "crossing",
             status=row["status"],
             resolved_at=_dt(row["resolved_at"]),
             winning_side=row["winning_side"],

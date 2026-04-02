@@ -1,0 +1,1 @@
+ts_utc,symbol,round_id,price,chain_updated_at,poll_wall_ts,ws_wall_ts,poll_lag_s,ws_lag_s,delta_ms,faster

@@ -25,7 +25,8 @@ class OracleRealTrader:
 
     Депозит:
       - Стартует с initial_deposit (по умолчанию $8)
-      - floor = max(0, peak - floor_buffer)  — trailing floor
+      - delta = max(initial_deposit, peak * floor_pct)
+      - floor = max(0, peak - delta)  — trailing floor
       - Ставка $1; можно ставить пока (balance - stake) >= floor
       - При WIN: balance += shares_filled (stake уже был вычтен при ставке)
       - При LOSS: ничего (stake уже вычтен)
@@ -35,15 +36,16 @@ class OracleRealTrader:
         self,
         db: OracleDB,
         stake_usd: float = 1.0,
-        initial_deposit: float = 8.0,
-        floor_buffer: float = 8.0,
+        initial_deposit: float = 6.0,
+        floor_pct: float = 0.20,
         tg: "Optional[OracleTelegramNotifier]" = None,
         price_10s_fn=None,
         max_price: float = 0.48,
     ) -> None:
         self._db = db
         self._stake = stake_usd
-        self._floor_buffer = floor_buffer
+        self._initial_deposit = initial_deposit
+        self._floor_pct = floor_pct
         self._tg = tg
         self._price_10s_fn = price_10s_fn
         self._max_price = max_price
@@ -54,7 +56,7 @@ class OracleRealTrader:
         self._refresh_clob_balance()
         db.init_real_deposit(initial_deposit)
         bal, peak = db.get_real_deposit()
-        floor = max(0.0, peak - floor_buffer)
+        floor = self._calc_floor(peak)
         print(
             f"[real] депозит ${bal:.2f} | peak ${peak:.2f} | floor ${floor:.2f} | "
             f"доступно ${max(0.0, bal - floor):.2f}"
@@ -62,15 +64,42 @@ class OracleRealTrader:
 
     # ── Checks ────────────────────────────────────────────────────────────
 
+    def _calc_floor(self, peak: float) -> float:
+        """Флор = peak - delta, где delta = max(initial_deposit, peak * floor_pct).
+        При депозите 6 и пике 6: delta=6, floor=0 (можем потерять всё).
+        При пике 12: delta=6, floor=6. При пике 100: delta=20, floor=80."""
+        delta = max(self._initial_deposit, peak * self._floor_pct)
+        return max(0.0, peak - delta)
+
     def can_bet(self) -> bool:
         bal, peak = self._db.get_real_deposit()
-        floor = max(0.0, peak - self._floor_buffer)
+        floor = self._calc_floor(peak)
         return bal >= self._stake and (bal - self._stake) >= floor
 
     def deposit_info(self) -> str:
         bal, peak = self._db.get_real_deposit()
-        floor = max(0.0, peak - self._floor_buffer)
-        return f"${bal:.2f} (floor ${floor:.2f})"
+        floor = self._calc_floor(peak)
+        avail = max(0.0, bal - floor)
+        return f"депозит ${bal:.2f} (peak ${peak:.2f} | floor ${floor:.2f} | доступно ${avail:.2f})"
+
+    def sync_balance(self) -> Optional[float]:
+        """Запрашивает реальный CLOB баланс для логирования (не перезаписывает виртуальный депозит).
+        Возвращает реальный баланс или None при ошибке."""
+        try:
+            resp = self._pm._client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
+            real_bal = float(resp.get("balance", 0)) / 1e6
+            db_bal, peak = self._db.get_real_deposit()
+            floor = self._calc_floor(peak)
+            print(
+                f"[real] CLOB ${real_bal:.2f} | депозит ${db_bal:.2f} | peak ${peak:.2f} | "
+                f"floor ${floor:.2f} | доступно ${max(0.0, db_bal - floor):.2f}"
+            )
+            return real_bal
+        except Exception as e:
+            print(f"[real] sync_balance failed: {e}")
+            return None
 
     # ── Place ─────────────────────────────────────────────────────────────
 
@@ -111,6 +140,8 @@ class OracleRealTrader:
         signal: SignalResult,
         current_price: float,
         now: datetime,
+        delta_pct: float = 0.0,
+        cheap_delta: float = 0.10,
     ) -> None:
         key = (market.market_id, signal.side)
         with self._attempted_lock:
@@ -123,7 +154,7 @@ class OracleRealTrader:
 
         if not self.can_bet():
             bal, peak = self._db.get_real_deposit()
-            floor = max(0.0, peak - self._floor_buffer)
+            floor = self._calc_floor(peak)
             reason = f"депозит ${bal:.2f} floor ${floor:.2f}"
             print(f"[real] skip {market.symbol} {signal.side}: {reason}")
             if self._tg:
@@ -151,8 +182,11 @@ class OracleRealTrader:
             if market_price > self._max_price:
                 reason = f"market price {market_price:.3f} > max {self._max_price}"
                 print(f"[real] skip {market.symbol} {signal.side}: {reason}")
-                if self._tg:
-                    self._tg.send_bet_failed(market.symbol, signal.side, reason)
+                return
+
+            if market_price < 0.50 and abs(delta_pct) < cheap_delta:
+                print(f"[real] skip cheap {market.symbol} {signal.side}: "
+                      f"price {market_price:.3f} < 0.50, delta {abs(delta_pct):.4f}% < {cheap_delta}%")
                 return
 
             resp = self._pm._client.post_order(signed, orderType=OrderType.FOK)
