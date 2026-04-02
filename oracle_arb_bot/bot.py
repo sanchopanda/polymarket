@@ -76,6 +76,7 @@ class OracleArbBot:
         from research_bot.backtest_db import BacktestDB
         self._backtest_db = BacktestDB()
         self._1s_last: dict[str, int] = {}  # symbol → last written sec_ts
+        self._1s_close: dict[str, float] = {}  # symbol → last price in current second
 
         # Per-venue paper/real flags
         self._pm_paper: bool = config["polymarket"].get("paper", True)
@@ -249,11 +250,15 @@ class OracleArbBot:
     def _on_source_price(self, symbol: str, price: float, ts_ms: int) -> None:
         now = datetime.utcnow()
 
-        # ── запись 1s Binance цен ──
+        # ── запись 1s Binance цен (последний тик каждой секунды) ──
         sec_ts = ts_ms // 1000
-        if self._1s_last.get(symbol) != sec_ts:
+        prev = self._1s_last.get(symbol)
+        if prev != sec_ts:
+            # новая секунда — сохраняем close предыдущей
+            if prev is not None and symbol in self._1s_close:
+                self._backtest_db.write_1s(symbol, prev, self._1s_close[symbol])
             self._1s_last[symbol] = sec_ts
-            self._backtest_db.write_1s(symbol, sec_ts, price)
+        self._1s_close[symbol] = price
 
         if self._strategy_mode == "binance_momentum":
             self._on_momentum_price(symbol, price, ts_ms, now)
