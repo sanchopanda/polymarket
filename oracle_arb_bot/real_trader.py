@@ -8,7 +8,11 @@ from typing import Optional
 
 from typing import TYPE_CHECKING
 
-from py_clob_client.clob_types import MarketOrderArgs, OrderArgs, OrderType, BalanceAllowanceParams, AssetType
+from py_clob_client.clob_types import MarketOrderArgs, OrderArgs, OrderType, BalanceAllowanceParams, AssetType, RoundConfig
+from py_clob_client.order_builder.builder import ROUNDING_CONFIG
+
+# SDK баг: amount=4 для tick "0.01", но CLOB API требует ≤2 знака для maker BUY
+ROUNDING_CONFIG["0.01"] = RoundConfig(price=2, size=2, amount=2)
 
 from real_arb_bot.clients import PolymarketTrader
 
@@ -183,7 +187,8 @@ class OracleRealTrader:
                       f"price {limit_price:.3f} < 0.50, delta {abs(delta_pct):.4f}% < {cheap_delta}%")
                 return
 
-            size = float(int(self._stake / limit_price))
+            size = float(Decimal(str(self._stake / limit_price))
+                         .quantize(Decimal("0.01"), rounding=ROUND_DOWN))
             if size <= 0:
                 return
 
