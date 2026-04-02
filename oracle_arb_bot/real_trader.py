@@ -173,6 +173,26 @@ class OracleRealTrader:
 
         import time as _time
         try:
+            # Проверка глубины стакана: нужно >= 2x ставки в пределах +3 центов от best ask
+            book = self._pm._client.get_order_book(token_id)
+            if book and book.asks:
+                best_ask = float(book.asks[0].price)
+                price_cap = best_ask + 0.03
+                depth_usd = 0.0
+                for level in book.asks:
+                    lp = float(level.price)
+                    if lp > price_cap:
+                        break
+                    depth_usd += lp * float(level.size)
+                required = self._stake * 2
+                if depth_usd < required:
+                    print(f"[real] skip {market.symbol} {signal.side}: "
+                          f"depth ${depth_usd:.2f} < ${required:.2f} (2x stake, cap {best_ask:.2f}+3c)")
+                    return
+            else:
+                print(f"[real] skip {market.symbol} {signal.side}: empty orderbook")
+                return
+
             # Market order: CLOB сам рассчитает цену из стакана
             args = MarketOrderArgs(token_id=token_id, amount=self._stake, side="BUY")
             signed = self._pm._client.create_market_order(args)
