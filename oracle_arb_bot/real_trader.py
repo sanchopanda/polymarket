@@ -183,8 +183,7 @@ class OracleRealTrader:
                       f"price {limit_price:.3f} < 0.50, delta {abs(delta_pct):.4f}% < {cheap_delta}%")
                 return
 
-            size = float(Decimal(str(self._stake / limit_price))
-                         .quantize(Decimal("0.01"), rounding=ROUND_DOWN))
+            size = float(int(self._stake / limit_price))
             if size <= 0:
                 return
 
