@@ -92,8 +92,8 @@ class OracleDB:
                 market_id           TEXT    NOT NULL,
                 symbol              TEXT    NOT NULL,
                 interval_minutes    INTEGER NOT NULL,
-                market_start        TEXT    NOT NULL,
-                market_end          TEXT    NOT NULL,
+                market_start        TEXT,
+                market_end          TEXT,
                 placed_at           TEXT    NOT NULL,
                 market_minute       INTEGER NOT NULL,
                 side                TEXT    NOT NULL,
@@ -105,8 +105,8 @@ class OracleDB:
                 order_id            TEXT,
                 order_status        TEXT    NOT NULL,
                 delta_pct           REAL    NOT NULL,
-                pm_open_price       REAL    NOT NULL,
-                binance_price_at_bet REAL   NOT NULL,
+                pm_open_price       REAL,
+                binance_price_at_bet REAL,
                 pm_close_price      REAL,
                 status              TEXT    NOT NULL DEFAULT 'open',
                 resolved_at         TEXT,
@@ -236,6 +236,45 @@ class OracleDB:
                 INSERT INTO real_bets_new SELECT * FROM real_bets;
                 DROP TABLE real_bets;
                 ALTER TABLE real_bets_new RENAME TO real_bets;
+            """)
+
+        # Снимаем NOT NULL с market_start/market_end/pm_open_price/binance_price_at_bet
+        # (могут быть None после перезапуска бота)
+        row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='real_bets'"
+        ).fetchone()
+        if row and "market_start" in (row[0] or "") and "NOT NULL" in (row[0] or "").split("market_start")[1].split(",")[0]:
+            self.conn.executescript("""
+                CREATE TABLE IF NOT EXISTS real_bets_v3 (
+                    id                  TEXT    PRIMARY KEY,
+                    market_id           TEXT    NOT NULL,
+                    symbol              TEXT    NOT NULL,
+                    interval_minutes    INTEGER NOT NULL,
+                    market_start        TEXT,
+                    market_end          TEXT,
+                    placed_at           TEXT    NOT NULL,
+                    market_minute       INTEGER NOT NULL,
+                    side                TEXT    NOT NULL,
+                    requested_price     REAL    NOT NULL,
+                    fill_price          REAL    NOT NULL,
+                    shares_requested    REAL    NOT NULL,
+                    shares_filled       REAL    NOT NULL,
+                    stake_usd           REAL    NOT NULL,
+                    order_id            TEXT,
+                    order_status        TEXT    NOT NULL,
+                    delta_pct           REAL    NOT NULL,
+                    pm_open_price       REAL,
+                    binance_price_at_bet REAL,
+                    pm_close_price      REAL,
+                    status              TEXT    NOT NULL DEFAULT 'open',
+                    resolved_at         TEXT,
+                    winning_side        TEXT,
+                    pnl                 REAL,
+                    pm_price_10s        REAL
+                );
+                INSERT INTO real_bets_v3 SELECT * FROM real_bets;
+                DROP TABLE real_bets;
+                ALTER TABLE real_bets_v3 RENAME TO real_bets;
             """)
 
     # ── Write ─────────────────────────────────────────────────────────────
@@ -466,30 +505,36 @@ class OracleDB:
         return row is not None
 
     def record_real_bet(self, bet: RealBet) -> None:
-        self.conn.execute(
-            """
-            INSERT OR IGNORE INTO real_bets (
-                id, market_id, symbol, interval_minutes,
-                market_start, market_end, placed_at,
-                market_minute, side,
-                requested_price, fill_price, shares_requested, shares_filled,
-                stake_usd, order_id, order_status,
-                delta_pct, pm_open_price, binance_price_at_bet,
-                pm_close_price, status, resolved_at, winning_side, pnl
-            ) VALUES (?,?,?,?,  ?,?,?,  ?,?,  ?,?,?,?,  ?,?,?,  ?,?,?,  ?,?,?,?,?)
-            """,
-            (
-                bet.id, bet.market_id, bet.symbol, bet.interval_minutes,
-                _iso(bet.market_start), _iso(bet.market_end), _iso(bet.placed_at),
-                bet.market_minute, bet.side,
-                bet.requested_price, bet.fill_price, bet.shares_requested, bet.shares_filled,
-                bet.stake_usd, bet.order_id, bet.order_status,
-                bet.delta_pct, bet.pm_open_price, bet.binance_price_at_bet,
-                bet.pm_close_price, bet.status, _iso(bet.resolved_at),
-                bet.winning_side, bet.pnl,
-            ),
-        )
-        self.conn.commit()
+        try:
+            self.conn.execute(
+                """
+                INSERT INTO real_bets (
+                    id, market_id, symbol, interval_minutes,
+                    market_start, market_end, placed_at,
+                    market_minute, side,
+                    requested_price, fill_price, shares_requested, shares_filled,
+                    stake_usd, order_id, order_status,
+                    delta_pct, pm_open_price, binance_price_at_bet,
+                    pm_close_price, status, resolved_at, winning_side, pnl
+                ) VALUES (?,?,?,?,  ?,?,?,  ?,?,  ?,?,?,?,  ?,?,?,  ?,?,?,  ?,?,?,?,?)
+                """,
+                (
+                    bet.id, bet.market_id, bet.symbol, bet.interval_minutes,
+                    _iso(bet.market_start), _iso(bet.market_end), _iso(bet.placed_at),
+                    bet.market_minute, bet.side,
+                    bet.requested_price, bet.fill_price, bet.shares_requested, bet.shares_filled,
+                    bet.stake_usd, bet.order_id, bet.order_status,
+                    bet.delta_pct, bet.pm_open_price, bet.binance_price_at_bet,
+                    bet.pm_close_price, bet.status, _iso(bet.resolved_at),
+                    bet.winning_side, bet.pnl,
+                ),
+            )
+            self.conn.commit()
+        except Exception as exc:
+            print(f"[db] ОШИБКА record_real_bet {bet.id}: {exc}")
+            print(f"[db]   market_start={bet.market_start} market_end={bet.market_end} "
+                  f"pm_open_price={bet.pm_open_price}")
+            raise
 
     def resolve_real_bet(
         self,
