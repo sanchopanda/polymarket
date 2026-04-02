@@ -8,7 +8,7 @@ from typing import Optional
 
 from typing import TYPE_CHECKING
 
-from py_clob_client.clob_types import MarketOrderArgs, OrderType, BalanceAllowanceParams, AssetType
+from py_clob_client.clob_types import MarketOrderArgs, OrderArgs, OrderType, BalanceAllowanceParams, AssetType
 
 from real_arb_bot.clients import PolymarketTrader
 
@@ -173,47 +173,25 @@ class OracleRealTrader:
 
         import time as _time
         try:
-            # Проверка глубины стакана: нужно >= 2x ставки в пределах +3 центов от best ask
-            book = self._pm._client.get_order_book(token_id)
-            if book and book.asks:
-                best_ask = float(book.asks[0].price)
-                price_cap = best_ask + 0.03
-                depth_usd = 0.0
-                for level in book.asks:
-                    lp = float(level.price)
-                    if lp > price_cap:
-                        break
-                    depth_usd += lp * float(level.size)
-                required = self._stake * 2
-                if depth_usd < required:
-                    print(f"[real] skip {market.symbol} {signal.side}: "
-                          f"depth ${depth_usd:.2f} < ${required:.2f} (2x stake, cap {best_ask:.2f}+3c)")
-                    return
-            else:
-                print(f"[real] skip {market.symbol} {signal.side}: empty orderbook")
-                return
+            # Лимитный ордер: ставим по WS-цене + до 3 центов слиппейджа
+            limit_price = round(min(requested_price + 0.03, self._max_price), 2)
 
-            # Market order: CLOB сам рассчитает цену из стакана
-            args = MarketOrderArgs(token_id=token_id, amount=self._stake, side="BUY")
-            signed = self._pm._client.create_market_order(args)
-
-            # Проверяем рассчитанную цену до отправки
-            market_price = args.price
-            if market_price > self._max_price:
-                reason = f"market price {market_price:.3f} > max {self._max_price}"
-                print(f"[real] skip {market.symbol} {signal.side}: {reason}")
-                return
-
-            if market_price > best_ask + 0.03:
-                print(f"[real] skip {market.symbol} {signal.side}: "
-                      f"fill price {market_price:.3f} > best_ask {best_ask:.3f} + 0.03")
-                return
-
-            if market_price < 0.50 and abs(delta_pct) < cheap_delta:
+            if limit_price < 0.50 and abs(delta_pct) < cheap_delta:
                 print(f"[real] skip cheap {market.symbol} {signal.side}: "
-                      f"price {market_price:.3f} < 0.50, delta {abs(delta_pct):.4f}% < {cheap_delta}%")
+                      f"price {limit_price:.3f} < 0.50, delta {abs(delta_pct):.4f}% < {cheap_delta}%")
                 return
 
+            size = round(self._stake / limit_price, 2)
+            if size <= 0:
+                return
+
+            args = OrderArgs(
+                token_id=token_id,
+                price=limit_price,
+                size=size,
+                side="BUY",
+            )
+            signed = self._pm._client.create_order(args)
             resp = self._pm._client.post_order(signed, orderType=OrderType.FOK)
 
             order_id = resp.get("orderID", "")
@@ -236,16 +214,13 @@ class OracleRealTrader:
 
         matched = status.upper() in ("MATCHED", "FILLED")
         if not matched:
-            reason = f"FOK не исполнен (status={status}, market_price={market_price:.3f})"
+            reason = f"FOK не исполнен (status={status}, limit={limit_price:.3f})"
             print(f"[real] ордер НЕ ИСПОЛНЕН {market.symbol} {signal.side}: {reason}")
             if self._tg:
                 self._tg.send_bet_failed(market.symbol, signal.side, reason)
             return
 
-        price = market_price
-        size = round(self._stake / price, 2) if price > 0 else 0.0
-
-        # Используем НАШИ price/size — get_order().size_matched ненадёжен
+        price = limit_price
         actual_stake = round(price * size, 6)
 
         bet = RealBet(

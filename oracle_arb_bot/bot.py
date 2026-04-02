@@ -67,7 +67,8 @@ class OracleArbBot:
             "momentum_adaptive_rules", [[2, 0.05], [5, 0.08], [999, 0.12]]
         )
         self._momentum_cheap_delta: float = scfg.get("momentum_cheap_delta_pct", 0.10)
-        self._momentum_buckets: dict[str, tuple[int, float, float | None]] = {}  # symbol → (bucket_ts, last_price, prev_close)
+        self._momentum_1s_prices: dict[str, dict[int, float]] = {}  # symbol → {sec_ts: price}
+        self._momentum_lookback: int = scfg.get("momentum_lookback", 5)
         self._momentum_markets_bet: set[str] = set()  # market_ids где уже поставили
         self._momentum_signal_history: dict[str, list[int]] = {}  # symbol → [bucket_ts, ...]
         self._scan_interval: int = config["runtime"]["scan_interval_seconds"]
