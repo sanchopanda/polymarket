@@ -188,7 +188,7 @@ class OracleRealTrader:
                 return
 
             size = float(Decimal(str(self._stake / limit_price))
-                         .quantize(Decimal("0.01"), rounding=ROUND_DOWN))
+                         .quantize(Decimal("0.01"), rounding=ROUND_UP))
             if size <= 0:
                 return
 
