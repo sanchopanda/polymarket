@@ -211,6 +211,8 @@ class OracleRealTrader:
                 _time.sleep(0.2)
                 try:
                     info = self._pm._client.get_order(order_id)
+                    if not isinstance(info, dict):
+                        raise ValueError(f"get_order returned {type(info).__name__}: {info!r:.200}")
                     status = info.get("status", status)
                     if info.get("associate_trades"):
                         trades = info["associate_trades"]
