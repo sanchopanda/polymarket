@@ -139,6 +139,7 @@ class OracleDB:
             "ALTER TABLE bets ADD COLUMN volume REAL",
             "ALTER TABLE bets ADD COLUMN binance_price_at_close REAL",
             "ALTER TABLE bets ADD COLUMN strategy TEXT DEFAULT 'crossing'",
+            "ALTER TABLE bets ADD COLUMN signal_ask REAL",
         ]:
             try:
                 self.conn.execute(sql)
@@ -305,7 +306,8 @@ class OracleDB:
         )
         self.conn.commit()
 
-    def record_bet(self, bet: OracleBet, crossing_seq: int = 1) -> None:
+    def record_bet(self, bet: OracleBet, crossing_seq: int = 1,
+                   signal_ask: float = 0.0) -> None:
         self.conn.execute(
             """
             INSERT INTO bets (
@@ -317,9 +319,9 @@ class OracleDB:
                 pm_close_price, status, resolved_at, winning_side, pnl,
                 crossing_seq, venue,
                 seconds_to_close, opposite_ask, depth_usd, volume,
-                strategy
+                strategy, signal_ask
             ) VALUES (
-                ?,?,?,?,  ?,?,?,  ?,?,  ?,?,?,?,  ?,?,?,?,  ?,?,?,?,?,  ?,?,  ?,?,?,?,  ?
+                ?,?,?,?,  ?,?,?,  ?,?,  ?,?,?,?,  ?,?,?,?,  ?,?,?,?,?,  ?,?,  ?,?,?,?,  ?,?
             )
             """,
             (
@@ -333,7 +335,7 @@ class OracleDB:
                 bet.winning_side, bet.pnl,
                 crossing_seq, bet.venue,
                 bet.seconds_to_close, bet.opposite_ask, bet.depth_usd, bet.volume,
-                bet.strategy,
+                bet.strategy, signal_ask or None,
             ),
         )
         self.conn.commit()

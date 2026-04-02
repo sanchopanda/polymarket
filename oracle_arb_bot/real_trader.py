@@ -197,12 +197,25 @@ class OracleRealTrader:
             order_id = resp.get("orderID", "")
             status = resp.get("status", "")
 
-            # Проверяем реальный статус через get_order
+            # Проверяем реальный статус и цену через get_order
+            real_fill_price = None
+            real_size_matched = None
             if order_id:
                 _time.sleep(0.2)
                 try:
                     info = self._pm._client.get_order(order_id)
                     status = info.get("status", status)
+                    if info.get("associate_trades"):
+                        trades = info["associate_trades"]
+                        total_cost = sum(float(t.get("price", 0)) * float(t.get("size", 0)) for t in trades)
+                        total_size = sum(float(t.get("size", 0)) for t in trades)
+                        if total_size > 0:
+                            real_fill_price = round(total_cost / total_size, 6)
+                            real_size_matched = round(total_size, 6)
+                    if real_fill_price is None and info.get("price"):
+                        real_fill_price = float(info["price"])
+                    if real_size_matched is None and info.get("size_matched"):
+                        real_size_matched = float(info["size_matched"])
                 except Exception as poll_err:
                     print(f"[real] order poll error: {poll_err}")
         except Exception as exc:
@@ -220,7 +233,8 @@ class OracleRealTrader:
                 self._tg.send_bet_failed(market.symbol, signal.side, reason)
             return
 
-        price = limit_price
+        price = real_fill_price if real_fill_price else limit_price
+        size = real_size_matched if real_size_matched else size
         actual_stake = round(price * size, 6)
 
         bet = RealBet(

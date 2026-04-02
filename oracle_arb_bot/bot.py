@@ -67,8 +67,7 @@ class OracleArbBot:
             "momentum_adaptive_rules", [[2, 0.05], [5, 0.08], [999, 0.12]]
         )
         self._momentum_cheap_delta: float = scfg.get("momentum_cheap_delta_pct", 0.10)
-        self._momentum_1s_prices: dict[str, dict[int, float]] = {}  # symbol → {sec_ts: price}
-        self._momentum_lookback: int = scfg.get("momentum_lookback", 5)
+        self._momentum_buckets: dict[str, tuple[int, float, float | None]] = {}  # symbol → (bucket_ts, last_price, prev_close)
         self._momentum_markets_bet: set[str] = set()  # market_ids где уже поставили
         self._momentum_signal_history: dict[str, list[int]] = {}  # symbol → [bucket_ts, ...]
         self._scan_interval: int = config["runtime"]["scan_interval_seconds"]
@@ -360,6 +359,9 @@ class OracleArbBot:
 
         self._log_signal(market, signal, price, now, bet_placed=True)
 
+        # Запоминаем PM цену до _check_depth (для анализа slippage)
+        signal_ask = market.yes_ask if signal_side == "yes" else market.no_ask
+
         available_usd = self._check_depth(market, signal_side)
         if available_usd < self._stake_usd:
             print(
@@ -378,7 +380,8 @@ class OracleArbBot:
             return
 
         crossing_seq = self._db.count_bets_for_market(mid) + 1
-        self._place_paper_bet(market, signal, price, now, crossing_seq, depth_usd=available_usd)
+        self._place_paper_bet(market, signal, price, now, crossing_seq,
+                              depth_usd=available_usd, signal_ask=signal_ask)
 
         with self._placed_lock:
             self._momentum_markets_bet.add(mid)
@@ -568,6 +571,7 @@ class OracleArbBot:
         now: datetime,
         crossing_seq: int = 1,
         depth_usd: float = 0.0,
+        signal_ask: float = 0.0,
     ) -> None:
         raw_ask = market.yes_ask if signal.side == "yes" else market.no_ask
         if raw_ask <= 0:
@@ -639,7 +643,7 @@ class OracleArbBot:
             strategy=self._strategy_mode,
         )
 
-        self._db.record_bet(bet, crossing_seq=crossing_seq)
+        self._db.record_bet(bet, crossing_seq=crossing_seq, signal_ask=signal_ask)
         self._db.mark_signal_bet_placed(market.market_id, signal.side)
 
         # Фиксируем цену через 10 секунд после ставки (только PM — у Kalshi нет midpoint API)
