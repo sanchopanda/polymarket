@@ -8,7 +8,7 @@ trading:
   max_price: 0.48         # максимальная цена входа для paper (после округления вверх)
 
 real_trading:
-  enabled: true              # реальные ставки включены
+  enabled: false             # реальные ставки выключены
   stake_usd: 1.0           # $1 за ставку
   initial_deposit: 6.0     # начальный депозит = минимальная дельта
   floor_pct: 0.20          # дельта = 20% от пика (но не меньше initial_deposit)
