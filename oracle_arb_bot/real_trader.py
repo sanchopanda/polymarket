@@ -178,7 +178,16 @@ class OracleRealTrader:
         import time as _time
         from decimal import Decimal, ROUND_DOWN, ROUND_UP
         try:
-            # Лимитный ордер: ставим по WS-цене + до 3 центов слиппейджа
+            # Получаем реальную цену из стакана (REST), а не стейл WS
+            try:
+                book = self._pm._client.get_order_book(token_id)
+                asks = book.get("asks") or []
+                if asks:
+                    requested_price = float(asks[0]["price"])
+            except Exception as book_err:
+                print(f"[real] book fetch failed, using WS price: {book_err}")
+
+            # Лимитный ордер: ставим по цене из стакана + до 3 центов слиппейджа
             limit_price = float(Decimal(str(min(requested_price + 0.03, self._max_price)))
                                 .quantize(Decimal("0.01"), rounding=ROUND_UP))
 
