@@ -318,6 +318,17 @@ def simulate_market_continuous(market: dict, klines_1s: dict[int, float],
         if formation_sec is None:
             continue
 
+        # Подтверждение: через 2 секунды дельта от того же reference не откатилась
+        confirm_t = t + 2
+        if confirm_t in klines_1s:
+            confirm_d = (klines_1s[confirm_t] - ref_price) / ref_price * 100
+            same_direction = (confirm_d > 0) == (delta_pct > 0)
+            if not same_direction or abs(confirm_d) < effective_delta:
+                continue  # сигнал откатился — пропускаем
+            # сигнал подтверждён — фаерим в момент подтверждения
+            t = confirm_t
+            delta_pct = confirm_d
+
         signal_side = "yes" if delta_pct > 0 else "no"
         won = signal_side == winning_side
 
@@ -340,7 +351,7 @@ def simulate_market_continuous(market: dict, klines_1s: dict[int, float],
             "bucket_ts": datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             "minute_of_market": (t - start_ts) // 60,
             "prev_price": round(ref_price, 4),
-            "curr_price": round(curr_price, 4),
+            "curr_price": round(klines_1s[t], 4),
             "delta_pct": round(delta_pct, 6),
             "signal_side": signal_side,
             "pm_entry_price": round(pm_entry_price, 4) if pm_entry_price is not None else "",

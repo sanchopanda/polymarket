@@ -354,10 +354,18 @@ python -m oracle_arb_bot
 
 ### Стратегия: Binance Momentum
 
-1. Binance aggTrade WebSocket → агрегация в 5-секундные бакеты
+**Режим 5s_bucket (по умолчанию):**
+1. Binance aggTrade WebSocket → последний тик каждой секунды → 5-секундные бакеты
 2. Сравнение close[N] vs close[N-1] → delta_pct
 3. Если |delta_pct| >= порога → сигнал YES (рост) или NO (падение)
-4. Ставка на Polymarket в направлении сигнала
+4. Проверка стакана (ликвидность + цена не ушла > +3c от signal_ask)
+5. Ставка на Polymarket в направлении сигнала
+
+**Режим continuous (`momentum_continuous: true`):**
+1. На каждой закрытой секунде проверяет дельту за 1..5 секунд назад
+2. Фаерит сигнал как только дельта набралась (не ждёт конца 5s бакета)
+3. Через 2 секунды проверяет что сигнал не откатился
+4. Ставки помечаются `signal_mode="continuous"` в БД
 
 ### Адаптивный порог дельты
 
@@ -374,6 +382,16 @@ python -m oracle_arb_bot
 Результаты бэктеста:
 - Без адаптива: WR 70%, на choppy данных 50.2%
 - С адаптивом: WR 74.2%, на choppy данных 60.6%
+
+### Версионирование ставок
+
+Колонка `version` в таблице `bets` помечает логику бота:
+- `NULL` — старые ставки (до 2026-04-03), без фильтра stale WS и slippage
+- `v0` — с 2026-04-03: скип stale signal_ask ≥ 0.95, скип если REST цена > signal_ask + 3c, 1s close для 5s бакетов
+
+Колонка `signal_mode`:
+- `5s_bucket` — сигнал по закрытию 5s бакета (по умолчанию)
+- `continuous` — сигнал по кратчайшему окну 1..5s
 
 ### Real Trading
 
@@ -402,11 +420,13 @@ strategy:
     - [2, 0.05]
     - [5, 0.08]
     - [999, 0.12]
+  momentum_cheap_delta_pct: 0.10  # мин. дельта для цен < 0.50
+  momentum_continuous: false      # continuous режим (1..5s окна вместо 5s бакетов)
   min_orderbook_usd: 5.0          # мин. ликвидность в стакане
   depth_slippage_cents: 4.0       # глубина стакана до best_ask + Nc
 
 real_trading:
-  enabled: true
+  enabled: false
   stake_usd: 1.0
   initial_deposit: 6.0
   floor_pct: 0.20
@@ -425,10 +445,13 @@ python3 -m research_bot.fetch_markets --limit 5000
 
 # Бэктест Binance momentum
 python3 -m research_bot.backtest_binance_momentum
-python3 -m research_bot.backtest_binance_momentum --adaptive
-python3 -m research_bot.backtest_binance_momentum --adaptive --adaptive-rules "2:0.05,5:0.08,999:0.12"
-python3 -m research_bot.backtest_binance_momentum --delta 0.10
+python3 -m research_bot.backtest_binance_momentum --limit 100          # последние 100 рынков
+python3 -m research_bot.backtest_binance_momentum --continuous         # continuous режим
+python3 -m research_bot.backtest_binance_momentum --no-adaptive        # фиксированная дельта
+python3 -m research_bot.backtest_binance_momentum --delta 0.10         # другой порог
 python3 -m research_bot.backtest_binance_momentum --symbols BTC,ETH --intervals 5
+python3 -m research_bot.backtest_binance_momentum --entry-delay 3      # цена через 3с после сигнала
+python3 -m research_bot.backtest_binance_momentum --min-price 0.3 --max-price 0.7
 ```
 
 ## `momentum_bot`

@@ -67,6 +67,7 @@ class OracleArbBot:
             "momentum_adaptive_rules", [[2, 0.05], [5, 0.08], [999, 0.12]]
         )
         self._momentum_cheap_delta: float = scfg.get("momentum_cheap_delta_pct", 0.10)
+        self._momentum_continuous: bool = scfg.get("momentum_continuous", False)
         self._momentum_buckets: dict[str, tuple[int, float, float | None]] = {}  # symbol → (bucket_ts, last_price, prev_close)
         self._momentum_markets_bet: set[str] = set()  # market_ids где уже поставили
         self._momentum_signal_history: dict[str, list[int]] = {}  # symbol → [bucket_ts, ...]
@@ -77,6 +78,7 @@ class OracleArbBot:
         self._backtest_db = BacktestDB()
         self._1s_last: dict[str, int] = {}  # symbol → last written sec_ts
         self._1s_close: dict[str, float] = {}  # symbol → last price in current second
+        self._1s_history: dict[str, dict[int, float]] = {}  # symbol → {sec_ts: close} последние 6с
 
         # Per-venue paper/real flags
         self._pm_paper: bool = config["polymarket"].get("paper", True)
@@ -265,7 +267,16 @@ class OracleArbBot:
         if prev != sec_ts:
             # новая секунда — сохраняем close предыдущей
             if prev is not None and symbol in self._1s_close:
-                self._backtest_db.write_1s(symbol, prev, self._1s_close[symbol])
+                prev_close = self._1s_close[symbol]
+                self._backtest_db.write_1s(symbol, prev, prev_close)
+                # обновляем историю последних 6 секунд для continuous режима
+                hist = self._1s_history.setdefault(symbol, {})
+                hist[prev] = prev_close
+                for old_ts in [t for t in hist if t < prev - 6]:
+                    del hist[old_ts]
+                # continuous: проверяем дельту за 1..5 секунд
+                if self._strategy_mode == "binance_momentum" and self._momentum_continuous:
+                    self._on_momentum_continuous(symbol, prev, prev_close, now)
             self._1s_last[symbol] = sec_ts
         self._1s_close[symbol] = price
 
@@ -353,6 +364,66 @@ class OracleArbBot:
                 market.binance_price_at_start = price
             self._fire_momentum_bet(market, signal_side, delta_pct, price, now)
 
+    def _on_momentum_continuous(self, symbol: str, sec_ts: int, curr_price: float, now: datetime) -> None:
+        """Continuous режим: ищет кратчайшее окно (1..5s) где дельта достигнута."""
+        hist = self._1s_history.get(symbol, {})
+
+        # Определяем эффективную дельту (adaptive)
+        if self._momentum_adaptive:
+            # Используем sec_ts как proxy для bucket для подсчёта истории
+            cutoff = sec_ts - self._momentum_adaptive_window
+            recent_count = sum(1 for t in self._momentum_signal_history.get(symbol, []) if t > cutoff)
+            min_delta = self._momentum_delta_pct
+            for max_n, threshold in self._momentum_adaptive_rules:
+                if recent_count <= max_n:
+                    min_delta = threshold
+                    break
+        else:
+            min_delta = self._momentum_delta_pct
+            recent_count = 0
+
+        # Ищем кратчайшее окно lb=1..5 где дельта достигнута
+        formation_sec = None
+        delta_pct = 0.0
+        for lb in range(1, 6):
+            ref_ts = sec_ts - lb
+            if ref_ts not in hist:
+                continue
+            d = (curr_price - hist[ref_ts]) / hist[ref_ts] * 100
+            if abs(d) >= min_delta:
+                formation_sec = lb
+                delta_pct = d
+                break
+
+        if formation_sec is None:
+            return
+
+        signal_side = "yes" if delta_pct > 0 else "no"
+        adaptive_tag = f" [n={recent_count}→{min_delta}%]" if self._momentum_adaptive else ""
+        print(
+            f"[momentum/cont] {symbol} Δ{delta_pct:+.4f}% ({formation_sec}s) → {signal_side.upper()}{adaptive_tag}"
+        )
+
+        if self._momentum_adaptive and abs(delta_pct) >= 0.05:
+            history = self._momentum_signal_history.setdefault(symbol, [])
+            history.append(sec_ts)
+            self._momentum_signal_history[symbol] = [t for t in history if t > sec_ts - self._momentum_adaptive_window]
+
+        for market in self._scanner.all_markets():
+            if market.symbol != symbol:
+                continue
+            if now < market.market_start or now >= market.expiry:
+                continue
+            market_minute = int((now - market.market_start).total_seconds() // 60)
+            if market_minute < self._momentum_min_minute:
+                continue
+            if market.market_id in self._momentum_markets_bet:
+                continue
+            if market.binance_price_at_start is None:
+                market.binance_price_at_start = curr_price
+            self._fire_momentum_bet(market, signal_side, delta_pct, curr_price, now,
+                                    signal_mode="continuous")
+
     def _fire_momentum_bet(
         self,
         market: OracleMarket,
@@ -360,6 +431,7 @@ class OracleArbBot:
         delta_pct: float,
         price: float,
         now: datetime,
+        signal_mode: str = "5s_bucket",
     ) -> None:
         from volatility_bot.strategy import compute_position_pct, compute_market_minute
 
@@ -415,7 +487,8 @@ class OracleArbBot:
 
         crossing_seq = self._db.count_bets_for_market(mid) + 1
         self._place_paper_bet(market, signal, price, now, crossing_seq,
-                              depth_usd=available_usd, signal_ask=signal_ask)
+                              depth_usd=available_usd, signal_ask=signal_ask,
+                              signal_mode=signal_mode)
 
         with self._placed_lock:
             self._momentum_markets_bet.add(mid)
@@ -606,6 +679,7 @@ class OracleArbBot:
         crossing_seq: int = 1,
         depth_usd: float = 0.0,
         signal_ask: float = 0.0,
+        signal_mode: str = "5s_bucket",
     ) -> None:
         raw_ask = market.yes_ask if signal.side == "yes" else market.no_ask
         if raw_ask <= 0:
@@ -677,7 +751,8 @@ class OracleArbBot:
             strategy=self._strategy_mode,
         )
 
-        self._db.record_bet(bet, crossing_seq=crossing_seq, signal_ask=signal_ask)
+        self._db.record_bet(bet, crossing_seq=crossing_seq, signal_ask=signal_ask,
+                            signal_mode=signal_mode)
         self._db.mark_signal_bet_placed(market.market_id, signal.side)
 
         # Фиксируем цену через 10 секунд после ставки (только PM — у Kalshi нет midpoint API)
