@@ -23,11 +23,17 @@ class OracleTelegramNotifier:
 
     CHAT_ID_FILE = "data/.telegram_chat_id"
 
-    def __init__(self, get_status_fn: Callable[[], str]) -> None:
+    def __init__(
+        self,
+        get_status_fn: Callable[[], str],
+        token_env: str = "SIMPLE_BOT_TOKEN",
+        chat_id_file: str = CHAT_ID_FILE,
+    ) -> None:
         self._get_status = get_status_fn
-        token = os.environ.get("SIMPLE_BOT_TOKEN", "")
+        self._chat_id_file = chat_id_file
+        token = os.environ.get(token_env, "")
         if not token:
-            print("[oracle_tg] SIMPLE_BOT_TOKEN not set — Telegram disabled")
+            print(f"[oracle_tg] {token_env} not set — Telegram disabled")
             self._bot: Optional[telebot.TeleBot] = None
             self._chat_id: Optional[int] = None
             return
@@ -38,13 +44,13 @@ class OracleTelegramNotifier:
 
     def _load_chat_id(self) -> Optional[int]:
         try:
-            return int(open(self.CHAT_ID_FILE).read().strip())
+            return int(open(self._chat_id_file).read().strip())
         except (FileNotFoundError, ValueError):
             return None
 
     def _save_chat_id(self, chat_id: int) -> None:
         try:
-            open(self.CHAT_ID_FILE, "w").write(str(chat_id))
+            open(self._chat_id_file, "w").write(str(chat_id))
         except Exception:
             pass
 

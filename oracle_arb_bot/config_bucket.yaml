@@ -1,0 +1,85 @@
+price_source: "binance"
+
+runtime:
+  scan_interval_seconds: 300
+
+trading:
+  stake_usd: 5.0
+  max_price: 0.48
+
+real_trading:
+  enabled: false
+  stake_usd: 1.0
+  initial_deposit: 6.0
+  floor_pct: 0.20
+  max_price: 0.49
+
+market_filter:
+  interval_minutes: [5, 15]
+  symbols: ["BTC", "ETH", "SOL", "XRP"]
+  min_days_to_expiry: 0
+  max_days_to_expiry: 0.1
+  min_volume: 0
+  min_liquidity: 100
+  fee_type: "crypto_fees"
+
+strategy:
+  mode: "binance_momentum"
+  momentum_delta_pct: 0.05
+  momentum_min_minute: 1
+  momentum_adaptive: true
+  momentum_adaptive_window: 600
+  momentum_adaptive_rules: [[2, 0.05], [5, 0.08], [999, 0.12]]
+  momentum_cheap_delta_pct: 0.0
+  momentum_continuous: false      # 5s bucket mode (отличие от основного конфига)
+  min_orderbook_usd: 5.0
+  depth_slippage_cents: 4.0
+  delta_threshold_pct: 0.05
+  max_entry_price: 0.48
+  active_zone_min: 0.20
+  active_zone_max: 0.70
+  min_cl_delta_pct: 0.03
+
+chainlink:
+  rpc_urls:
+    - "https://polygon-bor-rpc.publicnode.com"
+    - "https://polygon.drpc.org"
+    - "https://polygon.meowrpc.com"
+  wss_urls:
+    - "wss://polygon-bor-rpc.publicnode.com"
+    - "wss://polygon.drpc.org"
+    - "wss://1rpc.io/matic"
+  poll_interval_seconds: 30
+
+binance:
+  symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+
+polymarket:
+  paper: true
+  real: false                      # реал выключен для bucket-инстанса
+  gamma_base_url: "https://gamma-api.polymarket.com"
+  clob_base_url: "https://clob.polymarket.com"
+  clob_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+  page_size: 500
+  request_delay_ms: 100
+
+kalshi:
+  paper: false
+  real: false
+  base_url: "https://api.elections.kalshi.com/trade-api/v2"
+  page_size: 200
+  max_pages: 10
+  request_timeout_seconds: 20
+  series_tickers:
+    - "KXBTC15M"
+    - "KXETH15M"
+    - "KXSOL15M"
+    - "KXXRP15M"
+
+db:
+  path: "data/oracle_arb_bot_bucket.db"
+
+telegram:
+  enabled: true
+  token_env: "TELEGRAM_TOKEN"                        # sports arb бот
+  chat_id_file: "data/.telegram_chat_id_bucket"

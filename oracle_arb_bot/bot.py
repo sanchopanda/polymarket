@@ -165,9 +165,14 @@ class OracleArbBot:
                     text += f"\n💳 реальный: {self._real.deposit_info()}"
             return text
 
+        tg_cfg = config.get("telegram", {})
         self._tg = (
-            OracleTelegramNotifier(get_status_fn=_status_fn)
-            if config.get("telegram", {}).get("enabled")
+            OracleTelegramNotifier(
+                get_status_fn=_status_fn,
+                token_env=tg_cfg.get("token_env", "SIMPLE_BOT_TOKEN"),
+                chat_id_file=tg_cfg.get("chat_id_file", "data/.telegram_chat_id"),
+            )
+            if tg_cfg.get("enabled")
             else None
         )
         if self._real:
