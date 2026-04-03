@@ -99,7 +99,9 @@ class OracleArbBot:
 
         # Сканер PM + Kalshi рынков
         self._scanner = OracleScanner(config)
-        self._scanner.set_pm_price_callback(self._on_pm_price)
+        # PM WS не нужен в momentum режиме — цена берётся из REST (_check_depth)
+        if scfg.get("mode") != "binance_momentum":
+            self._scanner.set_pm_price_callback(self._on_pm_price)
 
         # Price feed: Chainlink (default) or Binance
         self._price_source: str = config.get("price_source", "binance")

@@ -220,6 +220,8 @@ class OracleScanner:
     # ── PM WebSocket ──────────────────────────────────────────────────────
 
     def _update_pm_ws(self) -> None:
+        if not self._pm_price_callback:
+            return  # PM WS отключён (нет callback)
         with self._lock:
             new_asset_ids: set[str] = set()
             new_asset_map: dict[str, tuple[OracleMarket, str]] = {}
