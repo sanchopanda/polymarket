@@ -108,6 +108,7 @@ class OracleTelegramNotifier:
         market_slug: str | None = None,
         venue: str | None = None,
         market_id: str | None = None,
+        pre_price: float | None = None,
     ) -> None:
         direction = "YES" if side == "yes" else "NO"
         sign = "+" if delta_pct >= 0 else ""
@@ -119,9 +120,14 @@ class OracleTelegramNotifier:
         else:
             link = ""
         v = "PM" if venue != "kalshi" else "Kalshi"
+        pre_tag = ""
+        if pre_price and pre_price > 0:
+            diff = price - pre_price
+            sign_diff = "+" if diff >= 0 else ""
+            pre_tag = f" | pre={pre_price:.3f} ({sign_diff}{diff*100:.1f}c)"
         text = (
-            f"[OracleArb] {tag} [{v}] <b>{symbol} {direction}</b> @ {price:.3f} "
-            f"| Δ{sign}{delta_pct:.3f}% | ${stake:.2f}{link}"
+            f"[OracleArb] {tag} [{v}] <b>{symbol} {direction}</b> @ {price:.3f}"
+            f"{pre_tag} | Δ{sign}{delta_pct:.3f}% | ${stake:.2f}{link}"
         )
         self.send(text)
 

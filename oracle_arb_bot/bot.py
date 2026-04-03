@@ -181,6 +181,36 @@ class OracleArbBot:
 
     # ── Main loop ─────────────────────────────────────────────────────────
 
+    def _start_book_poller(self) -> None:
+        """Фоновый поллинг CLOB каждые 3 сек — держит market.yes_ask/no_ask актуальными."""
+        def _loop():
+            while True:
+                try:
+                    now = datetime.utcnow()
+                    for market in self._scanner.all_markets():
+                        if market.venue != "polymarket":
+                            continue
+                        if now < market.market_start or now >= market.expiry:
+                            continue
+                        for side, token_id in [("yes", market.yes_token_id), ("no", market.no_token_id)]:
+                            if not token_id:
+                                continue
+                            try:
+                                book = self._clob.get_orderbook(token_id)
+                                if book and book.asks:
+                                    price = book.asks[0].price
+                                    if side == "yes":
+                                        market.yes_ask = price
+                                    else:
+                                        market.no_ask = price
+                            except Exception:
+                                pass
+                except Exception as exc:
+                    print(f"[book_poll] error: {exc}")
+                time.sleep(3)
+        threading.Thread(target=_loop, daemon=True, name="book-poller").start()
+        print("[oracle] book poller started (3s interval)")
+
     def run(self) -> None:
         print("[oracle] Starting OracleArbBot")
         print(f"[oracle] strategy_mode={self._strategy_mode}")
@@ -189,6 +219,8 @@ class OracleArbBot:
         self._price_feed.start()
         if self._binance_feed is not None:
             self._binance_feed.start()
+        if self._strategy_mode == "binance_momentum":
+            self._start_book_poller()
         while True:
             try:
                 self._scanner.scan_and_subscribe()
@@ -416,7 +448,10 @@ class OracleArbBot:
 
         self._log_signal(market, signal, price, now, bet_placed=True)
 
-        # REST запрос: получаем цену и ликвидность за один раз
+        # Цена из фонового поллинга (до сигнала) — для аналитики
+        signal_ask = market.yes_ask if signal_side == "yes" else market.no_ask
+
+        # REST запрос: актуальная цена и ликвидность
         available_usd = self._check_depth(market, signal_side)
         if available_usd < self._stake_usd:
             print(
@@ -425,9 +460,8 @@ class OracleArbBot:
             )
             return
 
-        # Цена из REST стакана (обновлена _check_depth)
+        # Цена из REST стакана (обновлена _check_depth) — по ней ставим
         entry_ask = market.yes_ask if signal_side == "yes" else market.no_ask
-        signal_ask = entry_ask  # для записи в БД
 
         if entry_ask <= 0 or entry_ask >= 0.95:
             print(
@@ -748,6 +782,7 @@ class OracleArbBot:
                 market.symbol, signal.side, entry_price, signal.delta_pct, self._stake_usd,
                 label="paper", market_slug=market.pm_event_slug,
                 venue=market.venue, market_id=market.market_id,
+                pre_price=signal_ask,
             )
 
     def _record_price_after_delay(self, bet_id: str, token_id: str, delay: int, table: str) -> None:
