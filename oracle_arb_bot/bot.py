@@ -73,11 +73,8 @@ class OracleArbBot:
         self._momentum_signal_history: dict[str, list[int]] = {}  # symbol → [bucket_ts, ...]
         self._scan_interval: int = config["runtime"]["scan_interval_seconds"]
 
-        # ── Data collection для бэктестов (SQLite) ────────────────────
-        from research_bot.backtest_db import BacktestDB
-        self._backtest_db = BacktestDB()
-        self._1s_last: dict[str, int] = {}  # symbol → last written sec_ts
-        self._1s_close: dict[str, float] = {}  # symbol → last price in current second
+        self._1s_last: dict[str, int] = {}  # symbol → sec_ts последнего закрытого тика
+        self._1s_close: dict[str, float] = {}  # symbol → последняя цена в текущей секунде
         self._1s_history: dict[str, dict[int, float]] = {}  # symbol → {sec_ts: close} последние 6с
 
         # Per-venue paper/real flags
@@ -217,12 +214,6 @@ class OracleArbBot:
         self._scanner.scan_and_subscribe()
         markets = self._scanner.all_markets()
 
-        # Пишем все рынки в backtest DB (winning_side обновится при резолве)
-        for m in markets:
-            ms = m.market_start.strftime("%Y-%m-%d %H:%M:%S")
-            me = m.expiry.strftime("%Y-%m-%d %H:%M:%S")
-            self._backtest_db.write_market(m.market_id, "", m.symbol, m.interval_minutes, ms, me)
-
         print(f"\nFound {len(markets)} markets:")
         for m in sorted(markets, key=lambda x: (x.venue, x.symbol, x.interval_minutes)):
             now = datetime.utcnow()
@@ -233,28 +224,6 @@ class OracleArbBot:
                 f"start={m.market_start.strftime('%H:%M')} end={m.expiry.strftime('%H:%M')} "
                 f"yes={m.yes_ask:.3f} no={m.no_ask:.3f} min={minute}{ref}"
             )
-
-    # ── Data collection ─────────────────────────────────────────────────
-
-    _logged_markets: set[str] = set()
-    def _log_pm_price(self, market_id: str, side: str, price: float) -> None:
-        """Записывает PM цену в backtest DB."""
-        if price <= 0 or price >= 0.95:
-            return  # стейл/невалидная цена из WS
-        ts = int(time.time())
-        outcome = "Up" if side == "yes" else "Down"
-        self._backtest_db.write_trade(market_id, ts, outcome, price)
-
-    def _log_resolved_market(self, bet: OracleBet, winning_side: str) -> None:
-        """Записывает резолвнутый рынок в backtest DB (один раз на market_id)."""
-        if bet.market_id in self._logged_markets:
-            return
-        self._logged_markets.add(bet.market_id)
-        ms = bet.market_start.strftime("%Y-%m-%d %H:%M:%S") if hasattr(bet.market_start, "strftime") else bet.market_start
-        me = bet.market_end.strftime("%Y-%m-%d %H:%M:%S") if hasattr(bet.market_end, "strftime") else bet.market_end
-        self._backtest_db.write_market(
-            bet.market_id, "", bet.symbol, bet.interval_minutes, ms, me, winning_side,
-        )
 
     # ── Price source callback ─────────────────────────────────────────────
 
@@ -268,7 +237,6 @@ class OracleArbBot:
             # новая секунда — сохраняем close предыдущей
             if prev is not None and symbol in self._1s_close:
                 prev_close = self._1s_close[symbol]
-                self._backtest_db.write_1s(symbol, prev, prev_close)
                 # обновляем историю последних 6 секунд для continuous режима
                 hist = self._1s_history.setdefault(symbol, {})
                 hist[prev] = prev_close
@@ -315,7 +283,6 @@ class OracleArbBot:
         # чтобы бот и бэктест работали по идентичным данным
         bucket_close = self._1s_close.get(symbol, curr_price)
         self._momentum_buckets[symbol] = (bucket, price, bucket_close)
-        self._backtest_db.write_5s(symbol, curr_bucket, bucket_close)
 
         if prev_close is None:
             return  # нужно два завершённых бакета для сигнала
@@ -491,9 +458,6 @@ class OracleArbBot:
     # ── PM WS callback ────────────────────────────────────────────────────
 
     def _on_pm_price(self, market: OracleMarket, side: str, best_ask: float) -> None:
-        # ── логируем PM цену для бэктестов ──
-        self._log_pm_price(market.market_id, side, best_ask)
-
         if self._strategy_mode == "binance_momentum":
             return  # momentum fires only from _on_momentum_price
         now = datetime.utcnow()
@@ -919,19 +883,6 @@ class OracleArbBot:
                 if bet.market_end and bet.market_end <= now:
                     self._resolve_real_one(bet)
 
-        # Независимо: резолвим все рынки backtest DB без winning_side
-        now_ts = int(now.timestamp())
-        for m in self._backtest_db.get_unresolved_markets(now_ts):
-            try:
-                winning_side = check_polymarket_result(m["market_id"])
-                if winning_side:
-                    self._backtest_db.write_market(
-                        m["market_id"], "", m["symbol"], m["interval_minutes"],
-                        m["market_start"], m["market_end"], winning_side,
-                    )
-            except Exception as exc:
-                print(f"[backtest] resolve {m['market_id']}: {exc}")
-
     def _resolve_one(self, bet: OracleBet) -> None:
         if bet.venue == "kalshi":
             winning_side = check_kalshi_result(bet.market_id)
@@ -952,7 +903,6 @@ class OracleArbBot:
         pnl = (bet.shares - bet.total_cost) if won else -bet.total_cost
 
         self._db.resolve_bet(bet.id, winning_side, close_price, round(pnl, 6), binance_at_close)
-        self._log_resolved_market(bet, winning_side)
         self._db.audit("bet_resolved", bet.id, {
             "venue": bet.venue,
             "symbol": bet.symbol,
