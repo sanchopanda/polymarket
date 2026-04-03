@@ -45,6 +45,13 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_pm_trades_market
             ON pm_trades(market_id, ts);
 
+        CREATE TABLE IF NOT EXISTS binance_5s (
+            symbol    TEXT    NOT NULL,
+            bucket_ts INTEGER NOT NULL,
+            close     REAL    NOT NULL,
+            PRIMARY KEY (symbol, bucket_ts)
+        ) WITHOUT ROWID;
+
         CREATE TABLE IF NOT EXISTS markets (
             market_id        TEXT PRIMARY KEY,
             condition_id     TEXT,
@@ -65,6 +72,16 @@ class BacktestDB:
         self._lock = threading.Lock()
         self._batch_1s: list[tuple] = []
         self._batch_trades: list[tuple] = []
+
+    # ── Binance 5s (exact bucket closes from bot) ──────────────────
+
+    def write_5s(self, symbol: str, bucket_ts: int, close: float) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO binance_5s (symbol, bucket_ts, close) VALUES (?,?,?)",
+                (symbol, bucket_ts, close),
+            )
+            self._conn.commit()
 
     # ── Binance 1s ────────────────────────────────────────────────────
 
@@ -144,6 +161,16 @@ def load_markets(conn: sqlite3.Connection, symbols: Optional[list[str]] = None,
         params.extend(intervals)
     rows = conn.execute(query, params).fetchall()
     return [dict(r) for r in rows]
+
+
+def load_5s(conn: sqlite3.Connection, symbol: str,
+            start_ts: int, end_ts: int) -> dict[int, float]:
+    """Load exact 5s bucket closes saved by bot."""
+    rows = conn.execute(
+        "SELECT bucket_ts, close FROM binance_5s WHERE symbol=? AND bucket_ts BETWEEN ? AND ?",
+        (symbol, start_ts, end_ts),
+    ).fetchall()
+    return {r[0]: r[1] for r in rows}
 
 
 def load_1s(conn: sqlite3.Connection, symbol: str,

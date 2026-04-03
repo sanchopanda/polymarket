@@ -34,7 +34,7 @@ import httpx
 
 from research_bot.backtest_db import (
     get_connection, load_markets as db_load_markets,
-    load_1s, load_trades, has_trades,
+    load_1s, load_5s, load_trades, has_trades,
 )
 
 DATA_DIR = Path("research_bot/data")
@@ -629,8 +629,17 @@ def main() -> None:
     for sym in symbols:
         klines_1s = ensure_binance_1s(conn, sym, range_start, range_end, http, args.force_fetch)
         binance_1s_all[sym] = klines_1s
-        binance_5s[sym] = to_5s_buckets(klines_1s)
-        print(f"  [{sym}] 5s бакетов: {len(binance_5s[sym])}")
+        # Используем точные 5s бакеты бота если есть, иначе строим из 1s
+        exact_5s = load_5s(conn, sym, range_start, range_end)
+        if exact_5s:
+            # Дополняем реконструкцией из 1s для периодов без exact данных
+            reconstructed = to_5s_buckets(klines_1s)
+            reconstructed.update(exact_5s)  # exact перезаписывает реконструкцию
+            binance_5s[sym] = reconstructed
+            print(f"  [{sym}] 5s бакетов: {len(binance_5s[sym])} (exact: {len(exact_5s)})")
+        else:
+            binance_5s[sym] = to_5s_buckets(klines_1s)
+            print(f"  [{sym}] 5s бакетов: {len(binance_5s[sym])} (reconstructed from 1s)")
 
     http.close()
 

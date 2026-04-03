@@ -293,15 +293,17 @@ class OracleArbBot:
             self._momentum_buckets[symbol] = (bucket, price, prev_close)
             return
 
-        # Бакет завершился: curr_price = close завершённого бакета
-        # Переходим в новый бакет, сохраняем curr_price как prev_close
-        self._momentum_buckets[symbol] = (bucket, price, curr_price)
+        # Бакет завершился — используем 1s close (то же что в binance_1s DB)
+        # чтобы бот и бэктест работали по идентичным данным
+        bucket_close = self._1s_close.get(symbol, curr_price)
+        self._momentum_buckets[symbol] = (bucket, price, bucket_close)
+        self._backtest_db.write_5s(symbol, curr_bucket, bucket_close)
 
         if prev_close is None:
             return  # нужно два завершённых бакета для сигнала
 
         # Сравниваем close завершённого бакета vs close предыдущего
-        delta_pct = (curr_price - prev_close) / prev_close * 100
+        delta_pct = (bucket_close - prev_close) / prev_close * 100
 
         # Adaptive delta: считаем сигналы ≥0.05% за последние 10 мин
         if self._momentum_adaptive and abs(delta_pct) >= 0.05:
