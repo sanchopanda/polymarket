@@ -59,7 +59,19 @@ class OracleDB:
                 resolved_at             TEXT,
                 winning_side            TEXT,
                 pnl                     REAL,
-                UNIQUE (market_id, side)
+                pm_price_10s            REAL,
+                crossing_seq            INTEGER DEFAULT 1,
+                venue                   TEXT    DEFAULT 'polymarket',
+                seconds_to_close        INTEGER,
+                opposite_ask            REAL,
+                depth_usd               REAL,
+                volume                  REAL,
+                binance_price_at_close  REAL,
+                strategy                TEXT    DEFAULT 'crossing',
+                signal_ask              REAL,
+                version                 TEXT,
+                signal_mode             TEXT,
+                pm_price_after          REAL
             );
 
             CREATE TABLE IF NOT EXISTS signals (
@@ -187,7 +199,11 @@ class OracleDB:
                     depth_usd               REAL,
                     volume                  REAL,
                     binance_price_at_close  REAL,
-                    strategy                TEXT    DEFAULT 'crossing'
+                    strategy                TEXT    DEFAULT 'crossing',
+                    signal_ask              REAL,
+                    version                 TEXT,
+                    signal_mode             TEXT,
+                    pm_price_after          REAL
                 );
                 INSERT INTO bets_new SELECT
                     id, market_id, symbol, interval_minutes,
@@ -198,7 +214,8 @@ class OracleDB:
                     delta_pct, pm_open_price, pm_close_price,
                     status, resolved_at, winning_side, pnl,
                     pm_price_10s, crossing_seq, 'polymarket',
-                    NULL, NULL, NULL, NULL, NULL, 'crossing'
+                    NULL, NULL, NULL, NULL, NULL, 'crossing',
+                    NULL, NULL, NULL, NULL
                 FROM bets;
                 DROP TABLE bets;
                 ALTER TABLE bets_new RENAME TO bets;
