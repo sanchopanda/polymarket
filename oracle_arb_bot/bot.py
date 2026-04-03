@@ -230,6 +230,8 @@ class OracleArbBot:
     _logged_markets: set[str] = set()
     def _log_pm_price(self, market_id: str, side: str, price: float) -> None:
         """Записывает PM цену в backtest DB."""
+        if price <= 0 or price >= 0.95:
+            return  # стейл/невалидная цена из WS
         ts = int(time.time())
         outcome = "Up" if side == "yes" else "Down"
         self._backtest_db.write_trade(market_id, ts, outcome, price)
