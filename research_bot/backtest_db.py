@@ -126,14 +126,30 @@ class BacktestDB:
                      winning_side: Optional[str] = None) -> None:
         with self._lock:
             self._conn.execute(
-                """INSERT OR REPLACE INTO markets
+                """INSERT OR IGNORE INTO markets
                    (market_id, condition_id, symbol, interval_minutes,
                     market_start, market_end, winning_side)
                    VALUES (?,?,?,?,?,?,?)""",
                 (market_id, condition_id, symbol, interval_minutes,
                  market_start, market_end, winning_side),
             )
+            if winning_side is not None:
+                self._conn.execute(
+                    "UPDATE markets SET winning_side=? WHERE market_id=? AND winning_side IS NULL",
+                    (winning_side, market_id),
+                )
             self._conn.commit()
+
+    def get_unresolved_markets(self, before_ts: int) -> list[dict]:
+        """Рынки без winning_side у которых market_end <= before_ts."""
+        before_str = __import__("datetime").datetime.utcfromtimestamp(before_ts).strftime("%Y-%m-%d %H:%M:%S")
+        rows = self._conn.execute(
+            """SELECT market_id, symbol, interval_minutes, market_start, market_end
+               FROM markets
+               WHERE winning_side IS NULL AND market_end <= ?""",
+            (before_str,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ── Flush ─────────────────────────────────────────────────────────
 

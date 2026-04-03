@@ -214,6 +214,13 @@ class OracleArbBot:
         time.sleep(1)  # дать WS/poll соединиться
         self._scanner.scan_and_subscribe()
         markets = self._scanner.all_markets()
+
+        # Пишем все рынки в backtest DB (winning_side обновится при резолве)
+        for m in markets:
+            ms = m.market_start.strftime("%Y-%m-%d %H:%M:%S")
+            me = m.expiry.strftime("%Y-%m-%d %H:%M:%S")
+            self._backtest_db.write_market(m.market_id, "", m.symbol, m.interval_minutes, ms, me)
+
         print(f"\nFound {len(markets)} markets:")
         for m in sorted(markets, key=lambda x: (x.venue, x.symbol, x.interval_minutes)):
             now = datetime.utcnow()
@@ -846,6 +853,19 @@ class OracleArbBot:
             for bet in self._db.get_open_real_bets():
                 if bet.market_end and bet.market_end <= now:
                     self._resolve_real_one(bet)
+
+        # Независимо: резолвим все рынки backtest DB без winning_side
+        now_ts = int(now.timestamp())
+        for m in self._backtest_db.get_unresolved_markets(now_ts):
+            try:
+                winning_side = check_polymarket_result(m["market_id"])
+                if winning_side:
+                    self._backtest_db.write_market(
+                        m["market_id"], "", m["symbol"], m["interval_minutes"],
+                        m["market_start"], m["market_end"], winning_side,
+                    )
+            except Exception as exc:
+                print(f"[backtest] resolve {m['market_id']}: {exc}")
 
     def _resolve_one(self, bet: OracleBet) -> None:
         if bet.venue == "kalshi":
