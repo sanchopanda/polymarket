@@ -447,17 +447,7 @@ class OracleArbBot:
 
         self._log_signal(market, signal, price, now, bet_placed=True)
 
-        # PM цена в момент сигнала (WS)
-        signal_ask = market.yes_ask if signal_side == "yes" else market.no_ask
-
-        # Стейловая WS цена — не знаем реальную цену, скипаем
-        if signal_ask <= 0 or signal_ask >= 0.95:
-            print(
-                f"[momentum] skip {market.symbol} {signal_side}: "
-                f"stale WS price {signal_ask:.3f}"
-            )
-            return
-
+        # REST запрос: получаем цену и ликвидность за один раз
         available_usd = self._check_depth(market, signal_side)
         if available_usd < self._stake_usd:
             print(
@@ -466,14 +456,14 @@ class OracleArbBot:
             )
             return
 
-        # Реальная цена стакана после depth check
+        # Цена из REST стакана (обновлена _check_depth)
         entry_ask = market.yes_ask if signal_side == "yes" else market.no_ask
+        signal_ask = entry_ask  # для записи в БД
 
-        # Цена убежала от signal_ask — не ставить (как в реальном боте: макс +3c)
-        if entry_ask > signal_ask + 0.03:
+        if entry_ask <= 0 or entry_ask >= 0.95:
             print(
                 f"[momentum] skip {market.symbol} {signal_side}: "
-                f"price moved {signal_ask:.3f} → {entry_ask:.3f} (+{(entry_ask-signal_ask)*100:.1f}c)"
+                f"invalid REST price {entry_ask:.3f}"
             )
             return
 
