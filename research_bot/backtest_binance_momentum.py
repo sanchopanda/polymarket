@@ -295,25 +295,28 @@ def simulate_market_continuous(market: dict, klines_1s: dict[int, float],
     min_ts = start_ts + min_minute * 60
 
     for t in range(min_ts, end_ts + 1):
-        ref_t = t - lookback
-        if t not in klines_1s or ref_t not in klines_1s:
+        if t not in klines_1s:
             continue
 
         curr_price = klines_1s[t]
-        ref_price = klines_1s[ref_t]
-        delta_pct = (curr_price - ref_price) / ref_price * 100
 
-        if abs(delta_pct) < effective_delta:
-            continue
-
-        formation_sec = lookback
-        for lb in range(1, lookback):
+        # Ищем кратчайшее окно (1..lookback) где дельта достигнута
+        formation_sec = None
+        delta_pct = 0.0
+        ref_price = None
+        for lb in range(1, lookback + 1):
             rt = t - lb
-            if rt in klines_1s:
-                d = (curr_price - klines_1s[rt]) / klines_1s[rt] * 100
-                if abs(d) >= effective_delta:
-                    formation_sec = lb
-                    break
+            if rt not in klines_1s:
+                continue
+            d = (curr_price - klines_1s[rt]) / klines_1s[rt] * 100
+            if abs(d) >= effective_delta:
+                formation_sec = lb
+                delta_pct = d
+                ref_price = klines_1s[rt]
+                break
+
+        if formation_sec is None:
+            continue
 
         signal_side = "yes" if delta_pct > 0 else "no"
         won = signal_side == winning_side
