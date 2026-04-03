@@ -140,6 +140,7 @@ class OracleDB:
             "ALTER TABLE bets ADD COLUMN binance_price_at_close REAL",
             "ALTER TABLE bets ADD COLUMN strategy TEXT DEFAULT 'crossing'",
             "ALTER TABLE bets ADD COLUMN signal_ask REAL",
+            "ALTER TABLE bets ADD COLUMN version TEXT",
         ]:
             try:
                 self.conn.execute(sql)
@@ -319,9 +320,9 @@ class OracleDB:
                 pm_close_price, status, resolved_at, winning_side, pnl,
                 crossing_seq, venue,
                 seconds_to_close, opposite_ask, depth_usd, volume,
-                strategy, signal_ask
+                strategy, signal_ask, version
             ) VALUES (
-                ?,?,?,?,  ?,?,?,  ?,?,  ?,?,?,?,  ?,?,?,?,  ?,?,?,?,?,  ?,?,  ?,?,?,?,  ?,?
+                ?,?,?,?,  ?,?,?,  ?,?,  ?,?,?,?,  ?,?,?,?,  ?,?,?,?,?,  ?,?,  ?,?,?,?,  ?,?,?
             )
             """,
             (
@@ -335,7 +336,7 @@ class OracleDB:
                 bet.winning_side, bet.pnl,
                 crossing_seq, bet.venue,
                 bet.seconds_to_close, bet.opposite_ask, bet.depth_usd, bet.volume,
-                bet.strategy, signal_ask or None,
+                bet.strategy, signal_ask or None, "v0",
             ),
         )
         self.conn.commit()
