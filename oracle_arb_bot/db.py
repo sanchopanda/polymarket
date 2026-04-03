@@ -142,6 +142,7 @@ class OracleDB:
             "ALTER TABLE bets ADD COLUMN signal_ask REAL",
             "ALTER TABLE bets ADD COLUMN version TEXT",
             "ALTER TABLE bets ADD COLUMN signal_mode TEXT",
+            "ALTER TABLE bets ADD COLUMN pm_price_after REAL",
         ]:
             try:
                 self.conn.execute(sql)
@@ -367,6 +368,13 @@ class OracleDB:
             f"UPDATE {table} SET pm_price_10s=? WHERE id=?",
             (round(price, 6), bet_id),
         )
+
+    def update_price_after(self, bet_id: str, price: float) -> None:
+        self.conn.execute(
+            "UPDATE bets SET pm_price_after=? WHERE id=?",
+            (round(price, 6), bet_id),
+        )
+        self.conn.commit()
         self.conn.commit()
 
     def audit(self, event_type: str, bet_id: Optional[str], details: dict) -> None:

@@ -182,7 +182,11 @@ class OracleArbBot:
     # ── Main loop ─────────────────────────────────────────────────────────
 
     def _start_book_poller(self) -> None:
-        """Фоновый поллинг CLOB каждые 3 сек — держит market.yes_ask/no_ask актуальными."""
+        """Фоновый поллинг CLOB каждые 3 сек — держит market.yes_ask/no_ask актуальными.
+        Также записывает pm_price_after для ставок ожидающих первого poll после входа."""
+        self._after_pending: dict[str, tuple[str, str]] = {}  # bet_id → (token_id, side)
+        self._after_pending_lock = threading.Lock()
+
         def _loop():
             while True:
                 try:
@@ -203,6 +207,17 @@ class OracleArbBot:
                                         market.yes_ask = price
                                     else:
                                         market.no_ask = price
+                                    # записываем after для ожидающих ставок
+                                    with self._after_pending_lock:
+                                        done = [bid for bid, (tid, s) in self._after_pending.items()
+                                                if tid == token_id and s == side]
+                                    for bid in done:
+                                        try:
+                                            self._db.update_price_after(bid, price)
+                                        except Exception:
+                                            pass
+                                        with self._after_pending_lock:
+                                            self._after_pending.pop(bid, None)
                             except Exception:
                                 pass
                 except Exception as exc:
@@ -479,9 +494,16 @@ class OracleArbBot:
             return
 
         crossing_seq = self._db.count_bets_for_market(mid) + 1
-        self._place_paper_bet(market, signal, price, now, crossing_seq,
-                              depth_usd=available_usd, signal_ask=signal_ask,
-                              signal_mode=signal_mode)
+        bet_id = self._place_paper_bet(market, signal, price, now, crossing_seq,
+                                       depth_usd=available_usd, signal_ask=signal_ask,
+                                       signal_mode=signal_mode)
+
+        # Регистрируем в поллере для записи pm_price_after
+        if bet_id and hasattr(self, "_after_pending"):
+            token_id = market.yes_token_id if signal_side == "yes" else market.no_token_id
+            if token_id:
+                with self._after_pending_lock:
+                    self._after_pending[bet_id] = (token_id, signal_side)
 
         with self._placed_lock:
             self._momentum_markets_bet.add(mid)
@@ -784,6 +806,8 @@ class OracleArbBot:
                 venue=market.venue, market_id=market.market_id,
                 pre_price=signal_ask,
             )
+
+        return bet.id
 
     def _record_price_after_delay(self, bet_id: str, token_id: str, delay: int, table: str) -> None:
         time.sleep(delay)
