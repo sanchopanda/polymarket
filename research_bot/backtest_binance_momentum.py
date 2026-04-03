@@ -186,7 +186,11 @@ def simulate_market(market: dict, buckets: dict[int, float],
                     trades: Optional[dict],
                     min_minute: int = 0,
                     adaptive_rules: Optional[list] = None,
-                    adaptive_window: int = 600) -> list[dict]:
+                    adaptive_window: int = 600,
+                    entry_delay: int = 1,
+                    min_price: float = 0.0,
+                    max_price: float = 1.0,
+                    cheap_delta: float = 0.0) -> list[dict]:
     start_ts = market["_start_ts"]
     end_ts = market["_end_ts"]
     winning_side = market["winning_side"]
@@ -231,7 +235,13 @@ def simulate_market(market: dict, buckets: dict[int, float],
         pm_entry_price = None
         if trades:
             outcome = "Up" if signal_side == "yes" else "Down"
-            pm_entry_price = _first_trade_price_after(trades, outcome, curr_ts + 1)
+            pm_entry_price = _first_trade_price_after(trades, outcome, curr_ts + entry_delay)
+
+        if pm_entry_price is not None:
+            if pm_entry_price < min_price or pm_entry_price > max_price:
+                continue
+            if cheap_delta > 0 and pm_entry_price < 0.50 and abs(delta_pct) < cheap_delta:
+                continue
 
         return [{
             "market_id": market["market_id"],
@@ -260,7 +270,11 @@ def simulate_market_continuous(market: dict, klines_1s: dict[int, float],
                                lookback: int = 5,
                                adaptive_rules: Optional[list] = None,
                                adaptive_window: int = 600,
-                               buckets_5s: Optional[dict[int, float]] = None) -> list[dict]:
+                               buckets_5s: Optional[dict[int, float]] = None,
+                               entry_delay: int = 1,
+                               min_price: float = 0.0,
+                               max_price: float = 1.0,
+                               cheap_delta: float = 0.0) -> list[dict]:
     start_ts = market["_start_ts"]
     end_ts = market["_end_ts"]
     winning_side = market["winning_side"]
@@ -307,7 +321,13 @@ def simulate_market_continuous(market: dict, klines_1s: dict[int, float],
         pm_entry_price = None
         if trades:
             outcome = "Up" if signal_side == "yes" else "Down"
-            pm_entry_price = _first_trade_price_after(trades, outcome, t + 1)
+            pm_entry_price = _first_trade_price_after(trades, outcome, t + entry_delay)
+
+        if pm_entry_price is not None:
+            if pm_entry_price < min_price or pm_entry_price > max_price:
+                continue
+            if cheap_delta > 0 and pm_entry_price < 0.50 and abs(delta_pct) < cheap_delta:
+                continue
 
         return [{
             "market_id": market["market_id"],
@@ -491,38 +511,81 @@ def print_stats(rows: list[dict]) -> None:
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
+def _load_bot_config() -> dict:
+    """Load defaults from bot config if available."""
+    try:
+        import yaml
+        with open("oracle_arb_bot/config.yaml") as f:
+            return yaml.safe_load(f)
+    except Exception:
+        return {}
+
+
 def main() -> None:
+    cfg = _load_bot_config()
+    strat = cfg.get("strategy", {})
+    trading = cfg.get("trading", {})
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--min-delta", type=float, default=0.05,
-                        help="минимальный |delta_pct| за 5с (default 0.05%%)")
+    parser.add_argument("--min-delta", type=float,
+                        default=strat.get("momentum_delta_pct", 0.05),
+                        help="минимальный |delta_pct| за 5с")
     parser.add_argument("--symbols", nargs="+", default=list(BINANCE_SYMBOLS.keys()))
     parser.add_argument("--force-fetch", action="store_true",
                         help="перезагрузить 1s klines даже если в DB есть")
     parser.add_argument("--limit", type=int, default=None,
-                        help="максимум рынков для обработки")
-    parser.add_argument("--min-minute", type=int, default=0,
-                        help="минимальная минута рынка для сигнала (default 0)")
+                        help="максимум рынков (последних) для обработки")
+    parser.add_argument("--min-minute", type=int,
+                        default=strat.get("momentum_min_minute", 1),
+                        help="минимальная минута рынка для сигнала")
     parser.add_argument("--shuffle", action="store_true",
                         help="перемешать рынки случайно перед --limit")
     parser.add_argument("--adaptive", action="store_true",
+                        default=strat.get("momentum_adaptive", True),
                         help="адаптивный порог по сигналам за предыдущие 10 мин")
-    parser.add_argument("--adaptive-window", type=int, default=600,
-                        help="окно подсчёта сигналов в секундах (default 600)")
-    parser.add_argument("--adaptive-rules", type=str, default="2:0.05,5:0.08,999:0.12",
-                        help="правила max_n:delta через запятую (default '2:0.05,5:0.08,999:0.12')")
+    parser.add_argument("--no-adaptive", action="store_true",
+                        help="выключить адаптивный порог")
+    parser.add_argument("--adaptive-window", type=int,
+                        default=strat.get("momentum_adaptive_window", 600),
+                        help="окно подсчёта сигналов в секундах")
+    parser.add_argument("--adaptive-rules", type=str, default=None,
+                        help="правила max_n:delta через запятую")
     parser.add_argument("--continuous", action="store_true",
                         help="continuous mode: проверять дельту каждую секунду (не по 5с бакетам)")
     parser.add_argument("--lookback", type=int, default=5,
                         help="окно сравнения цены в секундах для continuous mode (default 5)")
+    parser.add_argument("--entry-delay", type=int, default=1,
+                        help="задержка входа: PM цена берётся через N секунд после сигнала (default 1)")
+    parser.add_argument("--min-price", type=float, default=0.0,
+                        help="минимальная цена входа PM (default 0)")
+    parser.add_argument("--max-price", type=float,
+                        default=trading.get("max_price", 0.48),
+                        help="максимальная цена входа PM")
+    parser.add_argument("--cheap-delta", type=float,
+                        default=strat.get("momentum_cheap_delta_pct", 0.10),
+                        help="мин. дельта для ставок с ценой < 0.50")
     args = parser.parse_args()
+
+    if args.no_adaptive:
+        args.adaptive = False
 
     adaptive_rules = None
     if args.adaptive:
-        adaptive_rules = []
-        for part in args.adaptive_rules.split(","):
-            n, d = part.split(":")
-            adaptive_rules.append((int(n), float(d)))
+        if args.adaptive_rules:
+            adaptive_rules = []
+            for part in args.adaptive_rules.split(","):
+                n, d = part.split(":")
+                adaptive_rules.append((int(n), float(d)))
+        else:
+            # из конфига бота: [[2, 0.05], [5, 0.08], [999, 0.12]]
+            raw = strat.get("momentum_adaptive_rules", [[2, 0.05], [5, 0.08], [999, 0.12]])
+            adaptive_rules = [(int(r[0]), float(r[1])) for r in raw]
         print(f"Adaptive: window={args.adaptive_window}s rules={adaptive_rules}")
+
+    if args.max_price < 1.0 or args.min_price > 0.0:
+        print(f"Price filter: {args.min_price:.2f} – {args.max_price:.2f}")
+    if args.cheap_delta > 0:
+        print(f"Cheap delta: price < 0.50 requires |delta| >= {args.cheap_delta}%")
 
     conn = get_connection()
 
@@ -543,6 +606,8 @@ def main() -> None:
             continue
         markets.append(m)
 
+    # Сортируем по времени старта (новые первые) для --limit
+    markets.sort(key=lambda m: m["_start_ts"], reverse=True)
     if args.shuffle:
         random.shuffle(markets)
     if args.limit:
@@ -602,6 +667,10 @@ def main() -> None:
                     adaptive_rules=adaptive_rules,
                     adaptive_window=args.adaptive_window,
                     buckets_5s=buckets,
+                    entry_delay=args.entry_delay,
+                    min_price=args.min_price,
+                    max_price=args.max_price,
+                    cheap_delta=args.cheap_delta,
                 )
                 writer.writerows(rows)
                 all_rows.extend(rows)
@@ -614,7 +683,11 @@ def main() -> None:
                 trades_data = load_trades(conn, market["market_id"])
                 rows = simulate_market(market, buckets, args.min_delta, trades_data, args.min_minute,
                                        adaptive_rules=adaptive_rules,
-                                       adaptive_window=args.adaptive_window)
+                                       adaptive_window=args.adaptive_window,
+                                       entry_delay=args.entry_delay,
+                                       min_price=args.min_price,
+                                       max_price=args.max_price,
+                                       cheap_delta=args.cheap_delta)
                 writer.writerows(rows)
                 all_rows.extend(rows)
 
