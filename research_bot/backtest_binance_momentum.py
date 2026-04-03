@@ -558,9 +558,8 @@ def main() -> None:
                         help="задержка входа: PM цена берётся через N секунд после сигнала (default 1)")
     parser.add_argument("--min-price", type=float, default=0.0,
                         help="минимальная цена входа PM (default 0)")
-    parser.add_argument("--max-price", type=float,
-                        default=trading.get("max_price", 0.48),
-                        help="максимальная цена входа PM")
+    parser.add_argument("--max-price", type=float, default=1.0,
+                        help="максимальная цена входа PM (default 1.0, без фильтра)")
     parser.add_argument("--cheap-delta", type=float,
                         default=strat.get("momentum_cheap_delta_pct", 0.10),
                         help="мин. дельта для ставок с ценой < 0.50")
