@@ -190,7 +190,8 @@ def simulate_market(market: dict, buckets: dict[int, float],
                     entry_delay: int = 1,
                     min_price: float = 0.0,
                     max_price: float = 1.0,
-                    cheap_delta: float = 0.0) -> list[dict]:
+                    cheap_delta: float = 0.0,
+                    entry_offset: float = 0.0) -> list[dict]:
     start_ts = market["_start_ts"]
     end_ts = market["_end_ts"]
     winning_side = market["winning_side"]
@@ -238,6 +239,7 @@ def simulate_market(market: dict, buckets: dict[int, float],
             pm_entry_price = _first_trade_price_after(trades, outcome, curr_ts + entry_delay)
 
         if pm_entry_price is not None:
+            pm_entry_price = min(pm_entry_price + entry_offset, 1.0)
             if pm_entry_price < min_price or pm_entry_price > max_price:
                 continue
             if cheap_delta > 0 and pm_entry_price < 0.50 and abs(delta_pct) < cheap_delta:
@@ -274,7 +276,8 @@ def simulate_market_continuous(market: dict, klines_1s: dict[int, float],
                                entry_delay: int = 1,
                                min_price: float = 0.0,
                                max_price: float = 1.0,
-                               cheap_delta: float = 0.0) -> list[dict]:
+                               cheap_delta: float = 0.0,
+                               entry_offset: float = 0.0) -> list[dict]:
     start_ts = market["_start_ts"]
     end_ts = market["_end_ts"]
     winning_side = market["winning_side"]
@@ -338,6 +341,7 @@ def simulate_market_continuous(market: dict, klines_1s: dict[int, float],
             pm_entry_price = _first_trade_price_after(trades, outcome, t + entry_delay)
 
         if pm_entry_price is not None:
+            pm_entry_price = min(pm_entry_price + entry_offset, 1.0)
             if pm_entry_price < min_price or pm_entry_price > max_price:
                 continue
             if cheap_delta > 0 and pm_entry_price < 0.50 and abs(delta_pct) < cheap_delta:
@@ -570,6 +574,8 @@ def main() -> None:
                         help="окно сравнения цены в секундах для continuous mode (default 5)")
     parser.add_argument("--entry-delay", type=int, default=1,
                         help="задержка входа: PM цена берётся через N секунд после сигнала (default 1)")
+    parser.add_argument("--entry-offset", type=float, default=0.0,
+                        help="добавить N к цене входа (симуляция slippage, например 0.10)")
     parser.add_argument("--min-price", type=float, default=0.0,
                         help="минимальная цена входа PM (default 0)")
     parser.add_argument("--max-price", type=float, default=1.0,
@@ -693,6 +699,7 @@ def main() -> None:
                     min_price=args.min_price,
                     max_price=args.max_price,
                     cheap_delta=args.cheap_delta,
+                    entry_offset=args.entry_offset,
                 )
                 writer.writerows(rows)
                 all_rows.extend(rows)
@@ -709,7 +716,8 @@ def main() -> None:
                                        entry_delay=args.entry_delay,
                                        min_price=args.min_price,
                                        max_price=args.max_price,
-                                       cheap_delta=args.cheap_delta)
+                                       cheap_delta=args.cheap_delta,
+                                       entry_offset=args.entry_offset)
                 writer.writerows(rows)
                 all_rows.extend(rows)
 

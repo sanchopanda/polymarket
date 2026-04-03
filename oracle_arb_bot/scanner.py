@@ -297,15 +297,16 @@ class OracleScanner:
                     best_ask = float(asks[0]["price"])
                 except (TypeError, ValueError, KeyError, IndexError):
                     pass
+        elif event_type == "last_trade_price":
+            return  # цена последней сделки — не цена спроса, игнорируем
         else:
-            for field in ("best_ask", "price"):
-                raw = item.get(field)
-                if raw is not None:
-                    try:
-                        best_ask = float(raw)
-                        break
-                    except (TypeError, ValueError):
-                        pass
+            # Неизвестный тип — берём только если есть явный best_ask, не price
+            raw = item.get("best_ask")
+            if raw is not None:
+                try:
+                    best_ask = float(raw)
+                except (TypeError, ValueError):
+                    pass
             if best_ask is None:
                 asks = item.get("asks") or []
                 if asks:
