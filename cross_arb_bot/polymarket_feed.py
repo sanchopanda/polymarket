@@ -38,6 +38,25 @@ class PolymarketFeed:
 
     def fetch_markets(self) -> list[NormalizedMarket]:
         raw = self.client.fetch_all_active_markets()
+
+        slug_symbols = self.market_filter.get("slug_symbols") or []
+        if slug_symbols:
+            now_utc = datetime.now(timezone.utc)
+            # Floor to nearest 15-minute window start
+            floored_minute = (now_utc.minute // 15) * 15
+            window_start = now_utc.replace(minute=floored_minute, second=0, microsecond=0)
+            slugs = [
+                f"{sym}-updown-15m-{int((window_start + timedelta(minutes=15 * offset)).timestamp())}"
+                for offset in range(3)
+                for sym in slug_symbols
+            ]
+            slug_markets = self.client.fetch_markets_by_slugs(slugs)
+            existing_ids = {m.id for m in raw}
+            for m in slug_markets:
+                if m.id not in existing_ids:
+                    raw.append(m)
+                    existing_ids.add(m.id)
+
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         min_expiry = now + timedelta(days=self.market_filter["min_days_to_expiry"])
         max_expiry = now + timedelta(days=self.market_filter["max_days_to_expiry"])

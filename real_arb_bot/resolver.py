@@ -178,19 +178,52 @@ class PositionResolver:
             )
 
     def _resolve_paper(self, position) -> None:
+        row_meta = self.db.conn.execute(
+            "SELECT execution_status, yes_avg_price, no_avg_price, "
+            "yes_filled_shares, no_filled_shares FROM positions WHERE id=?",
+            (position.id,),
+        ).fetchone()
+        exec_status = row_meta["execution_status"] if row_meta else "paper"
+
         pm_result, _ = self._check_polymarket(position)
         kalshi_result, _, kalshi_close_price = self._check_kalshi(position)
 
         if pm_result is None or kalshi_result is None:
             return
 
-        yes_wins = self._leg_wins(position.venue_yes, "yes", pm_result, kalshi_result)
-        no_wins = self._leg_wins(position.venue_no, "no", pm_result, kalshi_result)
-        lock_valid = (yes_wins + no_wins) == 1
+        if exec_status in ("paper_one_legged_yes", "paper_one_legged_no"):
+            # Одноногая позиция которая так и не докупилась
+            if exec_status == "paper_one_legged_yes":
+                leg_price = float(row_meta["yes_avg_price"] or 0)
+                leg_shares = float(row_meta["yes_filled_shares"] or 0)
+                leg_won = self._leg_wins(position.venue_yes, "yes", pm_result, kalshi_result)
+                winning_side = "yes" if leg_won else "no"
+            else:
+                leg_price = float(row_meta["no_avg_price"] or 0)
+                leg_shares = float(row_meta["no_filled_shares"] or 0)
+                leg_won = self._leg_wins(position.venue_no, "no", pm_result, kalshi_result)
+                winning_side = "no" if leg_won else "yes"
+            cost = leg_shares * leg_price
+            pnl = (leg_shares - cost) if leg_won else -cost
+            lock_valid = False
+            tag = "✓" if pnl > 0 else "✗"
+            print(
+                f"[resolve][PAPER][ONE-LEG] {position.symbol} | pm={pm_result} kalshi={kalshi_result} "
+                f"| leg_won={bool(leg_won)} | pnl=${pnl:+.2f} ({tag})"
+            )
+        else:
+            yes_wins = self._leg_wins(position.venue_yes, "yes", pm_result, kalshi_result)
+            no_wins = self._leg_wins(position.venue_no, "no", pm_result, kalshi_result)
+            lock_valid = (yes_wins + no_wins) == 1
 
-        # PnL по плановым shares (реальных ордеров не было)
-        pnl = position.shares - position.total_cost if lock_valid else -position.total_cost
-        winning_side = "yes" if yes_wins and not no_wins else ("no" if no_wins and not yes_wins else "mismatch")
+            # PnL по плановым shares (реальных ордеров не было)
+            pnl = position.shares - position.total_cost if lock_valid else -position.total_cost
+            winning_side = "yes" if yes_wins and not no_wins else ("no" if no_wins and not yes_wins else "mismatch")
+            tag = "✓ profit" if pnl > 0 else "✗ loss"
+            print(
+                f"[resolve][PAPER] {position.symbol} | pm={pm_result} kalshi={kalshi_result} "
+                f"| lock_valid={lock_valid} | pnl=${pnl:+.2f} ({tag})"
+            )
 
         pm_close_price = self._fetch_pm_close_price(position)
         self.db.resolve_position(
@@ -203,11 +236,6 @@ class PositionResolver:
             lock_valid=lock_valid,
             kalshi_close_price=kalshi_close_price,
             pm_close_price=pm_close_price,
-        )
-        tag = "✓ profit" if pnl > 0 else "✗ loss"
-        print(
-            f"[resolve][PAPER] {position.symbol} | pm={pm_result} kalshi={kalshi_result} "
-            f"| lock_valid={lock_valid} | pnl=${pnl:+.2f} ({tag})"
         )
         if self.notifier:
             self.notifier.notify_resolve(

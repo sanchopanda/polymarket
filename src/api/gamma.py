@@ -207,6 +207,30 @@ class GammaClient:
             print(f"[GammaClient] Ошибка fetch_market {market_id}: {e}")
             return None
 
+    def fetch_markets_by_slugs(self, slugs: List[str]) -> List[Market]:
+        """Загрузить рынки по event-слагам (работает для restricted-рынков).
+
+        Использует /events?slug= вместо /markets, чтобы обойти фильтрацию
+        restricted=True в стандартных запросах.
+        """
+        markets: List[Market] = []
+        for slug in slugs:
+            try:
+                resp = self._http.get(f"{self.base_url}/events", params={"slug": slug})
+                resp.raise_for_status()
+                events = resp.json()
+                if not events:
+                    continue
+                for event in events:
+                    for raw_market in event.get("markets", []):
+                        m = self._parse_market(raw_market)
+                        if m:
+                            markets.append(m)
+            except httpx.HTTPError as e:
+                print(f"[GammaClient] Ошибка fetch slug {slug}: {e}")
+            time.sleep(self.delay_s)
+        return markets
+
     def _parse_market(self, raw: dict) -> Optional[Market]:
         try:
             outcomes = _parse_json_field(raw.get("outcomes"))

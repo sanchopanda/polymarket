@@ -122,6 +122,28 @@ class KalshiFeed:
         asks.sort(key=lambda x: x.price)
         return asks, None
 
+    def fetch_side_bids(self, ticker: str, side: str) -> tuple[list[OrderLevel] | None, str | None]:
+        """Fetch bid levels for a given side (for selling positions back)."""
+        try:
+            response = self.http.get(f"{self.base_url}/markets/{ticker}/orderbook")
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPError as exc:
+            return None, f"kalshi orderbook fetch failed: {exc}"
+
+        orderbook = payload.get("orderbook_fp") or payload.get("orderbook") or {}
+        yes_bids_raw = orderbook.get("yes_dollars") or orderbook.get("yes") or []
+        no_bids_raw = orderbook.get("no_dollars") or orderbook.get("no") or []
+
+        if side == "yes":
+            bids = [self._level_from_pair(item) for item in yes_bids_raw]
+        else:
+            bids = [self._level_from_pair(item) for item in no_bids_raw]
+
+        bids = [b for b in bids if b is not None]
+        bids.sort(key=lambda x: x.price, reverse=True)
+        return bids, None
+
     def _level_from_pair(self, item) -> OrderLevel | None:
         if not isinstance(item, (list, tuple)) or len(item) < 2:
             return None

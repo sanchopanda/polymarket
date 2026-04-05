@@ -66,14 +66,16 @@ class RealArbEngine:
 
     def _init_notifier(self) -> None:
         import os
-        if not os.environ.get("SIMPLE_BOT_TOKEN"):
+        tg_cfg = self.config.get("telegram", {})
+        token_env = tg_cfg.get("token_env", "SIMPLE_BOT_TOKEN")
+        if not os.environ.get(token_env):
             return
         try:
             from real_arb_bot.telegram_notify import TelegramNotifier
-            self.notifier = TelegramNotifier(get_status_fn=self.get_status_text)
+            self.notifier = TelegramNotifier(get_status_fn=self.get_status_text, token_env=token_env)
             self.notifier.start()
             self.resolver.notifier = self.notifier
-            print("[Telegram] Бот запущен.")
+            print(f"[Telegram] Бот запущен ({token_env}).")
         except Exception as e:
             print(f"[Telegram] Не удалось запустить: {e}")
 

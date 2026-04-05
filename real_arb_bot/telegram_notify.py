@@ -23,10 +23,10 @@ class TelegramNotifier:
 
     CHAT_ID_FILE = "data/.telegram_chat_id"
 
-    def __init__(self, get_status_fn: Callable[[], str]) -> None:
-        token = os.environ.get("SIMPLE_BOT_TOKEN", "")
+    def __init__(self, get_status_fn: Callable[[], str], token_env: str = "SIMPLE_BOT_TOKEN") -> None:
+        token = os.environ.get(token_env, "")
         if not token:
-            raise RuntimeError("SIMPLE_BOT_TOKEN не задан в .env")
+            raise RuntimeError(f"{token_env} не задан в .env")
 
         self.chat_id: int | None = self._load_chat_id()
         self._get_status = get_status_fn
@@ -150,7 +150,10 @@ class TelegramNotifier:
         pm_close_price: float | None = None,
     ) -> None:
         paper_tag = " [PAPER]" if is_paper else ""
-        if lock_valid:
+        if pm_result == "early_exit" or kalshi_result == "early_exit":
+            icon = "🚪"
+            validity = "ранний выход (danger zone)"
+        elif lock_valid:
             icon = "💰" if pnl > 0 else "📉"
             validity = "арбитраж ✓"
         elif "not_traded" in (pm_result, kalshi_result):

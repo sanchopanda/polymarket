@@ -40,9 +40,16 @@ market_filter:
   fee_type: "crypto_fees"
   min_days_to_expiry: 0
   max_days_to_expiry: 0.083
-  min_volume: 1000
+  min_volume: 0
   min_liquidity: 1000
   expiry_tolerance_seconds: 120
+  slug_symbols:
+    - "btc"
+    - "eth"
+    - "sol"
+    - "xrp"
+    - "doge"
+    - "bnb"
 
 runtime:
   poll_interval_seconds: 60
@@ -74,3 +81,18 @@ kalshi:
     - "KXDOGE15M"
     - "KXBNB15M"
     - "KXXRP15M"
+
+chainlink:
+  rpc_urls:
+    - "https://polygon-bor-rpc.publicnode.com"
+    - "https://polygon.drpc.org"
+    - "https://polygon.meowrpc.com"
+  wss_urls:
+    - "wss://polygon-bor-rpc.publicnode.com"
+    - "wss://polygon.drpc.org"
+  poll_interval_seconds: 30
+  danger_zone_pct: 0.05          # exit if price within 0.05% of reference
+  pre_expiry_check_seconds: 120  # start checking 2 min before expiry
+
+telegram:
+  token_env: FAST_ARB_BOT_TOKEN

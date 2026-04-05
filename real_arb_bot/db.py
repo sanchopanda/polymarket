@@ -293,6 +293,70 @@ class RealArbDB:
             (pair_key, yes_venue, no_venue),
         ).fetchone() is not None
 
+    def open_paper_one_legged_position(self, opportunity, side: str, leg) -> None:
+        """Открывает одноногую paper позицию (только YES или только NO)."""
+        import uuid as _uuid
+        pos_id = str(_uuid.uuid4())
+        now = datetime.utcnow().isoformat()
+        exec_status = f"paper_one_legged_{side}"
+        leg_cost = leg.filled_shares * leg.avg_price
+        yes_avg = leg.avg_price if side == "yes" else None
+        no_avg = leg.avg_price if side == "no" else None
+        yes_shares = leg.filled_shares if side == "yes" else None
+        no_shares = leg.filled_shares if side == "no" else None
+        self.conn.execute(
+            """
+            INSERT INTO positions (
+                id, pair_key, symbol, title, expiry, venue_yes, market_yes, venue_no, market_no,
+                polymarket_title, kalshi_title, match_score, expiry_delta_seconds,
+                polymarket_reference_price, kalshi_reference_price, polymarket_rules, kalshi_rules,
+                shares, yes_ask, no_ask, ask_sum, total_cost, expected_profit,
+                yes_avg_price, no_avg_price, yes_filled_shares, no_filled_shares,
+                opened_at, status, execution_status, is_paper
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                pos_id,
+                opportunity.pair_key, opportunity.symbol, opportunity.title,
+                opportunity.expiry.isoformat(),
+                opportunity.buy_yes_venue,
+                opportunity.polymarket_market_id if opportunity.buy_yes_venue == "polymarket" else opportunity.kalshi_market_id,
+                opportunity.buy_no_venue,
+                opportunity.polymarket_market_id if opportunity.buy_no_venue == "polymarket" else opportunity.kalshi_market_id,
+                opportunity.polymarket_title, opportunity.kalshi_title,
+                opportunity.match_score, opportunity.expiry_delta_seconds,
+                opportunity.polymarket_reference_price, opportunity.kalshi_reference_price,
+                opportunity.polymarket_rules, opportunity.kalshi_rules,
+                opportunity.shares, opportunity.yes_ask, opportunity.no_ask, opportunity.ask_sum,
+                leg_cost, -leg_cost,
+                yes_avg, no_avg, yes_shares, no_shares,
+                now, "open", exec_status, 1,
+            ),
+        )
+        self.conn.commit()
+
+    def complete_paper_one_legged(
+        self, position_id: str, missing_side: str, price: float, shares: float
+    ) -> None:
+        """Симулирует докупку второй ноги одноногой paper позиции."""
+        if missing_side == "yes":
+            self.conn.execute(
+                "UPDATE positions SET "
+                "yes_avg_price=?, yes_filled_shares=?, "
+                "total_cost = COALESCE(no_avg_price,0)*COALESCE(no_filled_shares,0) + ?*?, "
+                "execution_status='paper' WHERE id=?",
+                (price, shares, price, shares, position_id),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE positions SET "
+                "no_avg_price=?, no_filled_shares=?, "
+                "total_cost = COALESCE(yes_avg_price,0)*COALESCE(yes_filled_shares,0) + ?*?, "
+                "execution_status='paper' WHERE id=?",
+                (price, shares, price, shares, position_id),
+            )
+        self.conn.commit()
+
     def resolve_position(
         self,
         position_id: str,

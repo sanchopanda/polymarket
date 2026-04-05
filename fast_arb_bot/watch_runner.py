@@ -19,6 +19,11 @@ from real_arb_bot.engine import RealArbEngine
 
 from fast_arb_bot.executor import FastArbExecutor, FastExecutionResult, _empty_order
 
+try:
+    from oracle_arb_bot.chainlink_feed import ChainlinkFeed as _ChainlinkFeed
+except ImportError:
+    _ChainlinkFeed = None  # type: ignore[assignment,misc]
+
 
 @dataclass
 class WatchedPair:
@@ -31,6 +36,24 @@ class PMCompletionCandidate:
     best_ask: float
     avg_price: float
     worst_price: float
+
+
+@dataclass
+class _DangerExit:
+    """State for a position in the pre-expiry danger zone sell monitor."""
+    pm_yes_token: str | None
+    pm_no_token: str | None
+    kalshi_ticker: str | None
+    venue_yes: str
+    venue_no: str
+    yes_entry: float
+    no_entry: float
+    shares: float
+    symbol: str
+    ref_price: float
+    yes_sell_price: float | None = None
+    no_sell_price: float | None = None
+    timer: threading.Timer | None = None
 
 
 class FastArbWatchRunner:
@@ -81,6 +104,24 @@ class FastArbWatchRunner:
         self._one_leg_pm_cancelled: dict[str, float] = {}
         # pos_id → True means re-entered once, don't cancel again
         self._one_leg_pm_final: set[str] = set()
+        # pair_key → pending Timer (paper mode: 0.5s delay before orderbook check)
+        self._pending_timers: dict[str, threading.Timer] = {}
+
+        # Chainlink pre-expiry danger zone monitor
+        cl_cfg = engine.config.get("chainlink", {})
+        self._danger_zone_pct: float = float(cl_cfg.get("danger_zone_pct", 0.05))
+        self._pre_expiry_seconds: float = float(cl_cfg.get("pre_expiry_check_seconds", 120))
+        self._chainlink: _ChainlinkFeed | None = None  # type: ignore[valid-type]
+        self._danger_exits: dict[str, _DangerExit] = {}  # pos_id → sell state
+        if _ChainlinkFeed and cl_cfg.get("rpc_urls"):
+            _cl_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+            self._chainlink = _ChainlinkFeed(
+                symbols=_cl_symbols,
+                on_price=lambda sym, price, ts: None,
+                rpc_urls=cl_cfg["rpc_urls"],
+                wss_urls=cl_cfg.get("wss_urls"),
+                poll_interval_seconds=float(cl_cfg.get("poll_interval_seconds", 30)),
+            )
 
         # Подменяем функцию статуса в Telegram-нотификаторе
         if engine.notifier:
@@ -88,9 +129,16 @@ class FastArbWatchRunner:
 
     # ── Основной цикл ──────────────────────────────────────────────────
 
+    _DANGER_CHECK_INTERVAL = 10.0  # Chainlink updates ~every 27s; 10s is enough
+
     def run(self) -> None:
         ws: MarketWebSocketClient | None = None
         last_status = 0.0
+        last_danger_check = 0.0
+
+        if self._chainlink:
+            self._chainlink.start()
+            print(f"[fast-arb] Chainlink danger-zone monitor: ±{self._danger_zone_pct}% within {self._pre_expiry_seconds:.0f}s of expiry")
 
         try:
             while True:
@@ -105,6 +153,10 @@ class FastArbWatchRunner:
 
                 self._sync_one_legged_polymarket_orders()
                 self._monitor_one_leg_pm_cancel_reenter()
+                self._monitor_paper_one_legged()
+                if now - last_danger_check >= self._DANGER_CHECK_INTERVAL:
+                    self._check_pre_expiry_danger()
+                    last_danger_check = now
                 time.sleep(1)
         except KeyboardInterrupt:
             print("\n[fast-arb] Stopped.")
@@ -113,6 +165,11 @@ class FastArbWatchRunner:
                 ws.stop()
             if self._kalshi_ws is not None:
                 self._kalshi_ws.stop()
+            if self._chainlink:
+                self._chainlink.stop()
+            for state in self._danger_exits.values():
+                if state.timer:
+                    state.timer.cancel()
 
     # ── Refresh watchlist ──────────────────────────────────────────────
 
@@ -160,6 +217,11 @@ class FastArbWatchRunner:
         self.watch_by_pair_key = watched
         self.pairs_by_asset_id = pairs_by_asset
         self.pairs_by_kalshi_ticker = pairs_by_kalshi
+
+        # Отменяем таймеры для пар которые больше не отслеживаются
+        for key in list(self._pending_timers.keys()):
+            if key not in self.watch_by_pair_key:
+                self._pending_timers.pop(key).cancel()
 
         # Пробуем сразу исполнить найденные возможности
         self._try_immediate_open(opportunities, match_index)
@@ -285,6 +347,27 @@ class FastArbWatchRunner:
             return
 
         event_type = payload.get("event_type")
+
+        if event_type == "price_change":
+            timestamp = int(payload.get("timestamp", 0) or 0)
+            for change in payload.get("price_changes", []):
+                asset_id = str(change.get("asset_id", ""))
+                if not asset_id:
+                    continue
+                try:
+                    best_ask = float(change.get("best_ask", 0) or 0)
+                    best_bid = float(change.get("best_bid", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if best_ask <= 0:
+                    continue
+                self.live_books[asset_id] = TopOfBook(
+                    best_bid=best_bid, best_ask=best_ask, updated_at_ms=timestamp,
+                )
+                for pair_key in self.pairs_by_asset_id.get(asset_id, set()):
+                    self._maybe_open_pair(pair_key)
+            return
+
         if event_type not in {"book", "best_bid_ask"}:
             return
 
@@ -412,6 +495,15 @@ class FastArbWatchRunner:
                 if "realized_losses" in reason:
                     self.engine.safety.dry_run = True
                 return
+
+        # Paper mode: симулируем задержку исполнения реальной ставки (0.5s)
+        if self.dry_run:
+            watch_key = self._watch_key(opp)
+            if watch_key not in self._pending_timers:
+                t = threading.Timer(1.5, self._delayed_paper_check, args=[watch_key])
+                self._pending_timers[watch_key] = t
+                t.start()
+            return
 
         with self._signal_lock:
             open_for_pair = self._count_open_positions_for_pair(opp.pair_key)
@@ -589,6 +681,370 @@ class FastArbWatchRunner:
                 kalshi_target=_k_tgt,
                 pm_target=_p_tgt,
             )
+
+    # ── Paper simulation: задержка + одноногие позиции ────────────────
+
+    def _delayed_paper_check(self, watch_key: str) -> None:
+        """Вызывается через 0.5с после WS-сигнала. Делает REST-проверку стаканов
+        и открывает paper позицию (двуногую или одноногую)."""
+        self._pending_timers.pop(watch_key, None)
+
+        watched = self.watch_by_pair_key.get(watch_key)
+        if watched is None:
+            return
+        opp = watched.opportunity
+        matched = watched.matched
+
+        if self._is_too_close_to_expiry(opp.expiry):
+            return
+
+        max_entries = int(self.engine.trading.get("max_entries_per_pair", 1))
+        with self._signal_lock:
+            if self._count_open_positions_for_pair(opp.pair_key) >= max_entries:
+                return
+
+            executed, yes_leg, no_leg = self._apply_execution_pricing_parallel(opp, matched)
+
+            if executed is not None:
+                if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
+                    return
+                if not self._prices_within_bounds(executed.yes_ask, executed.no_ask):
+                    return
+                if self._prices_in_blocked_zone(executed.yes_ask, executed.no_ask):
+                    return
+                if not self._prices_cross_midpoint(executed.yes_ask, executed.no_ask):
+                    return
+                if self._edge_above_max_allowed(executed.yes_ask, executed.no_ask):
+                    return
+                if executed.expected_profit <= 0:
+                    return
+                self._execute_and_record(executed, matched, yes_leg, no_leg)
+            else:
+                self._maybe_open_paper_one_legged(opp, yes_leg, no_leg)
+
+    def _maybe_open_paper_one_legged(
+        self,
+        opp: CrossVenueOpportunity,
+        yes_leg: ExecutionLegInfo | None,
+        no_leg: ExecutionLegInfo | None,
+    ) -> None:
+        """Если только одна нога ликвидна — открываем одноногую paper позицию."""
+        shares = math.floor(opp.shares)
+        if shares <= 0:
+            return
+        yes_ok = yes_leg is not None and yes_leg.filled_shares + 1e-6 >= shares
+        no_ok = no_leg is not None and no_leg.filled_shares + 1e-6 >= shares
+        if yes_ok and not no_ok:
+            self.engine.db.open_paper_one_legged_position(opp, "yes", yes_leg)
+            print(
+                f"[fast-arb][PAPER][ONE-LEG] {opp.symbol} | "
+                f"{opp.buy_yes_venue}:YES@{yes_leg.avg_price:.4f} | no-leg unavailable"
+            )
+        elif no_ok and not yes_ok:
+            self.engine.db.open_paper_one_legged_position(opp, "no", no_leg)
+            print(
+                f"[fast-arb][PAPER][ONE-LEG] {opp.symbol} | "
+                f"{opp.buy_no_venue}:NO@{no_leg.avg_price:.4f} | yes-leg unavailable"
+            )
+
+    def _monitor_paper_one_legged(self) -> None:
+        """Проверяет открытые одноногие paper позиции и симулирует докупку
+        когда цена второй ноги возвращается к приемлемому уровню."""
+        rows = self.engine.db.conn.execute(
+            "SELECT id, pair_key, venue_yes, market_yes, venue_no, market_no, "
+            "yes_avg_price, no_avg_price, yes_filled_shares, no_filled_shares, "
+            "execution_status "
+            "FROM positions "
+            "WHERE status='open' AND is_paper=1 "
+            "AND execution_status IN ('paper_one_legged_yes', 'paper_one_legged_no')"
+        ).fetchall()
+        if not rows:
+            return
+
+        min_edge = float(self.engine.trading["min_lock_edge"])
+        for row in rows:
+            pos_id = row["id"]
+            exec_status = row["execution_status"]
+            if exec_status == "paper_one_legged_yes":
+                filled_price = float(row["yes_avg_price"] or 0)
+                shares = float(row["yes_filled_shares"] or 0)
+                missing_venue = row["venue_no"]
+                missing_market = row["market_no"]
+                missing_side = "no"
+            else:
+                filled_price = float(row["no_avg_price"] or 0)
+                shares = float(row["no_filled_shares"] or 0)
+                missing_venue = row["venue_yes"]
+                missing_market = row["market_yes"]
+                missing_side = "yes"
+
+            if shares <= 0 or filled_price <= 0:
+                continue
+            max_completion_price = 1.0 - filled_price - min_edge
+            if max_completion_price <= 0:
+                continue
+
+            current_price = self._get_live_completion_price(
+                missing_venue, missing_market, missing_side,
+                row["venue_yes"], row["venue_no"], row["pair_key"],
+            )
+            if current_price is None or current_price <= 0:
+                continue
+
+            if current_price <= max_completion_price:
+                self.engine.db.complete_paper_one_legged(pos_id, missing_side, current_price, shares)
+                print(
+                    f"[fast-arb][PAPER][COMPLETE] pos={pos_id[:8]} | "
+                    f"{missing_venue}:{missing_side}@{current_price:.4f} | "
+                    f"edge={(1.0 - filled_price - current_price):.4f}"
+                )
+
+    def _get_live_completion_price(
+        self,
+        venue: str,
+        market_id: str,
+        side: str,
+        venue_yes: str,
+        venue_no: str,
+        pair_key: str,
+    ) -> float | None:
+        if venue == "kalshi":
+            book = self.live_books_kalshi.get(market_id)
+            if book is None:
+                return None
+            return book.best_yes_ask if side == "yes" else book.best_no_ask
+        # polymarket — ищем token_id через watched pair
+        watch_key = f"{pair_key}|{venue_yes}|{venue_no}"
+        watched = self.watch_by_pair_key.get(watch_key)
+        if watched is None:
+            return None
+        token_id = (
+            watched.matched.polymarket.yes_token_id if side == "yes"
+            else watched.matched.polymarket.no_token_id
+        )
+        if not token_id:
+            return None
+        book = self.live_books.get(token_id)
+        return book.best_ask if book else None
+
+    # ── Pre-expiry danger zone (Chainlink + orderbook sell) ────────────
+
+    def _check_pre_expiry_danger(self) -> None:
+        """Detect positions approaching expiry with Chainlink price in the
+        danger zone.  Start sell-monitoring: try to sell both legs on the
+        orderbook at >= entry price (with 1.5s simulated delay per attempt)."""
+        if self._chainlink is None:
+            return
+
+        now = datetime.now(timezone.utc)
+
+        # Clean up states for positions that got resolved normally
+        for pid in list(self._danger_exits):
+            pos = self.engine.db.get_position(pid)
+            if pos is None or pos.status != "open":
+                state = self._danger_exits.pop(pid)
+                if state.timer:
+                    state.timer.cancel()
+
+        positions = self.engine.db.get_open_positions()
+        for pos in positions:
+            if not pos.is_paper or pos.id in self._danger_exits:
+                continue
+
+            # Only two-legged paper positions
+            row = self.engine.db.conn.execute(
+                "SELECT execution_status FROM positions WHERE id=?", (pos.id,)
+            ).fetchone()
+            exec_status = row["execution_status"] if row else None
+            if exec_status not in ("paper", "paper_both_filled"):
+                continue
+
+            seconds_to_expiry = (pos.expiry - now).total_seconds()
+            if seconds_to_expiry > self._pre_expiry_seconds or seconds_to_expiry < 0:
+                continue
+
+            cl_price = self._chainlink.get_price(pos.symbol)
+            if cl_price is None:
+                continue
+            ref_price = pos.kalshi_reference_price
+            if ref_price is None or ref_price <= 0:
+                continue
+
+            distance_pct = abs(cl_price - ref_price) / ref_price * 100
+            if distance_pct >= self._danger_zone_pct:
+                continue
+
+            # Resolve PM token IDs from watched pairs
+            watch_key = f"{pos.pair_key}|{pos.venue_yes}|{pos.venue_no}"
+            watched = self.watch_by_pair_key.get(watch_key)
+            pm_yes_token = watched.matched.polymarket.yes_token_id if watched else None
+            pm_no_token = watched.matched.polymarket.no_token_id if watched else None
+            kalshi_ticker = (
+                pos.market_yes if pos.venue_yes == "kalshi" else pos.market_no
+            )
+
+            state = _DangerExit(
+                pm_yes_token=pm_yes_token,
+                pm_no_token=pm_no_token,
+                kalshi_ticker=kalshi_ticker,
+                venue_yes=pos.venue_yes,
+                venue_no=pos.venue_no,
+                yes_entry=pos.yes_ask,
+                no_entry=pos.no_ask,
+                shares=pos.shares,
+                symbol=pos.symbol,
+                ref_price=ref_price,
+            )
+            self._danger_exits[pos.id] = state
+
+            direction = "UP" if cl_price >= ref_price else "DOWN"
+            print(
+                f"\n[fast-arb][DANGER] {pos.symbol} | CL={cl_price:.4f} ref={ref_price:.4f} "
+                f"dist={distance_pct:.4f}% ({direction}) | {seconds_to_expiry:.0f}s to expiry "
+                f"| начинаем попытки продажи"
+            )
+
+            # Schedule first sell attempt after 1.5s delay
+            state.timer = threading.Timer(1.5, self._danger_exit_try_sell, args=[pos.id])
+            state.timer.start()
+
+    def _danger_exit_try_sell(self, pos_id: str) -> None:
+        """Timer callback: check orderbook bids and sell legs at >= entry price."""
+        state = self._danger_exits.get(pos_id)
+        if state is None:
+            return
+        state.timer = None
+
+        # Check position is still open
+        pos = self.engine.db.get_position(pos_id)
+        if pos is None or pos.status != "open":
+            self._danger_exits.pop(pos_id, None)
+            return
+
+        # Try to sell unsold YES leg
+        if state.yes_sell_price is None:
+            yes_bids = self._fetch_sell_bids(state.venue_yes, "yes", state)
+            fill = self._check_sell_depth(yes_bids, state.shares, state.yes_entry)
+            if fill is not None:
+                state.yes_sell_price = fill
+                print(
+                    f"[fast-arb][DANGER-SELL] {state.symbol} pos={pos_id[:8]} | "
+                    f"YES leg sold @{fill:.4f} (entry={state.yes_entry:.4f})"
+                )
+
+        # Try to sell unsold NO leg
+        if state.no_sell_price is None:
+            no_bids = self._fetch_sell_bids(state.venue_no, "no", state)
+            fill = self._check_sell_depth(no_bids, state.shares, state.no_entry)
+            if fill is not None:
+                state.no_sell_price = fill
+                print(
+                    f"[fast-arb][DANGER-SELL] {state.symbol} pos={pos_id[:8]} | "
+                    f"NO leg sold @{fill:.4f} (entry={state.no_entry:.4f})"
+                )
+
+        # Both legs sold → resolve position
+        if state.yes_sell_price is not None and state.no_sell_price is not None:
+            yes_pnl = (state.yes_sell_price - state.yes_entry) * state.shares
+            no_pnl = (state.no_sell_price - state.no_entry) * state.shares
+            pnl = round(yes_pnl + no_pnl, 2)
+
+            cl_price = self._chainlink.get_price(state.symbol) if self._chainlink else None
+
+            self.engine.db.resolve_position(
+                position_id=pos_id,
+                winning_side="early_exit",
+                pnl=pnl,
+                actual_pnl=pnl,
+                polymarket_result="early_exit",
+                kalshi_result="early_exit",
+                lock_valid=True,
+                kalshi_close_price=cl_price,
+            )
+            self._danger_exits.pop(pos_id, None)
+
+            print(
+                f"\n[fast-arb][EARLY_EXIT] {state.symbol} pos={pos_id[:8]} | "
+                f"YES sell@{state.yes_sell_price:.4f} (was {state.yes_entry:.4f}) | "
+                f"NO sell@{state.no_sell_price:.4f} (was {state.no_entry:.4f}) | "
+                f"pnl=${pnl:+.2f}"
+            )
+            if self.engine.notifier:
+                self.engine.notifier.notify_resolve(
+                    symbol=state.symbol,
+                    pm_result="early_exit",
+                    kalshi_result="early_exit",
+                    pnl=pnl,
+                    lock_valid=True,
+                    is_paper=True,
+                    kalshi_close_price=cl_price,
+                )
+            return
+
+        # Not both sold yet → schedule retry if time allows
+        seconds_left = (pos.expiry - datetime.now(timezone.utc)).total_seconds()
+        if seconds_left > 5:
+            state.timer = threading.Timer(1.5, self._danger_exit_try_sell, args=[pos_id])
+            state.timer.start()
+        else:
+            # Too close to expiry, give up — normal resolution will handle it
+            sold = []
+            if state.yes_sell_price is not None:
+                sold.append(f"YES@{state.yes_sell_price:.4f}")
+            if state.no_sell_price is not None:
+                sold.append(f"NO@{state.no_sell_price:.4f}")
+            print(
+                f"[fast-arb][DANGER-TIMEOUT] {state.symbol} pos={pos_id[:8]} | "
+                f"{seconds_left:.0f}s left, giving up | sold: {', '.join(sold) or 'none'}"
+            )
+            self._danger_exits.pop(pos_id, None)
+
+    def _fetch_sell_bids(
+        self,
+        venue: str,
+        side: str,
+        state: _DangerExit,
+    ) -> list[OrderLevel] | None:
+        """Fetch bid-side orderbook levels for selling a position leg."""
+        if venue == "polymarket":
+            token_id = state.pm_yes_token if side == "yes" else state.pm_no_token
+            if not token_id:
+                return None
+            try:
+                book = self.engine.pm_clob.get_orderbook(token_id)
+                return book.bids if book and book.bids else None
+            except Exception:
+                return None
+        else:
+            if not state.kalshi_ticker:
+                return None
+            try:
+                bids, _ = self.engine.kalshi_feed.fetch_side_bids(state.kalshi_ticker, side)
+                return bids
+            except Exception:
+                return None
+
+    @staticmethod
+    def _check_sell_depth(
+        bids: list[OrderLevel] | None,
+        shares: float,
+        min_price: float,
+    ) -> float | None:
+        """Check if enough bids exist at >= min_price to sell all shares.
+        Returns avg fill price if yes, None otherwise."""
+        if not bids:
+            return None
+        remaining = shares
+        total_revenue = 0.0
+        for level in bids:  # sorted by price desc
+            if level.price < min_price:
+                break
+            take = min(level.size, remaining)
+            total_revenue += take * level.price
+            remaining -= take
+            if remaining <= 1e-9:
+                return round(total_revenue / shares, 6)
+        return None  # not enough depth at >= min_price
 
     # ── Execution pricing (параллельные REST + liquidity margin) ──────
 
@@ -1115,48 +1571,65 @@ class FastArbWatchRunner:
                 )
 
     def _get_status_text(self) -> str:
-        base = self.engine.get_status_text()
-
-        open_cost = 0.0
-        realized_pnl = 0.0
-        one_legged_count = 0
+        db = self.engine.db
         try:
-            c1 = self.engine.db.conn.execute(
-                "SELECT COALESCE(SUM(CASE "
-                "WHEN execution_status='one_legged_kalshi' "
-                "    THEN kalshi_fill_shares * kalshi_fill_price + COALESCE(kalshi_order_fee, 0) "
-                "WHEN execution_status='one_legged_polymarket' "
-                "    THEN polymarket_fill_shares * polymarket_fill_price + COALESCE(polymarket_order_fee, 0) "
-                "ELSE total_cost END), 0) FROM positions WHERE status='open'"
-            )
-            open_cost = float(c1.fetchone()[0])
-            c2 = self.engine.db.conn.execute(
-                "SELECT COALESCE(SUM(actual_pnl), 0) FROM positions WHERE status='resolved'"
-            )
-            realized_pnl = float(c2.fetchone()[0])
-            c3 = self.engine.db.conn.execute(
-                "SELECT COUNT(*) FROM positions "
-                "WHERE execution_status IN ('one_legged_kalshi','one_legged_polymarket') AND status='open'"
-            )
-            one_legged_count = int(c3.fetchone()[0])
+            r = db.conn.execute(
+                "SELECT COUNT(*) as total,"
+                " SUM(CASE WHEN actual_pnl > 0 THEN 1 ELSE 0 END) as wins,"
+                " SUM(CASE WHEN actual_pnl < 0 THEN 1 ELSE 0 END) as losses,"
+                " COALESCE(SUM(actual_pnl), 0) as pnl"
+                " FROM positions WHERE status='resolved' AND is_paper=1"
+            ).fetchone()
+            total, wins, losses, pnl = int(r[0]), int(r[1] or 0), int(r[2] or 0), float(r[3])
+
+            today = db.conn.execute(
+                "SELECT COUNT(*) as cnt, COALESCE(SUM(actual_pnl), 0) as pnl"
+                " FROM positions WHERE status='resolved' AND is_paper=1"
+                " AND DATE(opened_at) = DATE('now')"
+            ).fetchone()
+            today_cnt, today_pnl = int(today[0]), float(today[1])
+
+            mm = db.conn.execute(
+                "SELECT COUNT(*) FROM positions"
+                " WHERE status='resolved' AND is_paper=1"
+                " AND polymarket_result != kalshi_result"
+                " AND polymarket_result IS NOT NULL AND kalshi_result IS NOT NULL"
+            ).fetchone()
+            mm_cnt = int(mm[0])
+
+            open_r = db.conn.execute(
+                "SELECT COUNT(*) FROM positions WHERE status='open'"
+            ).fetchone()
+            open_cnt = int(open_r[0])
+
+            one_leg = db.conn.execute(
+                "SELECT COUNT(*) FROM positions"
+                " WHERE status='resolved' AND is_paper=1"
+                " AND ((yes_filled_shares > 0 AND (no_filled_shares IS NULL OR no_filled_shares = 0))"
+                "   OR (no_filled_shares > 0 AND (yes_filled_shares IS NULL OR yes_filled_shares = 0)))"
+            ).fetchone()
+            one_leg_cnt = int(one_leg[0])
         except Exception:
-            pass
+            return "📝 <b>Fast Arb (paper)</b>\n⚠️ Ошибка чтения БД"
 
-        effective_budget = self.budget_usd + max(0.0, realized_pnl)
-        budget_line = (
-            f"\n\n💰 <b>Бюджет (fast_arb)</b>\n"
-            f"Базовый: <b>${self.budget_usd:.0f}</b>"
-            + (f" + выигрыши ${max(0.0, realized_pnl):.2f} = <b>${effective_budget:.2f}</b>" if realized_pnl > 0 else "")
-            + f"\nОткрыто: <b>${open_cost:.2f}</b> / ${effective_budget:.2f}\n"
-            f"Свободно: <b>${max(0.0, effective_budget - open_cost):.2f}</b>\n"
-            f"P&L реализованный: <b>${realized_pnl:+.2f}</b> (стоп при -${self.max_realized_loss_usd:.0f})"
-        )
-        if one_legged_count:
-            budget_line += f"\nОдноногих открытых: <b>{one_legged_count}</b>"
-        if realized_pnl <= -self.max_realized_loss_usd:
-            budget_line += "\n⛔ <b>СТОП: лимит потерь достигнут</b>"
-
-        return base + budget_line
+        wr = (wins / total * 100) if total > 0 else 0
+        lines = [
+            f"📝 <b>Fast Arb (paper)</b>",
+            f"",
+            f"📊 <b>Всего:</b> {total} сделок | WR: <b>{wr:.0f}%</b> ({wins}W / {losses}L)",
+            f"💰 <b>P&L:</b> <b>${pnl:+.2f}</b>",
+            f"📅 <b>Сегодня:</b> {today_cnt} сделок, <b>${today_pnl:+.2f}</b>",
+        ]
+        if mm_cnt:
+            lines.append(f"⚠️ Mismatches: {mm_cnt}")
+        if one_leg_cnt:
+            lines.append(f"🦵 Одноногих: {one_leg_cnt}")
+        if open_cnt:
+            lines.append(f"📌 Открытых: {open_cnt}")
+        lines.append(f"\n🔍 Пар в мониторинге: {len(self.watch_by_pair_key)}")
+        if self.dry_run:
+            lines.append("⏸ <b>РЕЖИМ: paper</b>")
+        return "\n".join(lines)
 
     def _watch_key(self, opp: CrossVenueOpportunity) -> str:
         return f"{opp.pair_key}|{opp.buy_yes_venue}|{opp.buy_no_venue}"
@@ -1745,12 +2218,35 @@ class FastArbWatchRunner:
                     1.0 - (pm.yes_ask + ka.no_ask),
                     1.0 - (ka.yes_ask + pm.no_ask),
                 )
+                # Live WS prices (если есть)
+                pm_yes_live = self.live_books.get(pm.yes_token_id)
+                pm_no_live = self.live_books.get(pm.no_token_id)
+                k_live = self.live_books_kalshi.get(ka.market_id)
+                if pm_yes_live and pm_no_live and k_live:
+                    live_pm_yes = pm_yes_live.best_ask
+                    live_pm_no = pm_no_live.best_ask
+                    live_k_yes = k_live.best_yes_ask
+                    live_k_no = k_live.best_no_ask
+                    live_edge = max(
+                        1.0 - (live_pm_yes + live_k_no),
+                        1.0 - (live_k_yes + live_pm_no),
+                    )
+                    live_str = (
+                        f"  {pm.symbol:6}   live: PM yes={live_pm_yes:.3f} no={live_pm_no:.3f}"
+                        f" | K yes={live_k_yes:.3f} no={live_k_no:.3f}"
+                        f" | edge={live_edge:.3f}"
+                    )
+                else:
+                    live_str = None
+
                 match_lines.append(
                     f"  {pm.symbol:6} | PM yes={pm.yes_ask:.3f} no={pm.no_ask:.3f}"
                     f" | K yes={ka.yes_ask:.3f} no={ka.no_ask:.3f}"
                     f" | best_edge={best_edge:.3f}"
                     f" | {gap_str} {gap_ok}"
                 )
+                if live_str:
+                    match_lines.append(live_str)
 
             # Kalshi-рынки без PM-матча
             unmatched_kalshi = [k for k in kalshi_markets if k.symbol not in matched_symbols]
