@@ -226,13 +226,28 @@ class PositionResolver:
             )
 
         pm_close_price = self._fetch_pm_close_price(position)
+
+        # Для одноногих: определяем какая нога не заполнена
+        is_one_legged = exec_status in ("paper_one_legged_yes", "paper_one_legged_no")
+        if is_one_legged:
+            # yes-нога заполнена → venue_no не торговалась, и наоборот
+            if exec_status == "paper_one_legged_yes":
+                notify_pm = "not_traded" if position.venue_no == "polymarket" else pm_result
+                notify_kalshi = "not_traded" if position.venue_no == "kalshi" else kalshi_result
+            else:
+                notify_pm = "not_traded" if position.venue_yes == "polymarket" else pm_result
+                notify_kalshi = "not_traded" if position.venue_yes == "kalshi" else kalshi_result
+        else:
+            notify_pm = pm_result
+            notify_kalshi = kalshi_result
+
         self.db.resolve_position(
             position_id=position.id,
             winning_side=winning_side,
             pnl=pnl,
             actual_pnl=pnl,
-            polymarket_result=pm_result,
-            kalshi_result=kalshi_result,
+            polymarket_result=notify_pm,
+            kalshi_result=notify_kalshi,
             lock_valid=lock_valid,
             kalshi_close_price=kalshi_close_price,
             pm_close_price=pm_close_price,
@@ -240,8 +255,8 @@ class PositionResolver:
         if self.notifier:
             self.notifier.notify_resolve(
                 symbol=position.symbol,
-                pm_result=pm_result,
-                kalshi_result=kalshi_result,
+                pm_result=notify_pm,
+                kalshi_result=notify_kalshi,
                 pnl=pnl,
                 lock_valid=lock_valid,
                 is_paper=True,

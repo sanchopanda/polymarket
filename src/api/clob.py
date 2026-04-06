@@ -67,6 +67,19 @@ class ClobClient:
         except (httpx.HTTPError, ValueError, KeyError):
             return None
 
+    def get_price(self, token_id: str, side: str = "BUY") -> Optional[float]:
+        """Получить текущую цену токена через /price (работает когда /book багует)."""
+        try:
+            resp = self._http.get(
+                f"{self.base_url}/price",
+                params={"token_id": token_id, "side": side},
+            )
+            resp.raise_for_status()
+            price = float(resp.json().get("price", 0))
+            return price if price > 0 else None
+        except (httpx.HTTPError, ValueError, KeyError):
+            return None
+
     def check_liquidity(self, token_id: str, amount_usd: float) -> LiquidityCheck:
         """
         Проверяет, можно ли купить контракты на указанную сумму.
