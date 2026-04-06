@@ -122,6 +122,7 @@ class SportsArbWatchRunner:
         self._max_loss_usd: float = float(real_cfg.get("max_loss_usd", 20.0))
         self._min_balance_pm: float = float(real_cfg.get("min_balance_pm", 10.0))
         self._min_balance_ka: float = float(real_cfg.get("min_balance_ka", 10.0))
+        self._real_depth_multiplier: float = float(real_cfg.get("depth_multiplier", 5.0))
         self._real_retry_cooldown: float = float(real_cfg.get("retry_cooldown_seconds", 5.0))
         # Балансы кошельков — обновляем при старте и каждом скане
         self._pm_balance: Optional[float] = None
@@ -638,7 +639,11 @@ class SportsArbWatchRunner:
                 t.start()
             else:
                 # ── Real execution: immediate depth check, no delay ─────
-                ka_liquid = self._ka_find_liquid_ask(leg_ka_ticker, leg_pm_price)
+                ka_liquid = self._ka_find_liquid_ask(
+                    leg_ka_ticker,
+                    leg_pm_price,
+                    depth_multiplier=self._real_depth_multiplier,
+                )
                 ka_has_depth = ka_liquid is not None
                 if ka_has_depth:
                     eff_ka_price, ka_depth = ka_liquid
@@ -659,7 +664,9 @@ class SportsArbWatchRunner:
 
                 pm_depth = self._pm_depth_at_ask(pm_token_id, leg_pm_price)
                 pm_leg_stake = shares * leg_pm_price
-                pm_has_depth = pm_depth is not None and pm_depth >= pm_leg_stake * 1.5
+                pm_required_depth = pm_leg_stake * self._real_depth_multiplier
+                ka_required_depth = shares * leg_ka_price * self._real_depth_multiplier
+                pm_has_depth = pm_depth is not None and pm_depth >= pm_required_depth
 
                 self.db.save_orderbook_snapshot(
                     sport=pair.sport,
@@ -677,8 +684,8 @@ class SportsArbWatchRunner:
                 if not (pm_has_depth and ka_has_depth):
                     print(
                         f"[sports-arb] REAL SKIP {pair_key} | depth insufficient "
-                        f"pm=${pm_depth or 0:.0f}/{pm_leg_stake * 1.5:.0f} "
-                        f"ka=${ka_depth:.0f}/{shares * leg_ka_price * 1.5:.0f}"
+                        f"pm=${pm_depth or 0:.0f}/{pm_required_depth:.0f} "
+                        f"ka=${ka_depth:.0f}/{ka_required_depth:.0f}"
                     )
                     return
 
@@ -1120,7 +1127,10 @@ class SportsArbWatchRunner:
             return None
 
     def _ka_find_liquid_ask(
-        self, ticker: str, leg_pm_price: float
+        self,
+        ticker: str,
+        leg_pm_price: float,
+        depth_multiplier: float = 1.5,
     ) -> Optional[tuple[float, float]]:
         """Ищет наилучшую цену на Kalshi с достаточной ликвидностью.
         Сканирует уровни от дешёвых к дорогим; останавливается когда edge < min_edge.
@@ -1149,7 +1159,7 @@ class SportsArbWatchRunner:
                 if shares < 1:
                     continue
                 cumulative_depth += yes_ask * size
-                required = shares * yes_ask * 1.5
+                required = shares * yes_ask * depth_multiplier
                 if cumulative_depth >= required:
                     return (yes_ask, cumulative_depth)
 
