@@ -3,6 +3,8 @@ trading:
   min_edge: 0.05
   min_leg_price: 0.05
   max_leg_price: 0.95
+  blocked_pm_price_min: 0.48
+  blocked_pm_price_max: 0.55
   high_edge_threshold: 0.15  # edge выше этого — подозрительный; применяем pm_max_leg_price
   pm_max_leg_price: 0.48     # при высоком edge не покупать PM выше 48¢ (защита от N/A резолва)
   scan_interval_seconds: 900   # 15 мин

@@ -66,6 +66,8 @@ class SportsArbWatchRunner:
         self.min_edge: float = float(trading.get("min_edge", 0.02))
         self.min_leg_price: float = float(trading.get("min_leg_price", 0.05))
         self.max_leg_price: float = float(trading.get("max_leg_price", 0.95))
+        self.blocked_pm_price_min: float = float(trading.get("blocked_pm_price_min", 0.48))
+        self.blocked_pm_price_max: float = float(trading.get("blocked_pm_price_max", 0.55))
         self.pm_max_leg_price: float = float(trading.get("pm_max_leg_price", 0.48))
         self.high_edge_threshold: float = float(trading.get("high_edge_threshold", 0.15))
         self.scan_interval: float = float(trading.get("scan_interval_seconds", 900))
@@ -565,6 +567,8 @@ class SportsArbWatchRunner:
             return
         if not (self.min_leg_price <= leg_pm_price <= self.max_leg_price):
             return
+        if self.blocked_pm_price_min <= leg_pm_price <= self.blocked_pm_price_max:
+            return
         if best_edge > self.high_edge_threshold and leg_pm_price > self.pm_max_leg_price:
             return
         if not (self.min_leg_price <= leg_ka_price <= self.max_leg_price):
@@ -662,11 +666,32 @@ class SportsArbWatchRunner:
                 else:
                     ka_depth = 0.0
 
-                pm_depth = self._pm_depth_at_ask(pm_token_id, leg_pm_price)
+                pm_liquid = self._pm_find_liquid_ask(
+                    pm_token_id,
+                    leg_ka_price,
+                    depth_multiplier=self._real_depth_multiplier,
+                )
+                pm_has_depth = pm_liquid is not None
+                if pm_has_depth:
+                    eff_pm_price, pm_depth = pm_liquid
+                    if eff_pm_price > leg_pm_price + 0.001:
+                        leg_pm_price = eff_pm_price
+                        best_edge = 1.0 - leg_pm_price - leg_ka_price
+                        if best_edge < self.min_edge:
+                            pm_has_depth = False
+                        else:
+                            best_cost = leg_pm_price + leg_ka_price
+                            shares = math.floor(self.stake_usd / best_cost)
+                            if shares < 1:
+                                pm_has_depth = False
+                            else:
+                                total_cost = shares * best_cost
+                else:
+                    pm_depth = 0.0
+
                 pm_leg_stake = shares * leg_pm_price
                 pm_required_depth = pm_leg_stake * self._real_depth_multiplier
                 ka_required_depth = shares * leg_ka_price * self._real_depth_multiplier
-                pm_has_depth = pm_depth is not None and pm_depth >= pm_required_depth
 
                 self.db.save_orderbook_snapshot(
                     sport=pair.sport,
@@ -1104,6 +1129,39 @@ class SportsArbWatchRunner:
                 for level in book.asks
                 if level.price <= ask_price + 0.005
             )
+        except Exception:
+            return None
+
+    def _pm_find_liquid_ask(
+        self,
+        token_id: str,
+        leg_ka_price: float,
+        depth_multiplier: float = 1.5,
+    ) -> Optional[tuple[float, float]]:
+        """Ищет наилучшую цену на PM с достаточной ликвидностью.
+        Сканирует ask-уровни от дешёвых к дорогим; останавливается когда edge < min_edge.
+        Возвращает (pm_price, cumulative_depth_usd) или None если ликвидности нет.
+        """
+        try:
+            book = self.clob.get_orderbook(token_id)
+            if not book or not book.asks:
+                return None
+
+            cumulative_depth = 0.0
+            for level in book.asks:
+                pm_ask = float(level.price)
+                edge = 1.0 - leg_ka_price - pm_ask
+                if edge < self.min_edge:
+                    break
+                shares = math.floor(self.stake_usd / (leg_ka_price + pm_ask))
+                if shares < 1:
+                    continue
+                cumulative_depth += pm_ask * float(level.size)
+                required = shares * pm_ask * depth_multiplier
+                if cumulative_depth >= required:
+                    return (pm_ask, cumulative_depth)
+
+            return None
         except Exception:
             return None
 
