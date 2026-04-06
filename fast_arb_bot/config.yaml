@@ -96,4 +96,4 @@ chainlink:
   pre_expiry_check_seconds: 120  # start checking 2 min before expiry
 
 telegram:
-  token_env: FAST_ARB_BOT_TOKEN
+  token_env: TELEGRAM_TOKEN
