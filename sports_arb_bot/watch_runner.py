@@ -113,7 +113,7 @@ class SportsArbWatchRunner:
         self._last_skip_state: dict[str, tuple] = {}
         # Paper delay timers
         self._pending_timers: dict[str, threading.Timer] = {}
-        self.PAPER_DELAY: float = 1.5
+        self.PAPER_DELAY: float = 1.0
 
         # Real trading
         real_cfg = config.get("real_trading", {})
@@ -158,6 +158,8 @@ class SportsArbWatchRunner:
         # Reverse lookup: pm_token_id → set of pos_ids, ka_ticker → set of pos_ids
         self._paper_need_pm_by_token: dict[str, set[str]] = {}
         self._paper_need_ka_by_ticker: dict[str, set[str]] = {}
+        # Delayed completion timers for paper one-legged positions
+        self._paper_complete_timers: dict[str, threading.Timer] = {}
 
     # ── Main loop ───────────────────────────────────────────────────────
 
@@ -236,6 +238,8 @@ class SportsArbWatchRunner:
                 self._pending_timers.pop(key).cancel()
             except Exception:
                 pass
+        for pos_id in list(self._paper_complete_timers.keys()):
+            self._cancel_paper_complete_timer(pos_id)
         if self._pm_ws:
             self._pm_ws.stop()
             self._pm_ws = None
@@ -615,27 +619,27 @@ class SportsArbWatchRunner:
                 return
 
             total_cost = shares * best_cost
+            timer_data = {
+                "pair_key": pair_key,
+                "pair": pair,
+                "player_a": player_a,
+                "player_b": player_b,
+                "leg_pm_player": leg_pm_player,
+                "leg_pm_price": leg_pm_price,
+                "leg_ka_player": leg_ka_player,
+                "leg_ka_ticker": leg_ka_ticker,
+                "leg_ka_price": leg_ka_price,
+                "pm_token_id": pm_token_id,
+                "best_edge": best_edge,
+                "best_cost": best_cost,
+                "shares": shares,
+                "paper_reason": paper_reason,
+            }
 
             if use_paper:
                 # ── Paper: schedule delayed check ───────────────────────
                 if pair_key in self._pending_timers:
                     return
-                timer_data = {
-                    "pair_key": pair_key,
-                    "pair": pair,
-                    "player_a": player_a,
-                    "player_b": player_b,
-                    "leg_pm_player": leg_pm_player,
-                    "leg_pm_price": leg_pm_price,
-                    "leg_ka_player": leg_ka_player,
-                    "leg_ka_ticker": leg_ka_ticker,
-                    "leg_ka_price": leg_ka_price,
-                    "pm_token_id": pm_token_id,
-                    "best_edge": best_edge,
-                    "best_cost": best_cost,
-                    "shares": shares,
-                    "paper_reason": paper_reason,
-                }
                 t = threading.Timer(
                     self.PAPER_DELAY, self._delayed_paper_check, args=[timer_data]
                 )
@@ -712,6 +716,21 @@ class SportsArbWatchRunner:
                         f"pm=${pm_depth or 0:.0f}/{pm_required_depth:.0f} "
                         f"ka=${ka_depth:.0f}/{ka_required_depth:.0f}"
                     )
+                    if pair_key not in self._pending_timers:
+                        fallback_data = dict(timer_data)
+                        fallback_data.update({
+                            "leg_pm_price": leg_pm_price,
+                            "leg_ka_price": leg_ka_price,
+                            "best_edge": best_edge,
+                            "best_cost": best_cost,
+                            "shares": shares,
+                            "paper_reason": "real_depth_insufficient",
+                        })
+                        t = threading.Timer(
+                            self.PAPER_DELAY, self._delayed_paper_check, args=[fallback_data]
+                        )
+                        self._pending_timers[pair_key] = t
+                        t.start()
                     return
 
                 result = self._executor.execute(
@@ -812,7 +831,7 @@ class SportsArbWatchRunner:
         return ""
 
     def _delayed_paper_check(self, data: dict) -> None:
-        """Called 1.5s after WS signal. Checks depth and opens paper position."""
+        """Called 1.0s after WS signal. Checks depth and opens paper position."""
         pair_key = data["pair_key"]
         self._pending_timers.pop(pair_key, None)
 
@@ -1006,6 +1025,75 @@ class SportsArbWatchRunner:
             }
             self._paper_need_pm_by_token.setdefault(pm_token_id, set()).add(pos_id)
 
+    def _cancel_paper_complete_timer(self, pos_id: str) -> None:
+        timer = self._paper_complete_timers.pop(pos_id, None)
+        if timer is None:
+            return
+        try:
+            timer.cancel()
+        except Exception:
+            pass
+
+    def _schedule_paper_complete(self, pos_id: str, missing_leg: str) -> None:
+        if pos_id in self._paper_complete_timers:
+            return
+        timer = threading.Timer(
+            self.PAPER_DELAY,
+            self._complete_paper_one_legged_after_delay,
+            args=[pos_id, missing_leg],
+        )
+        self._paper_complete_timers[pos_id] = timer
+        timer.start()
+
+    def _complete_paper_one_legged_after_delay(self, pos_id: str, missing_leg: str) -> None:
+        self._paper_complete_timers.pop(pos_id, None)
+
+        with self._signal_lock:
+            if missing_leg == "pm":
+                pending = self._paper_need_pm.get(pos_id)
+                if not pending:
+                    return
+                pm_token_id = pending["pm_token_id"]
+                live = self.live_books.get(pm_token_id)
+                if not live or live.best_ask <= 0 or live.best_ask > pending["max_price"]:
+                    return
+                pm_depth = self._pm_depth_at_ask(pm_token_id, live.best_ask)
+                required_depth = pending["shares"] * live.best_ask * 1.5
+                if pm_depth is None or pm_depth < required_depth:
+                    return
+                self.db.complete_paper_one_legged(pos_id, "pm", live.best_ask, pending["shares"])
+                print(
+                    f"[sports-arb] PAPER COMPLETE(PM) {pos_id} | "
+                    f"PM@{live.best_ask:.3f} | edge={(1.0 - pending['filled_price'] - live.best_ask):.4f} "
+                    f"| pm_depth=${pm_depth:.0f}"
+                )
+                del self._paper_need_pm[pos_id]
+                pos_ids = self._paper_need_pm_by_token.get(pm_token_id)
+                if pos_ids is not None:
+                    pos_ids.discard(pos_id)
+            else:
+                pending = self._paper_need_ka.get(pos_id)
+                if not pending:
+                    return
+                ka_ticker = pending["ka_ticker"]
+                live = self.live_books_kalshi.get(ka_ticker)
+                if not live or live.best_yes_ask <= 0 or live.best_yes_ask > pending["max_price"]:
+                    return
+                ka_depth = self._ka_depth_at_ask(ka_ticker, live.best_yes_ask)
+                required_depth = pending["shares"] * live.best_yes_ask * 1.5
+                if ka_depth is None or ka_depth < required_depth:
+                    return
+                self.db.complete_paper_one_legged(pos_id, "ka", live.best_yes_ask, pending["shares"])
+                print(
+                    f"[sports-arb] PAPER COMPLETE(Ka) {pos_id} | "
+                    f"Kalshi@{live.best_yes_ask:.3f} | edge={(1.0 - pending['filled_price'] - live.best_yes_ask):.4f} "
+                    f"| ka_depth=${ka_depth:.0f}"
+                )
+                del self._paper_need_ka[pos_id]
+                pos_ids = self._paper_need_ka_by_ticker.get(ka_ticker)
+                if pos_ids is not None:
+                    pos_ids.discard(pos_id)
+
     def _try_paper_complete_pm(self, pm_token_id: str) -> None:
         """On PM WS update, try to complete paper_one_legged_ka positions (need PM)."""
         pos_ids = self._paper_need_pm_by_token.get(pm_token_id)
@@ -1020,13 +1108,7 @@ class SportsArbWatchRunner:
                 continue
             if live.best_ask > pending["max_price"]:
                 continue
-            self.db.complete_paper_one_legged(pos_id, "pm", live.best_ask, pending["shares"])
-            print(
-                f"[sports-arb] PAPER COMPLETE(PM) {pos_id} | "
-                f"PM@{live.best_ask:.3f} | edge={(1.0 - pending['filled_price'] - live.best_ask):.4f}"
-            )
-            del self._paper_need_pm[pos_id]
-            pos_ids.discard(pos_id)
+            self._schedule_paper_complete(pos_id, "pm")
 
     def _try_paper_complete_ka(self, ka_ticker: str) -> None:
         """On Kalshi WS update, try to complete paper_one_legged_pm positions (need Kalshi)."""
@@ -1042,13 +1124,7 @@ class SportsArbWatchRunner:
                 continue
             if live.best_yes_ask > pending["max_price"]:
                 continue
-            self.db.complete_paper_one_legged(pos_id, "ka", live.best_yes_ask, pending["shares"])
-            print(
-                f"[sports-arb] PAPER COMPLETE(Ka) {pos_id} | "
-                f"Kalshi@{live.best_yes_ask:.3f} | edge={(1.0 - pending['filled_price'] - live.best_yes_ask):.4f}"
-            )
-            del self._paper_need_ka[pos_id]
-            pos_ids.discard(pos_id)
+            self._schedule_paper_complete(pos_id, "ka")
 
     def _try_retry_pm(self, pm_token_id: str) -> None:
         """Retry PM leg (one_legged_kalshi) when WS price update arrives."""
