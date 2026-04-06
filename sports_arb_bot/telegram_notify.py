@@ -24,15 +24,14 @@ def _status_kb() -> InlineKeyboardMarkup:
 class SportsTelegramNotifier:
     """
     Telegram-бот для sports_arb_bot.
-    Читает TELEGRAM_TOKEN из env.
     Опционален: если токен не задан — молча отключается.
     Поддерживает /start и /status команды.
     """
 
-    def __init__(self, get_status_fn: Callable[[], str]) -> None:
-        token = os.environ.get("TELEGRAM_TOKEN", "")
+    def __init__(self, get_status_fn: Callable[[], str], token_env: str = "TELEGRAM_TOKEN") -> None:
+        token = os.environ.get(token_env, "")
         if not token:
-            raise RuntimeError("TELEGRAM_TOKEN не задан")
+            raise RuntimeError(f"{token_env} не задан")
 
         self._get_status = get_status_fn
         self.bot = telebot.TeleBot(token, parse_mode="HTML")
@@ -203,11 +202,13 @@ class SportsTelegramNotifier:
         pm_slug: str,
         winner: Optional[str],
         pnl: float,
+        one_legged: str | None = None,
     ) -> None:
         icon = "💰" if pnl > 0 else ("⚠️" if pnl == 0 else "📉")
         sign = "+" if pnl >= 0 else ""
+        leg_tag = f" [ОДНОНОГАЯ — только {one_legged}]" if one_legged else ""
         text = (
-            f"{icon} <b>RESOLVED {pos_id}</b>\n"
+            f"{icon} <b>RESOLVED{leg_tag} {pos_id}</b>\n"
             f"{pm_slug}\n"
             f"Победитель: {winner or '?'}\n"
             f"P&amp;L: <b>{sign}${pnl:.2f}</b>"

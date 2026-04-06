@@ -109,6 +109,9 @@ class SportsArbWatchRunner:
         self._bet_cooldown: float = 60.0
         # Последнее состояние depth для дедупликации SKIP-логов
         self._last_skip_state: dict[str, tuple] = {}
+        # Paper delay timers
+        self._pending_timers: dict[str, threading.Timer] = {}
+        self.PAPER_DELAY: float = 1.5
 
         # Real trading
         real_cfg = config.get("real_trading", {})
@@ -142,6 +145,14 @@ class SportsArbWatchRunner:
         self._pending_ka: dict[str, dict] = {}
         self._last_ka_sync_ts: float = 0.0
         self._KA_SYNC_INTERVAL: float = float(real_cfg.get("ka_poll_interval_seconds", 2.0))
+        # Paper one-legged completion: track by WS asset/ticker
+        # need_pm: pos_id → {pm_token_id, max_price, shares, pos_id}
+        self._paper_need_pm: dict[str, dict] = {}
+        # need_ka: pos_id → {ka_ticker, max_price, shares, filled_pm_price, pos_id}
+        self._paper_need_ka: dict[str, dict] = {}
+        # Reverse lookup: pm_token_id → set of pos_ids, ka_ticker → set of pos_ids
+        self._paper_need_pm_by_token: dict[str, set[str]] = {}
+        self._paper_need_ka_by_ticker: dict[str, set[str]] = {}
 
     # ── Main loop ───────────────────────────────────────────────────────
 
@@ -207,6 +218,11 @@ class SportsArbWatchRunner:
         return False, "ok"
 
     def _stop_ws(self) -> None:
+        for key in list(self._pending_timers.keys()):
+            try:
+                self._pending_timers.pop(key).cancel()
+            except Exception:
+                pass
         if self._pm_ws:
             self._pm_ws.stop()
             self._pm_ws = None
@@ -399,6 +415,29 @@ class SportsArbWatchRunner:
             return
 
         event_type = payload.get("event_type")
+
+        if event_type == "price_change":
+            timestamp = int(payload.get("timestamp", 0) or 0)
+            for change in payload.get("price_changes", []):
+                asset_id = str(change.get("asset_id", ""))
+                if not asset_id:
+                    continue
+                try:
+                    best_ask = float(change.get("best_ask", 0) or 0)
+                    best_bid = float(change.get("best_bid", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if best_ask <= 0:
+                    continue
+                self.live_books[asset_id] = TopOfBook(
+                    best_bid=best_bid, best_ask=best_ask, updated_at_ms=timestamp,
+                )
+                self._try_retry_pm(asset_id)
+                self._try_paper_complete_pm(asset_id)
+                for pair_key in list(self.pairs_by_pm_token.get(asset_id, set())):
+                    self._maybe_open_pair(pair_key)
+            return
+
         if event_type not in {"book", "best_bid_ask"}:
             return
 
@@ -422,6 +461,7 @@ class SportsArbWatchRunner:
         )
 
         self._try_retry_pm(asset_id)
+        self._try_paper_complete_pm(asset_id)
 
         for pair_key in list(self.pairs_by_pm_token.get(asset_id, set())):
             self._maybe_open_pair(pair_key)
@@ -449,6 +489,8 @@ class SportsArbWatchRunner:
                         del self._pending_ka[pos_id]
                         print(f"[sports-arb] REAL ONE_LEG_PM {pos_id} — match over, stop Ka polling")
             return
+
+        self._try_paper_complete_ka(ticker)
 
         for pair_key in list(self.pairs_by_ka_ticker.get(ticker, set())):
             self._maybe_open_pair(pair_key)
@@ -552,118 +594,31 @@ class SportsArbWatchRunner:
             if shares < 1:
                 return
 
-            total_cost = shares * best_cost
-            expected_profit = shares * best_edge
-
-            # Найти лучшую цену Kalshi с достаточной ликвидностью
-            ka_liquid = self._ka_find_liquid_ask(leg_ka_ticker, leg_pm_price)
-            if ka_liquid is not None:
-                eff_ka_price, ka_depth = ka_liquid
-                if eff_ka_price > leg_ka_price + 0.001:
-                    # Глубже чем best ask — пересчитываем
-                    leg_ka_price = eff_ka_price
-                    best_edge = 1.0 - leg_pm_price - leg_ka_price
-                    if best_edge < self.min_edge:
-                        return
-                    best_cost = leg_pm_price + leg_ka_price
-                    shares = math.floor(self.stake_usd / best_cost)
-                    if shares < 1:
-                        return
-            else:
-                ka_depth = 0.0
-
-            # PM depth
-            pm_depth = self._pm_depth_at_ask(pm_token_id, leg_pm_price)
-
-            self.db.save_orderbook_snapshot(
-                sport=pair.sport,
-                pm_slug=pair.pm_event.slug,
-                pm_token_id=pm_token_id,
-                pm_player=leg_pm_player,
-                pm_best_ask=leg_pm_price,
-                pm_ask_depth_usd=pm_depth,
-                ka_ticker=leg_ka_ticker,
-                ka_player=leg_ka_player,
-                ka_yes_ask=leg_ka_price,
-                ka_ask_depth_usd=ka_depth,
-            )
-
-            # lock_valid: 1.5x the actual leg stake on each platform
-            pm_leg_stake = shares * leg_pm_price
-            ka_leg_stake = shares * leg_ka_price
-            lock_valid = (
-                ka_liquid is not None and
-                pm_depth is not None and pm_depth >= pm_leg_stake * 1.5
-            )
-
-            # Skip trade if depth is insufficient — логируем только при изменении цен
-            if not lock_valid:
-                skip_state = (round(pm_depth or 0, 1), round(ka_depth or 0, 1))
-                if self._last_skip_state.get(pair_key) != skip_state:
-                    self._last_skip_state[pair_key] = skip_state
-                    print(
-                        f"[sports-arb] SKIP {pair_key} | depth insufficient "
-                        f"pm=${pm_depth or 0:.0f}/{pm_leg_stake * 1.5:.0f} "
-                        f"ka=${ka_depth or 0:.0f}/{ka_leg_stake * 1.5:.0f}"
-                    )
-                return
-
-            depth_str = (
-                f"pm_depth=${pm_depth:.0f} ka_depth=${ka_depth:.0f}"
-                if pm_depth is not None and ka_depth is not None
-                else "depth=unknown"
-            )
-
             if use_paper:
-                # ── Paper bet ────────────────────────────────────────────
-                pos_id = self.db.open_position(
-                    sport=pair.sport,
-                    pm_slug=pair.pm_event.slug,
-                    pm_title=pair.pm_event.title,
-                    pm_market_id=pair.pm_event.market_id,
-                    ka_event_ticker=pair.kalshi_event.event_ticker,
-                    ka_title=pair.kalshi_event.title,
-                    match_confidence=pair.match_result.confidence,
-                    player_a=player_a,
-                    player_b=player_b,
-                    leg_pm_player=leg_pm_player,
-                    leg_pm_token_id=pm_token_id,
-                    leg_pm_price=leg_pm_price,
-                    leg_ka_player=leg_ka_player,
-                    leg_ka_ticker=leg_ka_ticker,
-                    leg_ka_price=leg_ka_price,
-                    cost=best_cost,
-                    edge=best_edge,
-                    shares=shares,
-                    game_date=pair.pm_event.game_date,
-                    lock_valid=lock_valid,
+                # ── Paper: schedule delayed check ───────────────────────
+                if pair_key in self._pending_timers:
+                    return
+                timer_data = {
+                    "pair_key": pair_key,
+                    "pair": pair,
+                    "player_a": player_a,
+                    "player_b": player_b,
+                    "leg_pm_player": leg_pm_player,
+                    "leg_pm_price": leg_pm_price,
+                    "leg_ka_player": leg_ka_player,
+                    "leg_ka_ticker": leg_ka_ticker,
+                    "leg_ka_price": leg_ka_price,
+                    "pm_token_id": pm_token_id,
+                    "best_edge": best_edge,
+                    "best_cost": best_cost,
+                    "shares": shares,
+                    "paper_reason": paper_reason,
+                }
+                t = threading.Timer(
+                    self.PAPER_DELAY, self._delayed_paper_check, args=[timer_data]
                 )
-                mode_tag = f"PAPER ({paper_reason})" if self._real_trading else "PAPER"
-                print(
-                    f"[sports-arb] {mode_tag} BET {pos_id} | {pair.pm_event.slug}\n"
-                    f"  {leg_pm_player}@PM={leg_pm_price:.3f} + "
-                    f"{leg_ka_player}@Kalshi={leg_ka_price:.3f}\n"
-                    f"  edge={best_edge:.4f} shares={shares} "
-                    f"total=${total_cost:.2f} profit=${expected_profit:.2f} | {depth_str}"
-                )
-                if self.tg:
-                    self.tg.notify_bet(
-                        pos_id=pos_id,
-                        pm_slug=pair.pm_event.slug,
-                        leg_pm_player=leg_pm_player,
-                        leg_pm_price=leg_pm_price,
-                        leg_ka_player=leg_ka_player,
-                        leg_ka_ticker=leg_ka_ticker,
-                        leg_ka_price=leg_ka_price,
-                        cost=best_cost,
-                        edge=best_edge,
-                        shares=shares,
-                        total_cost=total_cost,
-                        expected_profit=expected_profit,
-                        pm_depth=pm_depth,
-                        ka_depth=ka_depth,
-                        lock_valid=lock_valid,
-                    )
+                self._pending_timers[pair_key] = t
+                t.start()
             else:
                 # ── Real execution ───────────────────────────────────────
                 result = self._executor.execute(
@@ -760,6 +715,245 @@ class SportsArbWatchRunner:
             if name == player:
                 return token_id
         return ""
+
+    def _delayed_paper_check(self, data: dict) -> None:
+        """Called 1.5s after WS signal. Checks depth and opens paper position."""
+        pair_key = data["pair_key"]
+        self._pending_timers.pop(pair_key, None)
+
+        pair = data["pair"]
+        leg_pm_player = data["leg_pm_player"]
+        leg_pm_price = data["leg_pm_price"]
+        leg_ka_player = data["leg_ka_player"]
+        leg_ka_ticker = data["leg_ka_ticker"]
+        leg_ka_price = data["leg_ka_price"]
+        pm_token_id = data["pm_token_id"]
+        best_edge = data["best_edge"]
+        best_cost = data["best_cost"]
+        shares = data["shares"]
+        paper_reason = data["paper_reason"]
+        player_a = data["player_a"]
+        player_b = data["player_b"]
+
+        with self._signal_lock:
+            # Re-check position limit
+            total_for_pair = self.db.count_all_positions_for_pair(
+                pair.kalshi_event.event_ticker
+            )
+            if total_for_pair >= self._max_positions_per_pair:
+                return
+
+            # Re-check edge from live prices
+            wp = self.watchlist.get(pair_key)
+            if wp is None or wp.match_over:
+                return
+
+            # Check depth
+            ka_liquid = self._ka_find_liquid_ask(leg_ka_ticker, leg_pm_price)
+            ka_has_depth = ka_liquid is not None
+            if ka_has_depth:
+                eff_ka_price, ka_depth = ka_liquid
+                if eff_ka_price > leg_ka_price + 0.001:
+                    leg_ka_price = eff_ka_price
+                    best_edge = 1.0 - leg_pm_price - leg_ka_price
+                    if best_edge < self.min_edge:
+                        ka_has_depth = False
+                    else:
+                        best_cost = leg_pm_price + leg_ka_price
+                        shares = math.floor(self.stake_usd / best_cost)
+                        if shares < 1:
+                            ka_has_depth = False
+            else:
+                ka_depth = 0.0
+
+            pm_depth = self._pm_depth_at_ask(pm_token_id, leg_pm_price)
+            pm_leg_stake = shares * leg_pm_price
+            pm_has_depth = pm_depth is not None and pm_depth >= pm_leg_stake * 1.5
+
+            total_cost = shares * best_cost
+            expected_profit = shares * best_edge
+
+            self.db.save_orderbook_snapshot(
+                sport=pair.sport,
+                pm_slug=pair.pm_event.slug,
+                pm_token_id=pm_token_id,
+                pm_player=leg_pm_player,
+                pm_best_ask=leg_pm_price,
+                pm_ask_depth_usd=pm_depth,
+                ka_ticker=leg_ka_ticker,
+                ka_player=leg_ka_player,
+                ka_yes_ask=leg_ka_price,
+                ka_ask_depth_usd=ka_depth,
+            )
+
+            depth_str = (
+                f"pm_depth=${pm_depth or 0:.0f} ka_depth=${ka_depth:.0f}"
+            )
+
+            common_kwargs = dict(
+                sport=pair.sport,
+                pm_slug=pair.pm_event.slug,
+                pm_title=pair.pm_event.title,
+                pm_market_id=pair.pm_event.market_id,
+                ka_event_ticker=pair.kalshi_event.event_ticker,
+                ka_title=pair.kalshi_event.title,
+                match_confidence=pair.match_result.confidence,
+                player_a=player_a,
+                player_b=player_b,
+                leg_pm_player=leg_pm_player,
+                leg_pm_token_id=pm_token_id,
+                leg_pm_price=leg_pm_price,
+                leg_ka_player=leg_ka_player,
+                leg_ka_ticker=leg_ka_ticker,
+                leg_ka_price=leg_ka_price,
+                cost=best_cost,
+                edge=best_edge,
+                shares=shares,
+                game_date=pair.pm_event.game_date,
+            )
+
+            if pm_has_depth and ka_has_depth:
+                # Both legs liquid → normal position
+                pos_id = self.db.open_position(lock_valid=True, **common_kwargs)
+                mode_tag = f"PAPER ({paper_reason})" if self._real_trading else "PAPER"
+                print(
+                    f"[sports-arb] {mode_tag} BET {pos_id} | {pair.pm_event.slug}\n"
+                    f"  {leg_pm_player}@PM={leg_pm_price:.3f} + "
+                    f"{leg_ka_player}@Kalshi={leg_ka_price:.3f}\n"
+                    f"  edge={best_edge:.4f} shares={shares} "
+                    f"total=${total_cost:.2f} profit=${expected_profit:.2f} | {depth_str}"
+                )
+                if self.tg:
+                    self.tg.notify_bet(
+                        pos_id=pos_id,
+                        pm_slug=pair.pm_event.slug,
+                        leg_pm_player=leg_pm_player,
+                        leg_pm_price=leg_pm_price,
+                        leg_ka_player=leg_ka_player,
+                        leg_ka_ticker=leg_ka_ticker,
+                        leg_ka_price=leg_ka_price,
+                        cost=best_cost,
+                        edge=best_edge,
+                        shares=shares,
+                        total_cost=total_cost,
+                        expected_profit=expected_profit,
+                        pm_depth=pm_depth,
+                        ka_depth=ka_depth,
+                        lock_valid=True,
+                    )
+            elif pm_has_depth and not ka_has_depth:
+                # Only PM liquid → one-legged PM
+                pos_id = self.db.open_one_legged_position(
+                    filled_leg="pm", **common_kwargs
+                )
+                self._register_paper_pending(pos_id, "pm", {
+                    "leg_ka_ticker": leg_ka_ticker,
+                    "leg_pm_price": leg_pm_price,
+                    "shares": shares,
+                })
+                print(
+                    f"[sports-arb] PAPER ONE-LEG(PM) {pos_id} | {pair.pm_event.slug}\n"
+                    f"  {leg_pm_player}@PM={leg_pm_price:.3f} | Kalshi depth insufficient\n"
+                    f"  edge={best_edge:.4f} shares={shares} | {depth_str}"
+                )
+            elif ka_has_depth and not pm_has_depth:
+                # Only Kalshi liquid → one-legged Kalshi
+                pos_id = self.db.open_one_legged_position(
+                    filled_leg="ka", **common_kwargs
+                )
+                self._register_paper_pending(pos_id, "ka", {
+                    "pm_token_id": pm_token_id,
+                    "leg_ka_price": leg_ka_price,
+                    "shares": shares,
+                })
+                print(
+                    f"[sports-arb] PAPER ONE-LEG(Ka) {pos_id} | {pair.pm_event.slug}\n"
+                    f"  {leg_ka_player}@Kalshi={leg_ka_price:.3f} | PM depth insufficient\n"
+                    f"  edge={best_edge:.4f} shares={shares} | {depth_str}"
+                )
+            else:
+                # Neither liquid
+                skip_state = (round(pm_depth or 0, 1), round(ka_depth, 1))
+                if self._last_skip_state.get(pair_key) != skip_state:
+                    self._last_skip_state[pair_key] = skip_state
+                    pm_leg_stake = shares * leg_pm_price
+                    ka_leg_stake = shares * leg_ka_price
+                    print(
+                        f"[sports-arb] SKIP {pair_key} | depth insufficient "
+                        f"pm=${pm_depth or 0:.0f}/{pm_leg_stake * 1.5:.0f} "
+                        f"ka=${ka_depth:.0f}/{ka_leg_stake * 1.5:.0f}"
+                    )
+
+    def _register_paper_pending(self, pos_id: str, filled_leg: str, data: dict) -> None:
+        """Register a one-legged paper position for WS-driven completion."""
+        if filled_leg == "pm":
+            # PM filled, need Kalshi — watch ka_ticker
+            ka_ticker = data["leg_ka_ticker"]
+            filled_price = data["leg_pm_price"]
+            max_price = 1.0 - filled_price - self.min_edge
+            self._paper_need_ka[pos_id] = {
+                "ka_ticker": ka_ticker,
+                "max_price": max_price,
+                "shares": data["shares"],
+                "filled_price": filled_price,
+            }
+            self._paper_need_ka_by_ticker.setdefault(ka_ticker, set()).add(pos_id)
+        else:
+            # Kalshi filled, need PM — watch pm_token_id
+            pm_token_id = data["pm_token_id"]
+            filled_price = data["leg_ka_price"]
+            max_price = 1.0 - filled_price - self.min_edge
+            self._paper_need_pm[pos_id] = {
+                "pm_token_id": pm_token_id,
+                "max_price": max_price,
+                "shares": data["shares"],
+                "filled_price": filled_price,
+            }
+            self._paper_need_pm_by_token.setdefault(pm_token_id, set()).add(pos_id)
+
+    def _try_paper_complete_pm(self, pm_token_id: str) -> None:
+        """On PM WS update, try to complete paper_one_legged_ka positions (need PM)."""
+        pos_ids = self._paper_need_pm_by_token.get(pm_token_id)
+        if not pos_ids:
+            return
+        live = self.live_books.get(pm_token_id)
+        if not live or live.best_ask <= 0:
+            return
+        for pos_id in list(pos_ids):
+            pending = self._paper_need_pm.get(pos_id)
+            if not pending:
+                continue
+            if live.best_ask > pending["max_price"]:
+                continue
+            self.db.complete_paper_one_legged(pos_id, "pm", live.best_ask, pending["shares"])
+            print(
+                f"[sports-arb] PAPER COMPLETE(PM) {pos_id} | "
+                f"PM@{live.best_ask:.3f} | edge={(1.0 - pending['filled_price'] - live.best_ask):.4f}"
+            )
+            del self._paper_need_pm[pos_id]
+            pos_ids.discard(pos_id)
+
+    def _try_paper_complete_ka(self, ka_ticker: str) -> None:
+        """On Kalshi WS update, try to complete paper_one_legged_pm positions (need Kalshi)."""
+        pos_ids = self._paper_need_ka_by_ticker.get(ka_ticker)
+        if not pos_ids:
+            return
+        live = self.live_books_kalshi.get(ka_ticker)
+        if not live or live.best_yes_ask <= 0:
+            return
+        for pos_id in list(pos_ids):
+            pending = self._paper_need_ka.get(pos_id)
+            if not pending:
+                continue
+            if live.best_yes_ask > pending["max_price"]:
+                continue
+            self.db.complete_paper_one_legged(pos_id, "ka", live.best_yes_ask, pending["shares"])
+            print(
+                f"[sports-arb] PAPER COMPLETE(Ka) {pos_id} | "
+                f"Kalshi@{live.best_yes_ask:.3f} | edge={(1.0 - pending['filled_price'] - live.best_yes_ask):.4f}"
+            )
+            del self._paper_need_ka[pos_id]
+            pos_ids.discard(pos_id)
 
     def _try_retry_pm(self, pm_token_id: str) -> None:
         """Retry PM leg (one_legged_kalshi) when WS price update arrives."""
@@ -929,18 +1123,20 @@ class SportsArbWatchRunner:
                 continue  # матч ещё может идти
 
             pm_winner = self._pm_winner(pos["pm_market_id"])
-            ka_result = self._ka_result(pos["leg_ka_ticker"])
+            ka_result, ka_settlement = self._ka_result(pos["leg_ka_ticker"])
 
             if pm_winner is None or ka_result is None:
                 continue  # рынок ещё не зарезолвился
 
-            cancelled = pm_winner == "n/a" or ka_result == "void"
+            exec_status = pos["execution_status"] or ""
+            cancelled = pm_winner == "n/a" or ka_result in ("void", "scalar")
 
             if cancelled:
                 pnl = self.db.resolve_cancelled_position(
                     pos_id=pos["id"],
                     pm_result=pm_winner,
                     ka_result=ka_result,
+                    ka_settlement=ka_settlement,
                 )
                 cancelled_count += 1
                 cancelled_pnl += pnl
@@ -951,6 +1147,26 @@ class SportsArbWatchRunner:
                         print(f"[sports-arb] REDEEM sent for {pos['id']} market={pos['pm_market_id']}")
                     except Exception as e:
                         print(f"[sports-arb] redeem FAILED {pos['id']}: {e}")
+            elif exec_status in ("paper_one_legged_pm", "paper_one_legged_ka"):
+                pnl = self.db.resolve_one_legged_position(
+                    pos_id=pos["id"],
+                    pm_winner=pm_winner,
+                    ka_result=ka_result,
+                )
+                tag = "WIN" if pnl > 0 else "LOSE"
+                leg = "PM" if exec_status == "paper_one_legged_pm" else "Kalshi"
+                print(
+                    f"[sports-arb] RESOLVED ONE-LEG({leg}) {pos['id']} | "
+                    f"{pos['pm_slug']} | pnl=${pnl:+.2f} ({tag})"
+                )
+                if self.tg:
+                    self.tg.notify_resolve(
+                        pos_id=pos["id"],
+                        pm_slug=pos["pm_slug"],
+                        winner=pm_winner if exec_status == "paper_one_legged_pm" else ("yes_won" if ka_result == "yes" else "no_won"),
+                        pnl=pnl,
+                        one_legged=leg,
+                    )
             else:
                 pnl = self.db.resolve_position(
                     pos_id=pos["id"],
@@ -1005,18 +1221,27 @@ class SportsArbWatchRunner:
         except Exception:
             return None
 
-    def _ka_result(self, ticker: str) -> Optional[str]:
-        """Возвращает 'yes', 'no', 'void', или None если рынок не зарезолвился."""
+    def _ka_result(self, ticker: str) -> tuple[Optional[str], Optional[float]]:
+        """Возвращает (result, settlement_value).
+        result: 'yes', 'no', 'void', 'scalar', или None если рынок ещё не зарезолвился.
+        settlement_value: float для scalar, None для остальных.
+        """
         try:
             resp = self._ka_http.get(f"{self._ka_base}/markets/{ticker}")
             resp.raise_for_status()
             m = resp.json().get("market") or {}
             result = m.get("result")
             if result in ("yes", "no", "void"):
-                return result
-            return None
+                return result, None
+            if result == "scalar":
+                try:
+                    sv = float(m.get("settlement_value_dollars", 0))
+                except (TypeError, ValueError):
+                    sv = 0.0
+                return "scalar", sv
+            return None, None
         except Exception:
-            return None
+            return None, None
 
     # ── Status ──────────────────────────────────────────────────────────
 

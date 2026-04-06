@@ -113,6 +113,7 @@ class SportsArbDB:
             ("pm_order_id", "TEXT"),
             ("pm_fill_price", "REAL"),
             ("pm_fill_shares", "REAL"),
+            ("initially_one_legged", "TEXT"),  # e.g. "pm" or "ka" — which leg was filled first
         ]:
             try:
                 self.conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {definition}")
@@ -186,6 +187,161 @@ class SportsArbDB:
         )
         self._commit()
         return pos_id
+
+    def open_one_legged_position(
+        self,
+        sport: str,
+        pm_slug: str,
+        pm_title: str,
+        pm_market_id: str,
+        ka_event_ticker: str,
+        ka_title: str,
+        match_confidence: float,
+        player_a: str,
+        player_b: str,
+        leg_pm_player: str,
+        leg_pm_token_id: str,
+        leg_pm_price: float,
+        leg_ka_player: str,
+        leg_ka_ticker: str,
+        leg_ka_price: float,
+        cost: float,
+        edge: float,
+        shares: int,
+        game_date: datetime,
+        filled_leg: str,  # "pm" or "ka"
+    ) -> str:
+        """Open a one-legged paper position where only one venue was liquid."""
+        pos_id = str(uuid.uuid4())[:8]
+        filled_price = leg_pm_price if filled_leg == "pm" else leg_ka_price
+        total_cost = shares * filled_price
+        expected_profit = shares * edge
+        exec_status = "paper_one_legged_pm" if filled_leg == "pm" else "paper_one_legged_ka"
+        now = datetime.now(tz=timezone.utc).isoformat()
+        self.conn.execute(
+            """INSERT INTO positions (
+                id, sport, pm_slug, pm_title, pm_market_id,
+                ka_event_ticker, ka_title, match_confidence,
+                player_a, player_b,
+                leg_pm_player, leg_pm_token_id, leg_pm_price,
+                leg_ka_player, leg_ka_ticker, leg_ka_price,
+                cost, edge, shares, total_cost, expected_profit,
+                game_date, opened_at, status, lock_valid,
+                is_paper, execution_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, 1, ?)""",
+            (
+                pos_id, sport, pm_slug, pm_title, pm_market_id,
+                ka_event_ticker, ka_title, match_confidence,
+                player_a, player_b,
+                leg_pm_player, leg_pm_token_id, leg_pm_price,
+                leg_ka_player, leg_ka_ticker, leg_ka_price,
+                cost, edge, shares, total_cost, expected_profit,
+                game_date.isoformat(), now, exec_status,
+            ),
+        )
+        self.conn.execute(
+            "UPDATE virtual_balance SET "
+            "current_balance = current_balance - ?, "
+            "total_wagered = total_wagered + ?, "
+            "updated_at = ? WHERE id = 1",
+            (total_cost, total_cost, now),
+        )
+        self._commit()
+        return pos_id
+
+    def complete_paper_one_legged(
+        self,
+        pos_id: str,
+        missing_leg: str,  # "pm" or "ka"
+        fill_price: float,
+        shares: int,
+    ) -> None:
+        """Fill the missing leg of a one-legged paper position."""
+        additional_cost = shares * fill_price
+        now = datetime.now(tz=timezone.utc).isoformat()
+        # Record which leg was filled first (the one that was NOT missing)
+        first_leg = "ka" if missing_leg == "pm" else "pm"
+        if missing_leg == "pm":
+            self.conn.execute(
+                "UPDATE positions SET execution_status='paper_both_filled', "
+                "lock_valid=1, leg_pm_price=?, initially_one_legged=?, "
+                "cost=leg_ka_price + ?, edge=1.0 - leg_ka_price - ?, "
+                "total_cost=total_cost + ?, expected_profit=shares * (1.0 - leg_ka_price - ?) "
+                "WHERE id=?",
+                (fill_price, first_leg, fill_price, fill_price, additional_cost, fill_price, pos_id),
+            )
+        else:
+            self.conn.execute(
+                "UPDATE positions SET execution_status='paper_both_filled', "
+                "lock_valid=1, leg_ka_price=?, initially_one_legged=?, "
+                "cost=leg_pm_price + ?, edge=1.0 - leg_pm_price - ?, "
+                "total_cost=total_cost + ?, expected_profit=shares * (1.0 - leg_pm_price - ?) "
+                "WHERE id=?",
+                (fill_price, first_leg, fill_price, fill_price, additional_cost, fill_price, pos_id),
+            )
+        self.conn.execute(
+            "UPDATE virtual_balance SET "
+            "current_balance = current_balance - ?, "
+            "total_wagered = total_wagered + ?, "
+            "updated_at = ? WHERE id = 1",
+            (additional_cost, additional_cost, now),
+        )
+        self._commit()
+
+    def resolve_one_legged_position(
+        self,
+        pos_id: str,
+        pm_winner: Optional[str],
+        ka_result: Optional[str],
+    ) -> float:
+        """Resolve a one-legged paper position."""
+        pos = self.conn.execute(
+            "SELECT shares, total_cost, execution_status, "
+            "leg_pm_player, leg_ka_player, leg_pm_price, leg_ka_price, is_paper "
+            "FROM positions WHERE id = ?",
+            (pos_id,),
+        ).fetchone()
+        if pos is None:
+            return 0.0
+
+        shares = int(pos["shares"])
+        total_cost = float(pos["total_cost"])
+        exec_status = pos["execution_status"]
+        is_paper = bool(pos["is_paper"] if pos["is_paper"] is not None else 1)
+
+        if exec_status == "paper_one_legged_pm":
+            leg_won = pm_winner == pos["leg_pm_player"]
+            winner = pos["leg_pm_player"] if leg_won else "opponent"
+        else:  # paper_one_legged_ka
+            leg_won = ka_result == "yes"
+            winner = pos["leg_ka_player"] if leg_won else "opponent"
+
+        payout = float(shares) if leg_won else 0.0
+        pnl = payout - total_cost
+
+        now = datetime.now(tz=timezone.utc).isoformat()
+        self.conn.execute(
+            """UPDATE positions SET
+                status='resolved', resolved_at=?, winner=?,
+                pm_result=?, ka_result=?, pnl=?, lock_valid=0
+            WHERE id=?""",
+            (now, winner, pm_winner or "unknown", ka_result or "unknown", pnl, pos_id),
+        )
+        if is_paper:
+            self.conn.execute(
+                "UPDATE virtual_balance SET "
+                "current_balance = current_balance + ?, "
+                "total_won = total_won + ?, "
+                "updated_at = ? WHERE id = 1",
+                (payout, payout, now),
+            )
+            if pnl < 0:
+                self.conn.execute(
+                    "UPDATE virtual_balance SET total_lost = total_lost + ?, updated_at = ? WHERE id = 1",
+                    (abs(pnl), now),
+                )
+        self._commit()
+        return pnl
 
     def open_real_position(
         self,
@@ -323,10 +479,11 @@ class SportsArbDB:
         self,
         pos_id: str,
         pm_result: str,   # "n/a" или имя победителя (PM зарезолвился нормально)
-        ka_result: str,   # "void" | "yes" | "no"
+        ka_result: str,   # "void" | "yes" | "no" | "scalar"
+        ka_settlement: float | None = None,  # settlement value for scalar
     ) -> float:
         """Рассчитывает P&L при отмене/void рынков.
-        PM N/A → 50¢/токен. Kalshi void → полный возврат стоимости.
+        PM N/A → 50¢/токен. Kalshi void → полный возврат. Kalshi scalar → settlement_value/шару.
         """
         pos = self.conn.execute(
             "SELECT shares, leg_pm_player, leg_pm_price, leg_ka_price, "
@@ -352,6 +509,8 @@ class SportsArbDB:
         # Kalshi payout
         if ka_result == "void":
             ka_payout = leg_ka_price * shares  # полный возврат
+        elif ka_result == "scalar" and ka_settlement is not None:
+            ka_payout = ka_settlement * shares  # partial settlement
         else:
             ka_payout = float(shares) if ka_result == "yes" else 0.0
 

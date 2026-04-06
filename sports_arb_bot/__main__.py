@@ -74,7 +74,8 @@ def main() -> None:
         # Telegram (опционально)
         try:
             from sports_arb_bot.telegram_notify import SportsTelegramNotifier
-            tg = SportsTelegramNotifier(get_status_fn=runner._get_status_text)
+            token_env = config.get("telegram", {}).get("token_env", "TELEGRAM_TOKEN")
+            tg = SportsTelegramNotifier(get_status_fn=runner._get_status_text, token_env=token_env)
             runner.tg = tg
             tg.start()
         except RuntimeError as e:

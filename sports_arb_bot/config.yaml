@@ -45,8 +45,11 @@ runtime:
 #   - Если real_per_pair достиг max_real_per_pair → дальше paper для этой пары
 #   - Если суммарные потери ≥ max_loss_usd → paper для всего
 #   - Если баланс < min_balance_pm/ka → paper
+telegram:
+  token_env: SIMPLE_BOT_TOKEN
+
 real_trading:
-  enabled: true
+  enabled: false
   kalshi_slippage_cents: 2      # добавляем к цене Kalshi при выставлении ордера
   pm_price_buffer_cents: 2      # добавляем к цене PM при первой попытке
   min_fill_pct: 80              # минимальный процент заполнения (0–100)
