@@ -224,9 +224,6 @@ class SportsRealExecutor:
             resp = self.pm_trader._client.post_order(signed, orderType=OrderType.FOK)
             latency_ms = (time.time() - t0) * 1000
 
-            # FOK резолвится мгновенно — короткий poll
-            time.sleep(0.1)
-
             status = resp.get("status", "") if isinstance(resp, dict) else str(resp)
             order_id = resp.get("orderID", "") if isinstance(resp, dict) else ""
             shares_matched = 0.0
@@ -234,14 +231,19 @@ class SportsRealExecutor:
             fee = 0.0
 
             if order_id:
-                try:
-                    info = self.pm_trader._client.get_order(order_id)
-                    status = info.get("status", status)
-                    shares_matched = float(info.get("size_matched", 0))
-                    fill_price = float(info.get("price", price))
-                    fee = _polymarket_fee(shares_matched, fill_price)
-                except Exception as poll_err:
-                    print(f"[real-exec] PM order poll error: {poll_err}")
+                poll_delays = (0.1, 0.35)
+                for idx, delay in enumerate(poll_delays, start=1):
+                    time.sleep(delay)
+                    try:
+                        info = self.pm_trader._client.get_order(order_id)
+                        status = info.get("status", status)
+                        shares_matched = float(info.get("size_matched", 0))
+                        fill_price = float(info.get("price", price))
+                        fee = _polymarket_fee(shares_matched, fill_price)
+                        if shares_matched > 0 or status.upper() in {"MATCHED", "FILLED", "LIVE"}:
+                            break
+                    except Exception as poll_err:
+                        print(f"[real-exec] PM order poll #{idx} error: {poll_err}")
 
             print(
                 f"[real-exec] PM limit-FOK {latency_ms:.0f}ms | "

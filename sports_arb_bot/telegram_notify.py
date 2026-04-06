@@ -155,6 +155,8 @@ class SportsTelegramNotifier:
         pm_fill_shares: float,
         edge: float,
         total_cost: float,
+        pm_depth: Optional[float] = None,
+        ka_depth: Optional[float] = None,
         pm_balance: Optional[float] = None,
         ka_balance: Optional[float] = None,
     ) -> None:
@@ -177,12 +179,16 @@ class SportsTelegramNotifier:
         balance_str = ""
         if pm_balance is not None and ka_balance is not None:
             balance_str = f"\n💼 PM: ${pm_balance:.2f} | Kalshi: ${ka_balance:.2f}"
+        depth_str = ""
+        if pm_depth is not None and ka_depth is not None:
+            depth_str = f"\n📦 Depth: PM ${pm_depth:.0f} | Kalshi ${ka_depth:.0f}"
 
         text = (
             f"{icon} <b>REAL BET {pos_id}</b> — {status_label}\n"
             f"PM: {leg_pm_player} @ {pm_fill_price:.3f} × {pm_fill_shares:.1f}\n"
             f"Kalshi: {leg_ka_player} ({leg_ka_ticker}) @ {ka_fill_price:.3f} × {ka_fill_shares:.1f}\n"
             f"edge={edge:.4f} stake≈${total_cost:.2f}"
+            f"{depth_str}"
             f"{balance_str}\n"
             f'<a href="{pm_url}">PM</a> | <a href="{ka_url}">Kalshi</a>'
         )

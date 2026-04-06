@@ -88,34 +88,13 @@ def main() -> None:
     elif args.cmd == "status":
         config = _load_config(args.config)
         db = _make_db(config)
-        bal = db.get_balance()
-        open_pos = db.get_open_positions()
-        all_pos = db.get_all_positions()
-        resolved = [p for p in all_pos if p["status"] == "resolved"]
+        from sports_arb_bot.watch_runner import SportsArbWatchRunner
+        import re
 
-        print(f"\n{'='*60}")
-        print(f"Виртуальный баланс")
-        print(f"{'='*60}")
-        print(f"  Начальный:      ${bal['initial_balance']:.2f}")
-        print(f"  Текущий:        ${bal['current_balance']:.2f}")
-        print(f"  Всего ставок:   ${bal['total_wagered']:.2f}")
-        print(f"  Выиграно:       ${bal['total_won']:.2f}")
-        print(f"  Проиграно:      ${bal['total_lost']:.2f}")
-        net = bal['current_balance'] - bal['initial_balance']
-        print(f"  P&L:            {'+'if net>=0 else ''}${net:.2f}")
-
-        print(f"\nОткрытых позиций: {len(open_pos)}")
-        for p in open_pos:
-            print(f"  {p['id']} | {p['pm_slug']} | "
-                  f"edge={p['edge']:.3f} cost={p['cost']:.3f} "
-                  f"shares={p['shares']} total=${p['total_cost']:.2f} | "
-                  f"opened={p['opened_at'][:16]}")
-
-        print(f"\nЗарезолвленных: {len(resolved)}")
-        for p in resolved[-10:]:
-            sign = "+" if (p['pnl'] or 0) >= 0 else ""
-            print(f"  {p['id']} | {p['pm_slug']} | "
-                  f"winner={p['winner']} | pnl={sign}${(p['pnl'] or 0):.2f}")
+        runner = SportsArbWatchRunner(config=config, db=db)
+        runner._refresh_balances_for_status(force=True)
+        clean = re.sub(r"<[^>]+>", "", runner._get_status_text())
+        print(clean)
 
     elif args.cmd == "resolve":
         config = _load_config(args.config)

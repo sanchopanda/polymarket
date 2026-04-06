@@ -122,9 +122,11 @@ class SportsArbWatchRunner:
         self._max_loss_usd: float = float(real_cfg.get("max_loss_usd", 20.0))
         self._min_balance_pm: float = float(real_cfg.get("min_balance_pm", 10.0))
         self._min_balance_ka: float = float(real_cfg.get("min_balance_ka", 10.0))
+        self._real_retry_cooldown: float = float(real_cfg.get("retry_cooldown_seconds", 5.0))
         # Балансы кошельков — обновляем при старте и каждом скане
         self._pm_balance: Optional[float] = None
         self._ka_balance: Optional[float] = None
+        self._last_balance_refresh_ts: float = 0.0
         if self._real_trading:
             from real_arb_bot.clients import KalshiTrader, PolymarketTrader
             from sports_arb_bot.real_executor import SportsRealExecutor
@@ -199,6 +201,14 @@ class SportsArbWatchRunner:
             print(f"[sports-arb] Kalshi balance error: {e}")
         if self._pm_balance is not None and self._ka_balance is not None:
             print(f"[sports-arb] Балансы: PM=${self._pm_balance:.2f} Kalshi=${self._ka_balance:.2f}")
+        self._last_balance_refresh_ts = time.time()
+
+    def _refresh_balances_for_status(self, force: bool = False) -> None:
+        if not self._real_trading or not self._executor:
+            return
+        now = time.time()
+        if force or (now - self._last_balance_refresh_ts >= 15.0):
+            self._refresh_balances()
 
     def _should_use_paper(self, pair_key: str) -> tuple[bool, str]:
         """Возвращает (True, причина) если нужно переключиться на paper для этой пары."""
@@ -589,10 +599,17 @@ class SportsArbWatchRunner:
                 if now_ts - self._last_bet_ts.get(pair_key, 0.0) < self._bet_cooldown:
                     return
                 self._last_bet_ts[pair_key] = now_ts
+            else:
+                now_ts = time.time()
+                if now_ts - self._last_bet_ts.get(pair_key, 0.0) < self._real_retry_cooldown:
+                    return
+                self._last_bet_ts[pair_key] = now_ts
 
             shares = math.floor(self.stake_usd / best_cost)
             if shares < 1:
                 return
+
+            total_cost = shares * best_cost
 
             if use_paper:
                 # ── Paper: schedule delayed check ───────────────────────
@@ -620,7 +637,51 @@ class SportsArbWatchRunner:
                 self._pending_timers[pair_key] = t
                 t.start()
             else:
-                # ── Real execution ───────────────────────────────────────
+                # ── Real execution: immediate depth check, no delay ─────
+                ka_liquid = self._ka_find_liquid_ask(leg_ka_ticker, leg_pm_price)
+                ka_has_depth = ka_liquid is not None
+                if ka_has_depth:
+                    eff_ka_price, ka_depth = ka_liquid
+                    if eff_ka_price > leg_ka_price + 0.001:
+                        leg_ka_price = eff_ka_price
+                        best_edge = 1.0 - leg_pm_price - leg_ka_price
+                        if best_edge < self.min_edge:
+                            ka_has_depth = False
+                        else:
+                            best_cost = leg_pm_price + leg_ka_price
+                            shares = math.floor(self.stake_usd / best_cost)
+                            if shares < 1:
+                                ka_has_depth = False
+                            else:
+                                total_cost = shares * best_cost
+                else:
+                    ka_depth = 0.0
+
+                pm_depth = self._pm_depth_at_ask(pm_token_id, leg_pm_price)
+                pm_leg_stake = shares * leg_pm_price
+                pm_has_depth = pm_depth is not None and pm_depth >= pm_leg_stake * 1.5
+
+                self.db.save_orderbook_snapshot(
+                    sport=pair.sport,
+                    pm_slug=pair.pm_event.slug,
+                    pm_token_id=pm_token_id,
+                    pm_player=leg_pm_player,
+                    pm_best_ask=leg_pm_price,
+                    pm_ask_depth_usd=pm_depth,
+                    ka_ticker=leg_ka_ticker,
+                    ka_player=leg_ka_player,
+                    ka_yes_ask=leg_ka_price,
+                    ka_ask_depth_usd=ka_depth,
+                )
+
+                if not (pm_has_depth and ka_has_depth):
+                    print(
+                        f"[sports-arb] REAL SKIP {pair_key} | depth insufficient "
+                        f"pm=${pm_depth or 0:.0f}/{pm_leg_stake * 1.5:.0f} "
+                        f"ka=${ka_depth:.0f}/{shares * leg_ka_price * 1.5:.0f}"
+                    )
+                    return
+
                 result = self._executor.execute(
                     ka_ticker=leg_ka_ticker,
                     pm_token_id=pm_token_id,
@@ -683,6 +744,8 @@ class SportsArbWatchRunner:
                             pm_fill_shares=result.pm_fill_shares,
                             edge=best_edge,
                             total_cost=total_cost,
+                            pm_depth=pm_depth,
+                            ka_depth=ka_depth,
                             pm_balance=self._pm_balance,
                             ka_balance=self._ka_balance,
                         )
@@ -1246,6 +1309,7 @@ class SportsArbWatchRunner:
     # ── Status ──────────────────────────────────────────────────────────
 
     def _get_status_text(self) -> str:
+        self._refresh_balances_for_status()
         bal = self.db.get_balance()
         open_pos = self.db.get_open_positions()
         ts = datetime.now(tz=timezone.utc).strftime("%H:%M UTC")
@@ -1256,53 +1320,48 @@ class SportsArbWatchRunner:
         paper_open = [p for p in open_pos if p["is_paper"] or p["is_paper"] is None]
         real_open = [p for p in open_pos if not p["is_paper"] and p["is_paper"] is not None]
 
+        def _append_positions(lines: list[str], positions: list, mode: str) -> None:
+            if positions:
+                title = "Открытые real позиции:" if mode == "real" else "Открытые paper позиции:"
+                lines.append(title)
+                for p in positions:
+                    exec_st = f" [{p['execution_status']}]" if p["execution_status"] else ""
+                    lines.append(
+                        f"  {p['id']} [{mode}]{exec_st} {p['pm_slug'][:40]}\n"
+                        f"    edge={p['edge']:.3f} ${p['total_cost']:.2f} | {p['opened_at'][5:16]}"
+                    )
+            else:
+                title = "Открытые real позиции: 0" if mode == "real" else "Открытые paper позиции: 0"
+                lines.append(title)
+
         lines = [
             f"🎾 <b>sports_arb_bot</b> [{ts}]",
             f"Пар: {len(self.watchlist)} | Открытых: {len(open_pos)} (paper: {len(paper_open)}, real: {len(real_open)})",
-            f"📄 Paper P&amp;L: <b>{paper_sign}${paper_pnl:.2f}</b> | "
-            f"в игре ${paper_in_play:.2f} | ставок ${bal['total_wagered']:.2f} | "
-            f"+${bal['total_won']:.2f} / -${bal['total_lost']:.2f}",
         ]
+
         if self._real_trading:
             real_pnl = self.db.get_total_real_pnl()
             real_sign = "+" if real_pnl >= 0 else ""
+            lines.append("")
+            lines.append("<b>REAL</b>")
             lines.append(
-                f"📈 Real P&amp;L: <b>{real_sign}${real_pnl:.2f}</b> "
-                f"(pending: {len(self._pending_pm)} PM, {len(self._pending_ka)} Ka)"
+                f"📈 Real P&amp;L: <b>{real_sign}${real_pnl:.2f}</b> | "
+                f"pending: PM {len(self._pending_pm)} / Kalshi {len(self._pending_ka)}"
             )
             if self._pm_balance is not None or self._ka_balance is not None:
                 pm_str = f"${self._pm_balance:.2f}" if self._pm_balance is not None else "?"
                 ka_str = f"${self._ka_balance:.2f}" if self._ka_balance is not None else "?"
-                lines.append(f"💼 PM: {pm_str} | Kalshi: {ka_str}")
-        if open_pos:
-            now_dt = datetime.now(tz=timezone.utc)
-            active, pending_settle = [], []
-            for p in open_pos:
-                try:
-                    gd = datetime.fromisoformat(p["game_date"])
-                    if gd.tzinfo is None:
-                        gd = gd.replace(tzinfo=timezone.utc)
-                    if now_dt - gd > timedelta(hours=3):
-                        pending_settle.append(p)
-                        continue
-                except Exception:
-                    pass
-                active.append(p)
+                lines.append(f"💼 Депозиты: Polymarket {pm_str} | Kalshi {ka_str}")
+            _append_positions(lines, real_open, "real")
 
-            if active:
-                lines.append("")
-                lines.append("<b>Открытые позиции:</b>")
-                for p in active:
-                    mode = "paper" if (p["is_paper"] or p["is_paper"] is None) else "real"
-                    exec_st = f" [{p['execution_status']}]" if p["execution_status"] else ""
-                    lines.append(
-                        f"  {p['id']} [{mode}]{exec_st} {p['pm_slug'][:28]}\n"
-                        f"    edge={p['edge']:.3f} ${p['total_cost']:.2f} | "
-                        f"{p['opened_at'][5:16]}"
-                    )
-            if pending_settle:
-                total_cost = sum(float(p["total_cost"]) for p in pending_settle)
-                lines.append(f"⏳ Ожидают резолва: {len(pending_settle)} позиций (${total_cost:.2f})")
+        lines.append("")
+        lines.append("<b>PAPER</b>")
+        lines.append(
+            f"📄 Paper P&amp;L: <b>{paper_sign}${paper_pnl:.2f}</b> | "
+            f"в игре ${paper_in_play:.2f} | ставок ${bal['total_wagered']:.2f} | "
+            f"+${bal['total_won']:.2f} / -${bal['total_lost']:.2f}"
+        )
+        _append_positions(lines, paper_open, "paper")
         return "\n".join(lines)
 
     def _print_status(self) -> None:
