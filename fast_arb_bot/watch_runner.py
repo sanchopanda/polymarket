@@ -836,7 +836,7 @@ class FastArbWatchRunner:
         if self._chainlink is None:
             return
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
 
         # Clean up states for positions that got resolved normally
         for pid in list(self._danger_exits):
@@ -865,6 +865,7 @@ class FastArbWatchRunner:
 
             cl_price = self._chainlink.get_price(pos.symbol)
             if cl_price is None:
+                print(f"[fast-arb][DANGER] {pos.symbol} pos={pos.id[:8]} | no CL price! {seconds_to_expiry:.0f}s to expiry")
                 continue
             ref_price = pos.kalshi_reference_price
             if ref_price is None or ref_price <= 0:
@@ -982,7 +983,7 @@ class FastArbWatchRunner:
             return
 
         # Not both sold yet → schedule retry if time allows
-        seconds_left = (pos.expiry - datetime.now(timezone.utc)).total_seconds()
+        seconds_left = (pos.expiry - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds()
         if seconds_left > 5:
             state.timer = threading.Timer(1.5, self._danger_exit_try_sell, args=[pos_id])
             state.timer.start()

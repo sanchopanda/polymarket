@@ -16,8 +16,8 @@ safety:
   min_total_balance_usd: 100.0
   min_leg_price: 0.10
   max_leg_price: 0.90
-  blocked_leg_price_min: 0.40
-  blocked_leg_price_max: 0.60
+  blocked_leg_price_min: 0.0
+  blocked_leg_price_max: 0.0
   min_balance_polymarket: 30.0
   min_balance_kalshi: 30.0
   cooldown_seconds: 10.0
@@ -86,11 +86,12 @@ chainlink:
   rpc_urls:
     - "https://polygon-bor-rpc.publicnode.com"
     - "https://polygon.drpc.org"
-    - "https://polygon.meowrpc.com"
+    - "https://rpc-mainnet.matic.quiknode.pro"
+    - "https://1rpc.io/matic"
   wss_urls:
     - "wss://polygon-bor-rpc.publicnode.com"
     - "wss://polygon.drpc.org"
-  poll_interval_seconds: 30
+  poll_interval_seconds: 10
   danger_zone_pct: 0.05          # exit if price within 0.05% of reference
   pre_expiry_check_seconds: 120  # start checking 2 min before expiry
 

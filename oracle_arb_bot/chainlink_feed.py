@@ -99,6 +99,7 @@ class ChainlinkFeed:
             else:
                 print(f"[chainlink] no feed for {binance_sym}, skipping")
 
+        self._rpc_urls = rpc_urls
         self._w3_list: list[Web3] = []
         for url in rpc_urls:
             self._w3_list.append(Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 5})))
@@ -272,6 +273,10 @@ class ChainlinkFeed:
                 return
 
             except Exception as exc:
+                # Recreate provider to avoid reusing a broken SSL session
+                self._w3_list[idx] = Web3(Web3.HTTPProvider(
+                    self._rpc_urls[idx], request_kwargs={"timeout": 5}
+                ))
                 if i < len(self._w3_list) - 1:
                     print(f"[chainlink] {sym} RPC[{idx}] error, trying next: {exc}")
                 else:
