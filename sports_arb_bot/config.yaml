@@ -55,7 +55,7 @@ real_trading:
   kalshi_slippage_cents: 2      # добавляем к цене Kalshi при выставлении ордера
   pm_price_buffer_cents: 2      # добавляем к цене PM при первой попытке
   min_fill_pct: 80              # минимальный процент заполнения (0–100)
-  depth_multiplier: 4.0         # минимальная глубина стакана для real = x4 от размера ноги
+  depth_multiplier: 3.0         # минимальная глубина стакана для real = x3 от размера ноги
   ka_poll_interval_seconds: 2   # как часто опрашиваем Kalshi resting ордера
   max_real_per_pair: 1          # макс реальных арбитражей на одну пару рынков
   max_positions_per_pair: 4     # макс всего позиций (real + paper) на одну пару рынков
