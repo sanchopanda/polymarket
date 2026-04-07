@@ -61,6 +61,11 @@ class PolymarketFeed:
         min_expiry = now + timedelta(days=self.market_filter["min_days_to_expiry"])
         max_expiry = now + timedelta(days=self.market_filter["max_days_to_expiry"])
         symbol_filter = (self.market_filter.get("symbol") or "").strip().lower()
+        symbols_filter = {
+            str(sym).strip().lower()
+            for sym in (self.market_filter.get("symbols") or [])
+            if str(sym).strip()
+        }
 
         result: list[NormalizedMarket] = []
         for market in raw:
@@ -76,7 +81,10 @@ class PolymarketFeed:
             fee_type = self.market_filter.get("fee_type") or ""
             if fee_type and not (market.fee_type or "").startswith(fee_type):
                 continue
-            if symbol_filter and normalized.symbol.lower() != symbol_filter:
+            symbol_lc = normalized.symbol.lower()
+            if symbol_filter and symbol_lc != symbol_filter:
+                continue
+            if symbols_filter and symbol_lc not in symbols_filter:
                 continue
             result.append(normalized)
         return result

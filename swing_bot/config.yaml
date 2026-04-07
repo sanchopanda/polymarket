@@ -1,11 +1,14 @@
 strategy:
-  interval_minutes: 5             # 5-min markets
-  max_entry_price: 0.51           # buy Up only if ask <= this
-  sell_target: 0.60               # sell Up when bid >= this
-  arb_target: 0.40                # buy Down when ask <= this
-  cutoff_pct: 0.90                # flip at 90% of market duration
+  interval_minutes: 5             # legacy single interval
+  interval_minutes_list: [5, 15]  # active intervals
+  min_entry_price: 0.45           # buy side only if ask >= this
+  max_entry_price: 0.51           # buy cheaper side if ask <= this
+  sell_target: 0.60               # sell entered side when bid >= this
+  arb_target: 0.40                # buy opposite side when ask <= this
+  max_flip_price: 0.90            # buy opposite side on cutoff only if ask <= this
+  cutoff_pct: 0.90                # if no arb, buy opposite side at 90% of market duration
   stake_usd: 1.0                  # paper stake size
-  verification_delay_seconds: 21  # orderbook re-check delay
+  verification_delay_seconds: 1   # orderbook re-check delay
 
 market_filter:
   symbols: ["BTC", "ETH", "SOL", "XRP"]

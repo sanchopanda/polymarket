@@ -46,6 +46,7 @@ class SwingDB:
                 yes_token_id    TEXT NOT NULL,
                 no_token_id     TEXT NOT NULL,
                 state           TEXT NOT NULL DEFAULT 'watching',
+                entry_side      TEXT NOT NULL DEFAULT 'yes',
                 entry_price     REAL,
                 entry_price_rest REAL,
                 stake_usd       REAL,
@@ -55,6 +56,7 @@ class SwingDB:
                 exit_price      REAL,
                 exit_price_rest REAL,
                 exited_at       TEXT,
+                hold_reason     TEXT,
                 flip_shares     REAL,
                 winning_side    TEXT,
                 pnl             REAL,
@@ -69,6 +71,32 @@ class SwingDB:
                 details     TEXT
             );
         """)
+        cols = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(positions)").fetchall()
+        }
+        if "entry_side" not in cols:
+            self.conn.execute(
+                "ALTER TABLE positions ADD COLUMN entry_side TEXT NOT NULL DEFAULT 'yes'"
+            )
+        if "hold_reason" not in cols:
+            self.conn.execute(
+                "ALTER TABLE positions ADD COLUMN hold_reason TEXT"
+            )
+        self.conn.execute(
+            """
+            UPDATE positions
+            SET
+                state = ?,
+                pnl = COALESCE(
+                    pnl,
+                    (COALESCE(exit_price_rest, 0) - COALESCE(entry_price_rest, 0)) * COALESCE(shares, 0)
+                ),
+                resolved_at = COALESCE(resolved_at, exited_at, ?)
+            WHERE state = ? AND exit_type = 'sell'
+            """,
+            (SwingState.RESOLVED.value, _iso(datetime.utcnow()), SwingState.SOLD.value),
+        )
         self.conn.commit()
 
     # ── write ────────────────────────────────────────────────────
@@ -77,13 +105,13 @@ class SwingDB:
         self.conn.execute(
             """INSERT INTO positions
                (id, market_id, symbol, interval_minutes, market_start, market_end,
-                yes_token_id, no_token_id, state,
+                yes_token_id, no_token_id, state, entry_side,
                 entry_price, entry_price_rest, stake_usd, shares, opened_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 pos.id, pos.market_id, pos.symbol, pos.interval_minutes,
                 _iso(pos.market_start), _iso(pos.market_end),
-                pos.yes_token_id, pos.no_token_id, pos.state.value,
+                pos.yes_token_id, pos.no_token_id, pos.state.value, pos.entry_side,
                 pos.entry_price, pos.entry_price_rest,
                 pos.stake_usd, pos.shares, _iso(pos.opened_at),
             ),
@@ -110,13 +138,14 @@ class SwingDB:
         pos_id: str,
         winning_side: str,
         pnl: float,
+        hold_reason: str | None = None,
     ) -> None:
         self.conn.execute(
             """UPDATE positions
-               SET state = ?, winning_side = ?, pnl = ?, resolved_at = ?
+               SET state = ?, winning_side = ?, pnl = ?, resolved_at = ?, hold_reason = ?
                WHERE id = ?""",
             (SwingState.RESOLVED.value, winning_side, round(pnl, 6),
-             _iso(datetime.utcnow()), pos_id),
+             _iso(datetime.utcnow()), hold_reason, pos_id),
         )
         self.conn.commit()
 
@@ -155,15 +184,22 @@ class SwingDB:
             SELECT
                 COUNT(*),
                 COUNT(CASE WHEN state = 'resolved' THEN 1 END),
-                COALESCE(SUM(CASE WHEN state = 'resolved' THEN pnl END), 0)
+                COUNT(CASE WHEN state NOT IN ('resolved', 'sold') THEN 1 END),
+                COALESCE(SUM(
+                    CASE
+                        WHEN state = 'resolved' THEN pnl
+                        WHEN state = 'sold' THEN (COALESCE(exit_price_rest, 0) - COALESCE(entry_price_rest, 0)) * COALESCE(shares, 0)
+                        WHEN state = 'arbed' THEN (1.0 - COALESCE(entry_price_rest, 0) - COALESCE(exit_price_rest, 0)) * COALESCE(shares, 0)
+                    END
+                ), 0)
             FROM positions
         """).fetchone()
-        total, resolved = row[0], row[1]
+        total, resolved, open_count = row[0], row[1], row[2]
         return {
             "total": total,
             "resolved": resolved,
-            "open": total - resolved,
-            "realized_pnl": round(row[2], 4),
+            "open": open_count,
+            "realized_pnl": round(row[3], 4),
         }
 
     # ── internal ─────────────────────────────────────────────────
@@ -179,6 +215,7 @@ class SwingDB:
             yes_token_id=row["yes_token_id"],
             no_token_id=row["no_token_id"],
             state=SwingState(row["state"]),
+            entry_side=row["entry_side"],
             entry_price=row["entry_price"],
             entry_price_rest=row["entry_price_rest"],
             stake_usd=row["stake_usd"],
@@ -188,6 +225,7 @@ class SwingDB:
             exit_price=row["exit_price"],
             exit_price_rest=row["exit_price_rest"],
             exited_at=_dt(row["exited_at"]),
+            hold_reason=row["hold_reason"] if "hold_reason" in row.keys() else None,
             flip_shares=row["flip_shares"],
             winning_side=row["winning_side"],
             pnl=row["pnl"],

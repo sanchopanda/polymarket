@@ -31,16 +31,18 @@ class SwingPosition:
     no_token_id: str
     state: SwingState = SwingState.WATCHING
     # entry
+    entry_side: str = "yes"                  # yes=Up, no=Down
     entry_price: Optional[float] = None       # WS price at signal
-    entry_price_rest: Optional[float] = None  # REST-verified price (21s)
+    entry_price_rest: Optional[float] = None  # REST-verified price (1s)
     stake_usd: float = 0.0
     shares: float = 0.0
     opened_at: Optional[datetime] = None
     # exit
     exit_type: Optional[str] = None           # sell / arb / flip
     exit_price: Optional[float] = None        # WS price at exit signal
-    exit_price_rest: Optional[float] = None   # REST price at exit (21s)
+    exit_price_rest: Optional[float] = None   # REST price at exit (1s)
     exited_at: Optional[datetime] = None
+    hold_reason: Optional[str] = None
     # flip
     flip_shares: Optional[float] = None
     # resolution

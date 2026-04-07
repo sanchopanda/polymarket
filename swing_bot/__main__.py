@@ -54,17 +54,18 @@ def main() -> None:
         if not positions:
             print("Нет позиций")
             return
-        print(f"{'Symbol':<6} {'State':<14} {'Entry':>6} {'REST':>6} "
+        print(f"{'Symbol':<6} {'Side':<6} {'State':<14} {'Entry':>6} {'REST':>6} "
               f"{'Exit':>6} {'ExitR':>6} {'Type':<5} {'PnL':>8} {'Winner':<6}")
-        print("-" * 75)
+        print("-" * 82)
         for p in positions:
+            side = "Up" if p.entry_side == "yes" else "Down"
             entry = f"{p.entry_price:.3f}" if p.entry_price else "  -  "
             rest = f"{p.entry_price_rest:.3f}" if p.entry_price_rest else "  -  "
             exit_p = f"{p.exit_price:.3f}" if p.exit_price else "  -  "
             exit_r = f"{p.exit_price_rest:.3f}" if p.exit_price_rest else "  -  "
             pnl = f"${p.pnl:+.4f}" if p.pnl is not None else "   -   "
             winner = p.winning_side or "-"
-            print(f"{p.symbol:<6} {p.state.value:<14} {entry:>6} {rest:>6} "
+            print(f"{p.symbol:<6} {side:<6} {p.state.value:<14} {entry:>6} {rest:>6} "
                   f"{exit_p:>6} {exit_r:>6} {(p.exit_type or '-'):<5} {pnl:>8} {winner:<6}")
 
     elif args.cmd == "stats":

@@ -4,12 +4,10 @@ swing_bot/bot.py
 Paper-trading бот для swing-стратегии на 5-мин PM крипто-рынках.
 
 Стратегия:
-  1. На старте рынка покупаем Up если ask <= 0.51
-  2. Выход: sell Up >= 0.60 ИЛИ buy Down <= 0.40 ИЛИ flip на Down при 90% cutoff
-  3. Все входы/выходы с 21с задержкой (REST-верификация стакана)
-
-Ключевое наблюдение из бэктеста: hold_win = 0 — если ни один exit не сработал,
-Up никогда не выигрывал на экспирации. Поэтому flip — это стоп-лосс.
+  1. На входе покупаем более дешёвую сторону если min_entry_price <= ask <= max_entry_price
+  2. Выход: sell стороны входа >= sell_target ИЛИ buy opposite <= arb_target
+  3. Если opposite не дали дешево, на cutoff докупаем opposite по рынку
+  3. Все входы/выходы с 1с задержкой (REST-верификация стакана)
 """
 from __future__ import annotations
 
@@ -36,9 +34,14 @@ class SwingBot:
 
         strat = config["strategy"]
         self.interval_minutes = strat["interval_minutes"]
+        self.interval_minutes_list = sorted({
+            int(x) for x in (strat.get("interval_minutes_list") or [self.interval_minutes])
+        })
+        self.min_entry_price = strat["min_entry_price"]
         self.max_entry_price = strat["max_entry_price"]
         self.sell_target = strat["sell_target"]
         self.arb_target = strat["arb_target"]
+        self.max_flip_price = strat["max_flip_price"]
         self.cutoff_pct = strat["cutoff_pct"]
         self.stake_usd = strat["stake_usd"]
         self.verify_delay = strat["verification_delay_seconds"]
@@ -69,6 +72,22 @@ class SwingBot:
         self._last_cleanup_ts = 0.0
         self._resolve_attempts: dict[str, float] = {}
         self.notifier = notifier
+
+    @staticmethod
+    def _side_label(side: str) -> str:
+        return "Up" if side == "yes" else "Down"
+
+    @staticmethod
+    def _opposite_side(side: str) -> str:
+        return "no" if side == "yes" else "yes"
+
+    @staticmethod
+    def _token_id_for_side(obj: NormalizedMarket | SwingPosition, side: str) -> str:
+        return obj.yes_token_id if side == "yes" else obj.no_token_id
+
+    @staticmethod
+    def _top_for_side(yes_top: TopOfBook | None, no_top: TopOfBook | None, side: str) -> TopOfBook | None:
+        return yes_top if side == "yes" else no_top
 
     # ── main loop ────────────────────────────────────────────────
 
@@ -118,7 +137,7 @@ class SwingBot:
         # filter for target interval only
         filtered = [
             m for m in raw
-            if m.interval_minutes == self.interval_minutes
+            if m.interval_minutes in self.interval_minutes_list
         ]
 
         old_ids = set(self.markets.keys())
@@ -163,7 +182,15 @@ class SwingBot:
 
     # ── WS callback ──────────────────────────────────────────────
 
-    def _on_ws_message(self, payload: dict) -> None:
+    def _on_ws_message(self, payload: dict | list[dict]) -> None:
+        if isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, dict):
+                    self._on_ws_message(item)
+            return
+        if not isinstance(payload, dict):
+            return
+
         asset_id = payload.get("asset_id", "")
         if not asset_id:
             return
@@ -217,21 +244,37 @@ class SwingBot:
             no_top = self.live_prices.get(market.no_token_id or "")
 
         if pos_state is None or pos_state == SwingState.WATCHING:
-            if yes_top and yes_top.best_ask > 0 and yes_top.best_ask <= self.max_entry_price:
-                self._trigger_entry(market_id, market, yes_top.best_ask)
+            candidates: list[tuple[str, float]] = []
+            if (
+                yes_top and
+                self.min_entry_price <= yes_top.best_ask <= self.max_entry_price
+            ):
+                candidates.append(("yes", yes_top.best_ask))
+            if (
+                no_top and
+                self.min_entry_price <= no_top.best_ask <= self.max_entry_price
+            ):
+                candidates.append(("no", no_top.best_ask))
+            if candidates:
+                entry_side, entry_price = min(candidates, key=lambda item: item[1])
+                self._trigger_entry(market_id, market, entry_side, entry_price)
             return
 
         if pos_state == SwingState.HOLDING:
-            if yes_top and yes_top.best_bid >= self.sell_target:
-                self._trigger_sell(market_id, market, yes_top.best_bid)
+            entry_side = pos.entry_side
+            exit_side = self._opposite_side(entry_side)
+            entry_top = self._top_for_side(yes_top, no_top, entry_side)
+            exit_top = self._top_for_side(yes_top, no_top, exit_side)
+            if entry_top and entry_top.best_bid >= self.sell_target:
+                self._trigger_sell(market_id, market, entry_top.best_bid)
                 return
-            if no_top and no_top.best_ask > 0 and no_top.best_ask <= self.arb_target:
-                self._trigger_arb(market_id, market, no_top.best_ask)
+            if exit_top and exit_top.best_ask > 0 and exit_top.best_ask <= self.arb_target:
+                self._trigger_arb(market_id, market, exit_top.best_ask)
                 return
 
     # ── entry ────────────────────────────────────────────────────
 
-    def _trigger_entry(self, market_id: str, market: NormalizedMarket, ws_price: float) -> None:
+    def _trigger_entry(self, market_id: str, market: NormalizedMarket, entry_side: str, ws_price: float) -> None:
         key = f"entry:{market_id}"
         with self._lock:
             if key in self._pending_timers:
@@ -252,13 +295,15 @@ class SwingBot:
                 yes_token_id=market.yes_token_id or "",
                 no_token_id=market.no_token_id or "",
                 state=SwingState.PENDING_ENTRY,
+                entry_side=entry_side,
                 entry_price=ws_price,
                 stake_usd=self.stake_usd,
                 opened_at=now,
             )
             self.positions[market_id] = pos
 
-            print(f"[swing] ENTRY сигнал {market.symbol} | Up ask={ws_price:.3f} | "
+            print(f"[swing] ENTRY сигнал {market.symbol} | "
+                  f"{self._side_label(entry_side)} ask={ws_price:.3f} | "
                   f"ждём {self.verify_delay}с для REST проверки")
 
             t = threading.Timer(self.verify_delay, self._verify_entry, args=[market_id, ws_price])
@@ -275,13 +320,14 @@ class SwingBot:
                 return
 
             # REST orderbook check
-            book = self.clob.get_orderbook(pos.yes_token_id)
+            book = self.clob.get_orderbook(self._token_id_for_side(pos, pos.entry_side))
             rest_ask = book.asks[0].price if book and book.asks else None
 
-            if rest_ask is not None and rest_ask <= self.max_entry_price:
+            if rest_ask is not None and self.min_entry_price <= rest_ask <= self.max_entry_price:
                 pos.entry_price_rest = rest_ask
                 pos.shares = self.stake_usd / rest_ask
                 pos.state = SwingState.HOLDING
+                pos.hold_reason = None
                 pos.opened_at = datetime.utcnow()
 
                 self.db.open_position(pos)
@@ -290,17 +336,27 @@ class SwingBot:
                     "shares": round(pos.shares, 4),
                 })
                 print(f"[swing] ENTRY подтверждён {pos.symbol} | "
-                      f"ws={ws_price:.3f} rest={rest_ask:.3f} | "
+                      f"{self._side_label(pos.entry_side)} | ws={ws_price:.3f} rest={rest_ask:.3f} | "
                       f"shares={pos.shares:.2f} @ ${self.stake_usd}")
                 if self.notifier:
-                    self.notifier.notify_entry(pos.symbol, ws_price, rest_ask, pos.shares, self.stake_usd)
+                    self.notifier.notify_entry(
+                        pos.symbol,
+                        self._side_label(pos.entry_side),
+                        ws_price,
+                        rest_ask,
+                        pos.shares,
+                        self.stake_usd,
+                    )
             else:
                 # rejected — revert to watching
                 actual = rest_ask if rest_ask is not None else "N/A"
                 print(f"[swing] ENTRY отклонён {pos.symbol} | "
-                      f"ws={ws_price:.3f} rest={actual} > {self.max_entry_price}")
+                      f"{self._side_label(pos.entry_side)} | "
+                      f"ws={ws_price:.3f} rest={actual} вне диапазона "
+                      f"[{self.min_entry_price:.2f}, {self.max_entry_price:.2f}]")
                 self.db.audit("entry_rejected", pos.id, {
                     "ws_price": ws_price, "rest_price": rest_ask,
+                    "entry_side": pos.entry_side,
                 })
                 pos.state = SwingState.WATCHING
 
@@ -316,7 +372,8 @@ class SwingBot:
                 return
             pos.state = SwingState.PENDING_SELL
 
-            print(f"[swing] SELL сигнал {market.symbol} | Up bid={ws_price:.3f} | "
+            print(f"[swing] SELL сигнал {market.symbol} | "
+                  f"{self._side_label(pos.entry_side)} bid={ws_price:.3f} | "
                   f"ждём {self.verify_delay}с")
 
             t = threading.Timer(self.verify_delay, self._verify_sell, args=[market_id, ws_price])
@@ -332,7 +389,7 @@ class SwingBot:
             if not pos or pos.state != SwingState.PENDING_SELL:
                 return
 
-            book = self.clob.get_orderbook(pos.yes_token_id)
+            book = self.clob.get_orderbook(self._token_id_for_side(pos, pos.entry_side))
             rest_bid = book.bids[0].price if book and book.bids else None
 
             if rest_bid is not None and rest_bid >= self.sell_target:
@@ -341,25 +398,40 @@ class SwingBot:
                 pos.exit_price = ws_price
                 pos.exit_price_rest = rest_bid
                 pos.exited_at = now
-                pos.state = SwingState.SOLD
+                pos.state = SwingState.RESOLVED
+                pos.hold_reason = None
 
                 pnl = (rest_bid - pos.entry_price_rest) * pos.shares
-                self.db.update_state(pos.id, SwingState.SOLD,
+                pos.pnl = pnl
+                pos.resolved_at = now
+                self.db.update_state(pos.id, SwingState.RESOLVED,
                                      exit_type="sell", exit_price=ws_price,
                                      exit_price_rest=rest_bid,
-                                     exited_at=now)
+                                     exited_at=now,
+                                     hold_reason=None,
+                                     pnl=round(pnl, 6),
+                                     resolved_at=now)
                 self.db.audit("sell_confirmed", pos.id, {
                     "ws_price": ws_price, "rest_price": rest_bid,
                     "pnl_estimate": round(pnl, 4),
                 })
                 print(f"[swing] SELL подтверждён {pos.symbol} | "
+                      f"{self._side_label(pos.entry_side)} | "
                       f"entry={pos.entry_price_rest:.3f} exit={rest_bid:.3f} | "
                       f"PnL≈${pnl:.4f}")
                 if self.notifier:
-                    self.notifier.notify_sell(pos.symbol, pos.entry_price_rest, rest_bid, pnl)
+                    self.notifier.notify_sell(
+                        pos.symbol,
+                        self._side_label(pos.entry_side),
+                        pos.entry_price_rest,
+                        rest_bid,
+                        pnl,
+                    )
+                self.positions.pop(market_id, None)
             else:
                 actual = rest_bid if rest_bid is not None else "N/A"
                 print(f"[swing] SELL отклонён {pos.symbol} | "
+                      f"{self._side_label(pos.entry_side)} | "
                       f"ws={ws_price:.3f} rest={actual} < {self.sell_target}")
                 self.db.audit("sell_rejected", pos.id, {
                     "ws_price": ws_price, "rest_price": rest_bid,
@@ -377,8 +449,10 @@ class SwingBot:
             if not pos or pos.state != SwingState.HOLDING:
                 return
             pos.state = SwingState.PENDING_ARB
+            exit_side = self._opposite_side(pos.entry_side)
 
-            print(f"[swing] ARB сигнал {market.symbol} | Down ask={ws_price:.3f} | "
+            print(f"[swing] ARB сигнал {market.symbol} | "
+                  f"{self._side_label(exit_side)} ask={ws_price:.3f} | "
                   f"ждём {self.verify_delay}с")
 
             t = threading.Timer(self.verify_delay, self._verify_arb, args=[market_id, ws_price])
@@ -394,7 +468,8 @@ class SwingBot:
             if not pos or pos.state != SwingState.PENDING_ARB:
                 return
 
-            book = self.clob.get_orderbook(pos.no_token_id)
+            exit_side = self._opposite_side(pos.entry_side)
+            book = self.clob.get_orderbook(self._token_id_for_side(pos, exit_side))
             rest_ask = book.asks[0].price if book and book.asks else None
 
             if rest_ask is not None and rest_ask <= self.arb_target:
@@ -404,6 +479,7 @@ class SwingBot:
                 pos.exit_price_rest = rest_ask
                 pos.exited_at = now
                 pos.state = SwingState.ARBED
+                pos.hold_reason = None
 
                 pnl = 1.0 - pos.entry_price_rest - rest_ask
                 pnl_usd = pnl * pos.shares
@@ -411,19 +487,29 @@ class SwingBot:
                 self.db.update_state(pos.id, SwingState.ARBED,
                                      exit_type="arb", exit_price=ws_price,
                                      exit_price_rest=rest_ask,
-                                     exited_at=now)
+                                     exited_at=now,
+                                     hold_reason=None)
                 self.db.audit("arb_confirmed", pos.id, {
                     "ws_price": ws_price, "rest_price": rest_ask,
                     "pnl_estimate": round(pnl_usd, 4),
                 })
                 print(f"[swing] ARB подтверждён {pos.symbol} | "
-                      f"Up={pos.entry_price_rest:.3f} Down={rest_ask:.3f} | "
+                      f"{self._side_label(pos.entry_side)}={pos.entry_price_rest:.3f} "
+                      f"+ {self._side_label(exit_side)}={rest_ask:.3f} | "
                       f"edge={pnl:.3f} PnL≈${pnl_usd:.4f}")
                 if self.notifier:
-                    self.notifier.notify_arb(pos.symbol, pos.entry_price_rest, rest_ask, pnl_usd)
+                    self.notifier.notify_arb(
+                        pos.symbol,
+                        self._side_label(pos.entry_side),
+                        pos.entry_price_rest,
+                        self._side_label(exit_side),
+                        rest_ask,
+                        pnl_usd,
+                    )
             else:
                 actual = rest_ask if rest_ask is not None else "N/A"
                 print(f"[swing] ARB отклонён {pos.symbol} | "
+                      f"{self._side_label(exit_side)} | "
                       f"ws={ws_price:.3f} rest={actual} > {self.arb_target}")
                 self.db.audit("arb_rejected", pos.id, {
                     "ws_price": ws_price, "rest_price": rest_ask,
@@ -452,12 +538,16 @@ class SwingBot:
                 return
             pos.state = SwingState.PENDING_FLIP
 
-            # get current Down ask from WS
-            no_top = self.live_prices.get(pos.no_token_id)
-            ws_price = no_top.best_ask if no_top and no_top.best_ask > 0 else 0.50
+            flip_side = self._opposite_side(pos.entry_side)
+            flip_top = self._top_for_side(
+                self.live_prices.get(pos.yes_token_id),
+                self.live_prices.get(pos.no_token_id),
+                flip_side,
+            )
+            ws_price = flip_top.best_ask if flip_top and flip_top.best_ask > 0 else 0.50
 
             print(f"[swing] FLIP сигнал {pos.symbol} | cutoff {self.cutoff_pct*100:.0f}% | "
-                  f"Down ask≈{ws_price:.3f} | ждём {self.verify_delay}с")
+                  f"{self._side_label(flip_side)} ask≈{ws_price:.3f} | ждём {self.verify_delay}с")
 
             t = threading.Timer(self.verify_delay, self._verify_flip, args=[market_id, ws_price])
             t.daemon = True
@@ -472,10 +562,11 @@ class SwingBot:
             if not pos or pos.state != SwingState.PENDING_FLIP:
                 return
 
-            book = self.clob.get_orderbook(pos.no_token_id)
+            flip_side = self._opposite_side(pos.entry_side)
+            book = self.clob.get_orderbook(self._token_id_for_side(pos, flip_side))
             rest_ask = book.asks[0].price if book and book.asks else None
 
-            if rest_ask is not None and rest_ask > 0:
+            if rest_ask is not None and 0 < rest_ask <= self.max_flip_price:
                 now = datetime.utcnow()
                 flip_shares = self.stake_usd / rest_ask
                 pos.exit_type = "flip"
@@ -484,24 +575,44 @@ class SwingBot:
                 pos.flip_shares = flip_shares
                 pos.exited_at = now
                 pos.state = SwingState.FLIPPED
+                pos.hold_reason = None
 
                 self.db.update_state(pos.id, SwingState.FLIPPED,
                                      exit_type="flip", exit_price=ws_price,
                                      exit_price_rest=rest_ask,
                                      flip_shares=flip_shares,
-                                     exited_at=now)
+                                     exited_at=now,
+                                     hold_reason=None)
                 self.db.audit("flip_confirmed", pos.id, {
                     "ws_price": ws_price, "rest_price": rest_ask,
                     "flip_shares": round(flip_shares, 4),
                 })
                 print(f"[swing] FLIP подтверждён {pos.symbol} | "
-                      f"Down@{rest_ask:.3f} shares={flip_shares:.2f}")
+                      f"{self._side_label(flip_side)}@{rest_ask:.3f} shares={flip_shares:.2f}")
                 if self.notifier:
-                    self.notifier.notify_flip(pos.symbol, rest_ask, flip_shares)
+                    self.notifier.notify_flip(
+                        pos.symbol,
+                        self._side_label(flip_side),
+                        rest_ask,
+                        flip_shares,
+                    )
             else:
                 # can't flip — forced hold
-                print(f"[swing] FLIP не удался {pos.symbol} | стакан пуст, держим")
-                self.db.audit("flip_failed", pos.id, {"ws_price": ws_price})
+                actual = f"{rest_ask:.3f}" if rest_ask is not None else "N/A"
+                if rest_ask is None or rest_ask <= 0:
+                    reason = "no_flip_liquidity"
+                    detail = "стакан пуст"
+                else:
+                    reason = "flip_price_too_high"
+                    detail = f"цена {actual} > {self.max_flip_price:.2f}"
+                print(f"[swing] FLIP не удался {pos.symbol} | {detail}, держим")
+                self.db.audit("flip_failed", pos.id, {
+                    "ws_price": ws_price,
+                    "rest_price": rest_ask,
+                    "reason": reason,
+                })
+                pos.hold_reason = reason
+                self.db.update_state(pos.id, SwingState.HOLDING, hold_reason=pos.hold_reason)
                 pos.state = SwingState.HOLDING
 
     # ── resolution ───────────────────────────────────────────────
@@ -537,6 +648,9 @@ class SwingBot:
         if winning_side is None:
             return
 
+        if pos.exit_type is None and not pos.hold_reason:
+            pos.hold_reason = "no_exit_signal"
+
         pnl = self._calc_pnl(pos, winning_side)
         pos.winning_side = winning_side
         pos.pnl = pnl
@@ -544,25 +658,34 @@ class SwingBot:
         pos.resolved_at = datetime.utcnow()
 
         self._resolve_attempts.pop(pos.market_id, None)
-        self.db.resolve_position(pos.id, winning_side, pnl)
+        self.db.resolve_position(pos.id, winning_side, pnl, hold_reason=pos.hold_reason)
         self.db.audit("resolved", pos.id, {
             "winning_side": winning_side,
             "exit_type": pos.exit_type,
+            "hold_reason": pos.hold_reason,
             "pnl": round(pnl, 4),
         })
 
         stats = self.db.stats()
+        hold_note = f" | reason={pos.hold_reason}" if pos.exit_type is None and pos.hold_reason else ""
         print(f"[swing] RESOLVED {pos.symbol} | winner={winning_side} | "
-              f"exit={pos.exit_type or 'hold'} | PnL=${pnl:+.4f} | "
+              f"exit={pos.exit_type or 'hold'}{hold_note} | PnL=${pnl:+.4f} | "
               f"cumulative=${stats['realized_pnl']:+.4f} ({stats['resolved']} trades)")
         if self.notifier:
-            self.notifier.notify_resolve(pos.symbol, pos.exit_type, winning_side, pnl, stats["realized_pnl"])
+            self.notifier.notify_resolve(
+                pos.symbol,
+                pos.exit_type,
+                pos.hold_reason,
+                winning_side,
+                pnl,
+                stats["realized_pnl"],
+            )
 
     def _calc_pnl(self, pos: SwingPosition, winning_side: str) -> float:
         entry_cost = pos.entry_price_rest * pos.shares if pos.entry_price_rest else 0.0
 
         if pos.exit_type == "sell":
-            # sold Up for exit_price_rest → PnL = (sell - buy) * shares
+            # sold entered side for exit_price_rest → PnL = (sell - buy) * shares
             sell_revenue = (pos.exit_price_rest or 0.0) * pos.shares
             return sell_revenue - entry_cost
 
@@ -571,15 +694,15 @@ class SwingBot:
             return pos.shares - entry_cost - arb_cost
 
         if pos.exit_type == "flip":
-            up_won = winning_side == "yes"
-            up_pnl = (pos.shares - entry_cost) if up_won else -entry_cost
+            entry_won = winning_side == pos.entry_side
+            entry_pnl = (pos.shares - entry_cost) if entry_won else -entry_cost
             flip_shares = pos.flip_shares or 0.0
             flip_cost = (pos.exit_price_rest or 0.50) * flip_shares
-            down_won = winning_side == "no"
-            down_pnl = (flip_shares - flip_cost) if down_won else -flip_cost
-            return up_pnl + down_pnl
+            flip_won = winning_side == self._opposite_side(pos.entry_side)
+            flip_pnl = (flip_shares - flip_cost) if flip_won else -flip_cost
+            return entry_pnl + flip_pnl
 
-        won = winning_side == "yes"
+        won = winning_side == pos.entry_side
         return (pos.shares - entry_cost) if won else -entry_cost
 
     # ── cleanup ──────────────────────────────────────────────────
@@ -620,7 +743,8 @@ class SwingBot:
         for pos in self.positions.values():
             if pos.state != SwingState.RESOLVED:
                 ep = pos.entry_price_rest or pos.entry_price or 0.0
+                extra = f" reason={pos.hold_reason}" if pos.hold_reason else ""
                 lines.append(
-                    f"  {pos.symbol} [{pos.state.value}] entry={ep:.3f}"
+                    f"  {pos.symbol} [{pos.state.value}] {self._side_label(pos.entry_side)} entry={ep:.3f}{extra}"
                 )
         return "\n".join(lines)

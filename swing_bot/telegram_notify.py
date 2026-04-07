@@ -105,39 +105,65 @@ class SwingTelegramNotifier:
 
     # ── уведомления ──────────────────────────────────────────────
 
-    def notify_entry(self, symbol: str, ws_price: float, rest_price: float, shares: float, stake: float) -> None:
+    def notify_entry(
+        self,
+        symbol: str,
+        side_label: str,
+        ws_price: float,
+        rest_price: float,
+        shares: float,
+        stake: float,
+    ) -> None:
         self.send(
-            f"📈 <b>ВХОД: {symbol} Up</b>\n"
+            f"📈 <b>ВХОД: {symbol} {side_label}</b>\n"
             f"ws={ws_price:.3f} → rest={rest_price:.3f}\n"
             f"shares={shares:.2f} @ ${stake:.2f}"
         )
 
-    def notify_sell(self, symbol: str, entry: float, exit_price: float, pnl: float) -> None:
+    def notify_sell(self, symbol: str, side_label: str, entry: float, exit_price: float, pnl: float) -> None:
         emoji = "✅" if pnl >= 0 else "📉"
         self.send(
-            f"{emoji} <b>ПРОДАЖА: {symbol} Up</b>\n"
+            f"{emoji} <b>ПРОДАЖА: {symbol} {side_label}</b>\n"
             f"entry={entry:.3f} → sell={exit_price:.3f}\n"
             f"PnL: <b>${pnl:+.4f}</b>"
         )
 
-    def notify_arb(self, symbol: str, up_entry: float, down_entry: float, pnl: float) -> None:
+    def notify_arb(
+        self,
+        symbol: str,
+        entry_label: str,
+        entry_price: float,
+        hedge_label: str,
+        hedge_price: float,
+        pnl: float,
+    ) -> None:
         self.send(
             f"✅ <b>АРБ: {symbol}</b>\n"
-            f"Up={up_entry:.3f} + Down={down_entry:.3f} | edge={1 - up_entry - down_entry:.3f}\n"
+            f"{entry_label}={entry_price:.3f} + {hedge_label}={hedge_price:.3f} | "
+            f"edge={1 - entry_price - hedge_price:.3f}\n"
             f"PnL: <b>${pnl:+.4f}</b>"
         )
 
-    def notify_flip(self, symbol: str, down_price: float, flip_shares: float) -> None:
+    def notify_flip(self, symbol: str, hedge_label: str, hedge_price: float, flip_shares: float) -> None:
         self.send(
-            f"🔄 <b>ФЛИП: {symbol} → Down</b>\n"
-            f"Down@{down_price:.3f} | shares={flip_shares:.2f}"
+            f"🔄 <b>ФЛИП: {symbol} → {hedge_label}</b>\n"
+            f"{hedge_label}@{hedge_price:.3f} | shares={flip_shares:.2f}"
         )
 
-    def notify_resolve(self, symbol: str, exit_type: str | None, winning_side: str, pnl: float, cumulative: float) -> None:
+    def notify_resolve(
+        self,
+        symbol: str,
+        exit_type: str | None,
+        hold_reason: str | None,
+        winning_side: str,
+        pnl: float,
+        cumulative: float,
+    ) -> None:
         emoji = "💰" if pnl >= 0 else "❌"
         exit_label = exit_type or "hold"
+        reason_line = f"\nreason={hold_reason}" if exit_type is None and hold_reason else ""
         self.send(
             f"{emoji} <b>РЕЗОЛВ: {symbol}</b>\n"
-            f"winner={winning_side} | exit={exit_label}\n"
+            f"winner={winning_side} | exit={exit_label}{reason_line}\n"
             f"PnL: <b>${pnl:+.4f}</b> | итого: ${cumulative:+.4f}"
         )
