@@ -2,10 +2,12 @@ strategy:
   spike_threshold_cents: 7      # min price rise in cents within window
   max_spike_cents: 30           # ignore spikes > this (market near resolution)
   max_entry_price: 0.80         # don't enter if follower price already this high
-  spike_window_seconds: 45      # rolling window for spike detection
+  spike_window_seconds: 15      # rolling window for spike detection
   min_leader_price: 0.70        # цена лидера должна быть выше этого
   max_price_gap_cents: 20       # если разрыв > этого — структурное расхождение, не входим
-  gap_signal_min_cents: 5       # статический гэп: минимальный разрыв для входа без спайка
+  gap_signal_min_cents: 5       # обязательный минимальный гэп для любого входа
+  signal_confirm_delay_seconds: 1.0   # повторная проверка follower через 1с после сигнала
+  max_follower_move_after_signal_cents: 3.0  # follower не должен уйти выше signal price больше чем на 3c
   cooldown_seconds: 120         # cooldown per pair+side
   stake_per_trade_usd: 5.0
   max_open_positions: 10
@@ -44,3 +46,7 @@ kalshi:
     - "KXXRP15M"
     - "KXDOGE15M"
     - "KXBNB15M"
+
+telegram:
+  token_env: "FAST_ARB_BOT_TOKEN"
+  chat_id_file: "data/.telegram_chat_id"

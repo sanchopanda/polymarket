@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import dataclass
 
 from arb_bot.kalshi_ws import KalshiTopOfBook, KalshiWebSocketClient
 from arb_bot.ws import MarketWebSocketClient, TopOfBook
@@ -11,6 +12,13 @@ from cross_arb_bot.models import MatchedMarketPair
 from momentum_bot.engine import MomentumEngine
 from momentum_bot.models import SpikeSignal
 from momentum_bot.spike_detector import SpikeDetector
+
+
+@dataclass
+class PendingEntry:
+    signal: SpikeSignal
+    signal_type: str
+    due_at: float
 
 
 class MomentumWatchRunner:
@@ -45,6 +53,7 @@ class MomentumWatchRunner:
         self._current_asset_ids: list[str] = []
         self._current_kalshi_tickers: list[str] = []
         self._refresh_in_progress = False
+        self._pending_entries: dict[tuple[str, str, str], PendingEntry] = {}
 
     def run(self) -> None:
         runtime = self.engine.config["runtime"]
@@ -85,9 +94,12 @@ class MomentumWatchRunner:
                         self._kalshi_ws = None
                     self._current_asset_ids = []
                     self._current_kalshi_tickers = []
+                    with self._signal_lock:
+                        self._pending_entries.clear()
                     ws_active = False
 
                 now = time.time()
+                self._process_pending_entries(now)
                 if (now - last_status) >= status_interval:
                     self.engine.resolve()
                     self.engine.print_status()
@@ -187,6 +199,12 @@ class MomentumWatchRunner:
                 self.spike_detector.clear_market(old_match.polymarket.yes_token_id or "")
                 self.spike_detector.clear_market(old_match.polymarket.no_token_id or "")
                 self.spike_detector.clear_market(old_match.kalshi.market_id)
+        with self._signal_lock:
+            self._pending_entries = {
+                key: entry
+                for key, entry in self._pending_entries.items()
+                if entry.signal.pair_key in watched
+            }
 
         self.watched = watched
         self.pairs_by_asset_id = pairs_by_asset
@@ -314,6 +332,7 @@ class MomentumWatchRunner:
         ]
 
         gap_min = self.engine.strategy.get("gap_signal_min_cents", 9999)
+        confirm_delay = float(self.engine.strategy.get("signal_confirm_delay_seconds", 1.0))
 
         for leader_venue, leader_id, follower_venue, side in combos:
             if not leader_id:
@@ -329,16 +348,11 @@ class MomentumWatchRunner:
                 continue
 
             gap_cents = (leader_price - follower_price) * 100
+            if gap_cents < gap_min:
+                continue
 
-            # Сигнал: либо спайк, либо статический гэп
-            if spike is None:
-                if gap_cents < gap_min:
-                    continue
-                signal_type = "gap"
-                spike_val = 0.0
-            else:
-                signal_type = "spike"
-                spike_val = spike
+            signal_type = "spike" if spike is not None else "gap"
+            spike_val = spike or 0.0
 
             signal = SpikeSignal(
                 leader_venue=leader_venue,
@@ -355,17 +369,71 @@ class MomentumWatchRunner:
             )
 
             with self._signal_lock:
+                pending_key = (pair_key, side, follower_venue)
+                if pending_key in self._pending_entries:
+                    continue
                 if not self.engine.evaluate_signal(signal):
                     continue
-                pos = self.engine.open_paper_position(signal)
-                if pos:
-                    print(
-                        f"[Momentum][OPEN][{signal_type.upper()}] {pm.symbol} {side.upper()}"
-                        f" | leader={leader_venue} price={leader_price:.4f}"
-                        + (f" spike={spike_val:.1f}¢" if signal_type == "spike" else f" gap={gap_cents:.1f}¢")
-                        + f" | follower={follower_venue} entry={follower_price:.4f}"
-                        f" | cost=${pos.total_cost:.2f}"
+                self._pending_entries[pending_key] = PendingEntry(
+                    signal=signal,
+                    signal_type=signal_type,
+                    due_at=time.time() + confirm_delay,
+                )
+
+    def _process_pending_entries(self, now: float) -> None:
+        max_move_cents = float(self.engine.strategy.get("max_follower_move_after_signal_cents", 3.0))
+        with self._signal_lock:
+            ready_entries = [
+                (key, entry)
+                for key, entry in self._pending_entries.items()
+                if entry.due_at <= now
+            ]
+            for key, _ in ready_entries:
+                self._pending_entries.pop(key, None)
+
+        for _, entry in ready_entries:
+            signal = entry.signal
+            follower_price = self._get_follower_price(
+                signal.follower_venue,
+                signal.matched_pair,
+                signal.side,
+            )
+            if follower_price is None or follower_price <= 0:
+                continue
+            if follower_price - signal.follower_price > (max_move_cents / 100.0):
+                continue
+
+            confirmed_signal = SpikeSignal(
+                leader_venue=signal.leader_venue,
+                follower_venue=signal.follower_venue,
+                pair_key=signal.pair_key,
+                symbol=signal.symbol,
+                side=signal.side,
+                leader_price=signal.leader_price,
+                follower_price=follower_price,
+                spike_magnitude=signal.spike_magnitude,
+                price_gap=signal.leader_price - follower_price,
+                detected_at=signal.detected_at,
+                matched_pair=signal.matched_pair,
+            )
+            if not self.engine.evaluate_signal(confirmed_signal):
+                continue
+
+            pos = self.engine.open_paper_position(confirmed_signal)
+            if pos:
+                gap_cents = confirmed_signal.price_gap * 100.0
+                print(
+                    f"[Momentum][OPEN][{entry.signal_type.upper()}] {signal.symbol} {signal.side.upper()}"
+                    f" | leader={signal.leader_venue} price={signal.leader_price:.4f}"
+                    + (
+                        f" spike={signal.spike_magnitude:.1f}¢"
+                        if entry.signal_type == "spike"
+                        else f" gap={gap_cents:.1f}¢"
                     )
+                    + f" | follower={signal.follower_venue} entry={follower_price:.4f}"
+                    f" | cost=${pos.total_cost:.2f}"
+                )
+                self.engine.notify_open(pos, confirmed_signal, entry.signal_type)
 
     def _get_follower_price(self, follower_venue: str, matched: MatchedMarketPair, side: str) -> float | None:
         pm = matched.polymarket

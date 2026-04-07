@@ -10,12 +10,19 @@ from cross_arb_bot.polymarket_feed import PolymarketFeed
 
 from momentum_bot.db import MomentumDB
 from momentum_bot.models import MomentumPosition, SpikeSignal
+from momentum_bot.telegram_notify import MomentumTelegramNotifier
 
 
 class MomentumEngine:
-    def __init__(self, config: dict, db: MomentumDB) -> None:
+    def __init__(
+        self,
+        config: dict,
+        db: MomentumDB,
+        notifier: MomentumTelegramNotifier | None = None,
+    ) -> None:
         self.config = config
         self.db = db
+        self.notifier = notifier
         self.strategy = config["strategy"]
         self.market_filter = config["market_filter"]
         self.pm_feed = PolymarketFeed(
@@ -192,6 +199,22 @@ class MomentumEngine:
             expiry=expiry,
         )
 
+    def notify_open(self, position: MomentumPosition, signal: SpikeSignal, signal_type: str) -> None:
+        if not self.notifier:
+            return
+        self.notifier.notify_open(
+            symbol=position.symbol,
+            side=position.side,
+            signal_type=signal_type,
+            leader_venue=signal.leader_venue,
+            follower_venue=signal.follower_venue,
+            leader_price=signal.leader_price,
+            follower_price=position.entry_price,
+            gap_cents=(signal.leader_price - position.entry_price) * 100.0,
+            spike_cents=signal.spike_magnitude,
+            total_cost=position.total_cost,
+        )
+
     def resolve(self) -> None:
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         for position in self.db.get_open_positions():
@@ -218,6 +241,14 @@ class MomentumEngine:
                 f"[Momentum][RESOLVE] {position.symbol} {position.side.upper()} @ {position.bet_venue}"
                 f" | outcome={result} | pnl=${pnl:+.2f}"
             )
+            if self.notifier:
+                self.notifier.notify_resolve(
+                    position.symbol,
+                    position.side,
+                    position.bet_venue,
+                    result,
+                    pnl,
+                )
 
     def _resolve_polymarket(self, position: MomentumPosition) -> str | None:
         # Find the PM market_id from pair_key (format: pm_id:kalshi_ticker)
@@ -255,15 +286,7 @@ class MomentumEngine:
         )
 
     def print_status(self) -> None:
-        stats = self.db.stats()
-        balance = self.free_balance()
-        print(
-            f"[Momentum][Status] balance=${balance:.2f}"
-            f" | realized_pnl=${stats['realized_pnl']:+.2f}"
-            f" | open={stats['open_count']}"
-            f" | resolved={stats['resolved_count']}"
-            f" | won={stats['won_count']} lost={stats['lost_count']}"
-        )
+        print(self.get_status_text())
         open_positions = self.db.get_open_positions()
         if open_positions:
             print("[Momentum][Open Positions]")
@@ -275,3 +298,25 @@ class MomentumEngine:
                     f" | cost=${p.total_cost:.2f}"
                     f" | expiry={p.expiry.strftime('%H:%M')}"
                 )
+
+    def get_status_text(self) -> str:
+        stats = self.db.stats()
+        balance = self.free_balance()
+        lines = [
+            f"[Momentum][Status] balance=${balance:.2f}"
+            f" | realized_pnl=${stats['realized_pnl']:+.2f}"
+            f" | open={stats['open_count']}"
+            f" | resolved={stats['resolved_count']}"
+            f" | won={stats['won_count']} lost={stats['lost_count']}"
+        ]
+        open_positions = self.db.get_open_positions()
+        if open_positions:
+            for p in open_positions:
+                lines.append(
+                    f"{p.symbol} {p.side.upper()} @ {p.bet_venue}"
+                    f" | leader={p.leader_venue} spike={p.spike_magnitude:.1f}¢"
+                    f" | entry={p.entry_price:.4f} shares={p.shares:.2f}"
+                    f" | cost=${p.total_cost:.2f}"
+                    f" | expiry={p.expiry.strftime('%H:%M')}"
+                )
+        return "\n".join(lines)

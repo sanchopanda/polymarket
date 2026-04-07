@@ -10,6 +10,7 @@ load_dotenv()
 
 from momentum_bot.db import MomentumDB
 from momentum_bot.engine import MomentumEngine
+from momentum_bot.telegram_notify import MomentumTelegramNotifier
 from momentum_bot.watch_runner import MomentumWatchRunner
 
 
@@ -34,10 +35,30 @@ def main() -> None:
     config = load_config(args.config)
     os.makedirs("data", exist_ok=True)
     db = MomentumDB(config["db"]["path"])
-    engine = MomentumEngine(config, db)
+    notifier = None
+    if args.command == "watch":
+        tg_cfg = config.get("telegram", {})
+        engine_ref: MomentumEngine | None = None
+
+        def _status() -> str:
+            if engine_ref is None:
+                return "momentum_bot запускается..."
+            return engine_ref.get_status_text()
+
+        notifier = MomentumTelegramNotifier(
+            get_status_fn=_status,
+            token_env=tg_cfg.get("token_env", "FAST_ARB_BOT_TOKEN"),
+            chat_id_file=tg_cfg.get("chat_id_file", "data/.telegram_chat_id"),
+        )
+        engine = MomentumEngine(config, db, notifier=notifier)
+        engine_ref = engine
+    else:
+        engine = MomentumEngine(config, db)
 
     if args.command == "watch":
         print("[Momentum] Starting watch mode...")
+        if notifier:
+            notifier.start()
         runner = MomentumWatchRunner(engine)
         runner.run()
 
