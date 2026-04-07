@@ -1,0 +1,33 @@
+strategy:
+  interval_minutes: 5             # 5-min markets
+  max_entry_price: 0.51           # buy Up only if ask <= this
+  sell_target: 0.60               # sell Up when bid >= this
+  arb_target: 0.40                # buy Down when ask <= this
+  cutoff_pct: 0.90                # flip at 90% of market duration
+  stake_usd: 1.0                  # paper stake size
+  verification_delay_seconds: 21  # orderbook re-check delay
+
+market_filter:
+  symbols: ["BTC", "ETH", "SOL", "XRP"]
+  fee_type: "crypto_fees"
+  min_days_to_expiry: 0
+  max_days_to_expiry: 0.01
+  min_volume: 0
+  min_liquidity: 100
+
+polymarket:
+  gamma_base_url: "https://gamma-api.polymarket.com"
+  clob_base_url: "https://clob.polymarket.com"
+  clob_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+  page_size: 500
+  request_delay_ms: 100
+
+runtime:
+  scan_interval_seconds: 60
+
+db:
+  path: "data/swing_bot.db"
+
+telegram:
+  token_env: "FAST_ARB_BOT_TOKEN"
+  chat_id_file: "data/.telegram_chat_id"

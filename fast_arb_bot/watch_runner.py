@@ -1245,13 +1245,13 @@ class FastArbWatchRunner:
         Возвращает (halt, reason).
         """
         try:
-            # Суммарный реализованный PnL
+            # Суммарный реализованный PnL (только реальные позиции)
             cursor = self.engine.db.conn.execute(
-                "SELECT COALESCE(SUM(actual_pnl), 0) FROM positions WHERE status='resolved'"
+                "SELECT COALESCE(SUM(actual_pnl), 0) FROM positions WHERE status='resolved' AND is_paper = 0"
             )
             realized_pnl = float(cursor.fetchone()[0])
 
-            # Стоп по потерям
+            # Стоп по потерям (только реальные)
             if realized_pnl < -self.max_realized_loss_usd:
                 return True, f"realized_losses_exceeded (pnl=${realized_pnl:+.2f}, limit=-${self.max_realized_loss_usd:.0f})"
 
@@ -2169,7 +2169,7 @@ class FastArbWatchRunner:
             )
             open_cost = float(c1.fetchone()[0])
             c2 = self.engine.db.conn.execute(
-                "SELECT COALESCE(SUM(actual_pnl), 0) FROM positions WHERE status='resolved'"
+                "SELECT COALESCE(SUM(actual_pnl), 0) FROM positions WHERE status='resolved' AND is_paper = 0"
             )
             realized_pnl = float(c2.fetchone()[0])
         except Exception:

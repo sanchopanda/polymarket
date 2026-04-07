@@ -25,7 +25,7 @@ PAGE_SIZE = 500
 REQUEST_DELAY = 0.25  # seconds between pages
 
 ALLOWED_SYMBOLS = {"BTC", "ETH", "SOL", "XRP"}
-ALLOWED_INTERVALS = {5, 15}
+ALLOWED_INTERVALS = {5, 15, 60}
 
 SYMBOL_MAP = {
     "BITCOIN": "BTC",
@@ -56,6 +56,8 @@ def _extract_interval(question: str) -> Optional[int]:
         return 15
     if re.search(r"\b5\s*Minutes\b", question, re.IGNORECASE):
         return 5
+    if re.search(r"\b1\s*Hour\b|\b60\s*Minutes\b", question, re.IGNORECASE):
+        return 60
     return None
 
 

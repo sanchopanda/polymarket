@@ -92,7 +92,7 @@ chainlink:
     - "wss://polygon-bor-rpc.publicnode.com"
     - "wss://polygon.drpc.org"
   poll_interval_seconds: 10
-  danger_zone_pct: 0.05          # exit if price within 0.05% of reference
+  danger_zone_pct: 0.10          # exit if price within 0.10% of reference
   pre_expiry_check_seconds: 120  # start checking 2 min before expiry
 
 telegram:
