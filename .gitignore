@@ -19,7 +19,7 @@ bybit-bot/.venv/
 .env
 .env.*
 data/*.key
-data/.telegram_chat_id
+data/.telegram_chat_id*
 
 # Claude Code local settings
 .claude/settings.local.json
@@ -32,6 +32,17 @@ data/*.db-wal
 # Backtest cache
 data/markets_*.json
 data/backtest_markets.json
+
+# Syncthing
+data/.stfolder/
+
+# Misc data scripts
+data/pyex.py
+
+# Research bot data and scripts
+research_bot/data/
+research_bot/backtest_*.py
+research_bot/fetch_hourly.py
 
 # IDE
 .idea/
