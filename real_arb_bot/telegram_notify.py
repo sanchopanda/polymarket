@@ -105,6 +105,7 @@ class TelegramNotifier:
         is_paper: bool = False,
         kalshi_target: float | None = None,
         pm_target: float | None = None,
+        interval_minutes: int | None = None,
     ) -> None:
         paper_tag = " [PAPER]" if is_paper else ""
         if is_paper:
@@ -128,8 +129,15 @@ class TelegramNotifier:
         else:
             target_line = ""
 
+        if interval_minutes == 60:
+            interval_tag = " 1h"
+        elif interval_minutes == 15:
+            interval_tag = " 15m"
+        else:
+            interval_tag = ""
+
         text = (
-            f"{icon} <b>ОТКРЫТА{paper_tag}: {symbol}</b>\n"
+            f"{icon} <b>ОТКРЫТА{paper_tag}: {symbol}{interval_tag}</b>\n"
             f"{yes_venue}:YES @ {yes_ask:.4f} + {no_venue}:NO @ {no_ask:.4f}\n"
             f"ask_sum={ask_sum:.4f} | edge={edge:.4f}\n"
             f"cost=${cost:.2f} | ожид. прибыль=${expected_profit:.2f}\n"

@@ -20,6 +20,37 @@ SYMBOL_MAP = {
     "HYPERLIQUID": "HYPE",
 }
 
+# Hourly slug: normalized symbol → full name used in Polymarket event slug
+HOURLY_SYMBOL_SLUG = {
+    "btc": "bitcoin",
+    "eth": "ethereum",
+    "sol": "solana",
+    "xrp": "xrp",
+}
+
+# EDT = UTC-4 (Apr–Oct). Same pattern as research_bot/fetch_hourly.py.
+# ⚠ Change to timedelta(hours=-5) when DST ends in November.
+_ET_OFFSET = timedelta(hours=-4)
+
+
+def _hourly_slug(slug_name: str, window_start_et: datetime) -> str:
+    """Build PM hourly event slug from ET window start datetime.
+
+    Example: _hourly_slug("bitcoin", datetime(2026, 4, 8, 15, 0))
+             → "bitcoin-up-or-down-april-8-2026-3pm-et"
+    """
+    h = window_start_et.hour
+    if h == 0:
+        time_str = "12am"
+    elif h < 12:
+        time_str = f"{h}am"
+    elif h == 12:
+        time_str = "12pm"
+    else:
+        time_str = f"{h - 12}pm"
+    month = window_start_et.strftime("%B").lower()
+    return f"{slug_name}-up-or-down-{month}-{window_start_et.day}-{window_start_et.year}-{time_str}-et"
+
 PRICE_TO_BEAT_RE = re.compile(r"Price to beat\s*\$([0-9,]+(?:\.[0-9]+)?)", re.IGNORECASE)
 PRICE_ABOVE_RE = re.compile(r"price (?:of )?.*?(?:above|over|greater than)\s*\$([0-9,]+(?:\.[0-9]+)?)", re.IGNORECASE)
 PRICE_BELOW_RE = re.compile(r"price (?:of )?.*?(?:below|under|less than)\s*\$([0-9,]+(?:\.[0-9]+)?)", re.IGNORECASE)
@@ -56,6 +87,25 @@ class PolymarketFeed:
                 if m.id not in existing_ids:
                     raw.append(m)
                     existing_ids.add(m.id)
+
+        hourly_slug_symbols = self.market_filter.get("hourly_slug_symbols") or []
+        if hourly_slug_symbols:
+            now_utc_h = datetime.now(timezone.utc)
+            floored_hour = now_utc_h.replace(minute=0, second=0, microsecond=0)
+            hourly_slugs = [
+                _hourly_slug(
+                    HOURLY_SYMBOL_SLUG.get(sym.lower(), sym.lower()),
+                    (floored_hour + timedelta(hours=offset) - timedelta(hours=1)) + _ET_OFFSET,
+                )
+                for offset in range(3)
+                for sym in hourly_slug_symbols
+            ]
+            hourly_markets = self.client.fetch_markets_by_slugs(hourly_slugs)
+            existing_ids_h = {m.id for m in raw}
+            for m in hourly_markets:
+                if m.id not in existing_ids_h:
+                    raw.append(m)
+                    existing_ids_h.add(m.id)
 
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         min_expiry = now + timedelta(days=self.market_filter["min_days_to_expiry"])
@@ -114,6 +164,11 @@ class PolymarketFeed:
             window_start = market.end_date - timedelta(minutes=15)
             ts = calendar.timegm(window_start.timetuple())
             pm_event_slug = f"{symbol.lower()}-updown-15m-{ts}"
+        elif market.end_date is not None and interval_minutes == 60:
+            slug_name = HOURLY_SYMBOL_SLUG.get(symbol.lower())
+            if slug_name is not None:
+                window_start_et = (market.end_date - timedelta(hours=1)) + _ET_OFFSET
+                pm_event_slug = _hourly_slug(slug_name, window_start_et)
 
         return NormalizedMarket(
             venue="polymarket",

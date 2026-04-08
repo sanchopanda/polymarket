@@ -63,6 +63,15 @@ class _EdgeMonitorState:
     signal_fired: bool = False
     signal_at: str | None = None
     edge_at_signal: float = 0.0
+    # Milestone: when edge first crossed each threshold (for trajectory analysis)
+    milestone_10: bool = False
+    milestone_15: bool = False
+    milestone_20: bool = False
+    # Cached market IDs so we can look up live books even after pair leaves watch list
+    pm_yes_token_id: str | None = None
+    pm_no_token_id: str | None = None
+    kalshi_market_id: str | None = None
+    interval_minutes: int | None = None
 
 
 class FastArbWatchRunner:
@@ -119,9 +128,13 @@ class FastArbWatchRunner:
         # Edge divergence monitor (replaces Chainlink danger zone)
         edge_cfg = fast_cfg.get("edge_monitor", {})
         self._edge_signal_threshold: float = float(edge_cfg.get("signal_threshold", 0.20))
-        self._edge_monitor_seconds: float = float(edge_cfg.get("monitor_seconds", 90))
+        self._edge_monitor_seconds: float = float(edge_cfg.get("monitor_seconds", 300))
+        self._edge_monitor_seconds_1h: float = float(edge_cfg.get("monitor_seconds_1h", 600))
         self._edge_sell_delay: float = float(edge_cfg.get("sell_delay_seconds", 1.0))
         self._edge_states: dict[str, _EdgeMonitorState] = {}  # pos_id → state
+        # Binance price cache for distance calculation: symbol → (price, last_fetch_ts)
+        self._binance_cache: dict[str, tuple[float, float]] = {}
+        self._binance_fetch_interval: float = 5.0  # seconds between fetches
 
         # Chainlink pre-expiry danger zone monitor (disabled — replaced by edge monitor)
         cl_cfg = engine.config.get("chainlink", {})
@@ -298,10 +311,6 @@ class FastArbWatchRunner:
                 continue
             if not self._prices_within_bounds(opp.yes_ask, opp.no_ask):
                 continue
-            if self._prices_in_blocked_zone(opp.yes_ask, opp.no_ask):
-                continue
-            if not self._prices_cross_midpoint(opp.yes_ask, opp.no_ask):
-                continue
             if self._edge_above_max_allowed(opp.yes_ask, opp.no_ask):
                 continue
             with self._signal_lock:
@@ -319,10 +328,6 @@ class FastArbWatchRunner:
                 if executed is None:
                     continue
                 if not self._prices_within_bounds(executed.yes_ask, executed.no_ask):
-                    continue
-                if self._prices_in_blocked_zone(executed.yes_ask, executed.no_ask):
-                    continue
-                if not self._prices_cross_midpoint(executed.yes_ask, executed.no_ask):
                     continue
                 if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
                     continue
@@ -473,12 +478,6 @@ class FastArbWatchRunner:
         if not self._prices_within_bounds(rough_yes, rough_no):
             self._skip_log(pair_key, f"[fast-arb][SKIP] {opp.symbol} | leg_price_out_of_bounds ({rough_yes:.4f}, {rough_no:.4f})")
             return
-        if self._prices_in_blocked_zone(rough_yes, rough_no):
-            self._skip_log(pair_key, f"[fast-arb][SKIP] {opp.symbol} | blocked_leg_price_zone ({rough_yes:.4f}, {rough_no:.4f})")
-            return
-        if not self._prices_cross_midpoint(rough_yes, rough_no):
-            self._skip_log(pair_key, f"[fast-arb][SKIP] {opp.symbol} | same_side_of_midpoint ({rough_yes:.4f}, {rough_no:.4f})")
-            return
 
         # 4b. Fast oracle gap guard (из кэша, без сетевых запросов)
         _k_ref = opp.kalshi_reference_price
@@ -486,7 +485,12 @@ class FastArbWatchRunner:
         if _k_ref and _slug:
             _cached_pm = self._pm_price_cache.get(_slug)
             if _cached_pm is not None:
-                _max_gap = self.engine.config.get("safety", {}).get("max_oracle_gap_pct", 0.02)
+                _safety = self.engine.config.get("safety", {})
+                _max_gap = (
+                    _safety.get("max_oracle_gap_pct_1h", 0.10)
+                    if getattr(opp, "interval_minutes", None) == 60
+                    else _safety.get("max_oracle_gap_pct", 0.02)
+                )
                 _gap = abs(_cached_pm - _k_ref) / _k_ref * 100
                 if _gap > _max_gap:
                     self._skip_log(
@@ -555,18 +559,6 @@ class FastArbWatchRunner:
                 self._skip_log(
                     pair_key,
                     f"[fast-arb][SKIP] {opp.symbol} | leg_price_out_of_bounds ({executed.yes_ask:.4f}, {executed.no_ask:.4f})",
-                )
-                return
-            if self._prices_in_blocked_zone(executed.yes_ask, executed.no_ask):
-                self._skip_log(
-                    pair_key,
-                    f"[fast-arb][SKIP] {opp.symbol} | blocked_leg_price_zone ({executed.yes_ask:.4f}, {executed.no_ask:.4f})",
-                )
-                return
-            if not self._prices_cross_midpoint(executed.yes_ask, executed.no_ask):
-                self._skip_log(
-                    pair_key,
-                    f"[fast-arb][SKIP] {opp.symbol} | same_side_of_midpoint ({executed.yes_ask:.4f}, {executed.no_ask:.4f})",
                 )
                 return
             if self._edge_above_max_allowed(executed.yes_ask, executed.no_ask):
@@ -639,6 +631,7 @@ class FastArbWatchRunner:
                     is_paper=True,
                     kalshi_target=_k_tgt,
                     pm_target=_p_tgt,
+                    interval_minutes=opp.interval_minutes,
                 )
             return
 
@@ -704,6 +697,7 @@ class FastArbWatchRunner:
                 pm_fill=pm_fill,
                 kalshi_target=_k_tgt,
                 pm_target=_p_tgt,
+                interval_minutes=opp.interval_minutes,
             )
 
     # ── Paper simulation: задержка + одноногие позиции ────────────────
@@ -733,10 +727,6 @@ class FastArbWatchRunner:
                 if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
                     return
                 if not self._prices_within_bounds(executed.yes_ask, executed.no_ask):
-                    return
-                if self._prices_in_blocked_zone(executed.yes_ask, executed.no_ask):
-                    return
-                if not self._prices_cross_midpoint(executed.yes_ask, executed.no_ask):
                     return
                 if self._edge_above_max_allowed(executed.yes_ask, executed.no_ask):
                     return
@@ -854,9 +844,11 @@ class FastArbWatchRunner:
     # ── Edge divergence monitor ─────────────────────────────────────────
 
     def _monitor_edge_divergence(self) -> None:
-        """Track live edge for open paper positions. When edge >= threshold
-        in the last N seconds before expiry, record sell prices from orderbook."""
+        """Track live edge for open paper positions.
+        Within the monitoring window: record edge_ticks, track milestones, poll Binance.
+        When edge >= threshold, fire sell-price snapshot."""
         now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now_iso = datetime.utcnow().isoformat()
 
         # Clean up states for resolved positions
         for pid in list(self._edge_states):
@@ -869,7 +861,8 @@ class FastArbWatchRunner:
             if not pos.is_paper:
                 continue
             row = self.engine.db.conn.execute(
-                "SELECT execution_status FROM positions WHERE id=?", (pos.id,)
+                "SELECT execution_status, kalshi_reference_price FROM positions WHERE id=?",
+                (pos.id,),
             ).fetchone()
             exec_status = row["execution_status"] if row else None
             if exec_status not in ("paper", "paper_both_filled"):
@@ -879,28 +872,57 @@ class FastArbWatchRunner:
             if seconds_to_expiry < 0:
                 continue
 
-            # Get current asks from both platforms (same logic as _maybe_open_pair)
+            # Initialize state early so we can cache token IDs even before monitoring window
+            state = self._edge_states.get(pos.id)
+            if state is None:
+                state = _EdgeMonitorState()
+                self._edge_states[pos.id] = state
+
+            # Look up pair data; cache token IDs on first sighting so we can still
+            # get books if the pair later drops out of the watch list (e.g. edge collapsed).
             watch_key = f"{pos.pair_key}|{pos.venue_yes}|{pos.venue_no}"
             watched = self.watch_by_pair_key.get(watch_key)
-            if watched is None:
-                continue
 
-            matched = watched.matched
-            yes_book = self.live_books.get(matched.polymarket.yes_token_id or "")
-            no_book = self.live_books.get(matched.polymarket.no_token_id or "")
-            kalshi_live = self.live_books_kalshi.get(matched.kalshi.market_id or "")
+            if watched is not None and state.pm_yes_token_id is None:
+                state.pm_yes_token_id = watched.matched.polymarket.yes_token_id
+                state.pm_no_token_id = watched.matched.polymarket.no_token_id
+                state.kalshi_market_id = watched.matched.kalshi.market_id
+                state.interval_minutes = watched.matched.polymarket.interval_minutes
 
-            # Current YES ask on the venue where we bought YES
+            # Resolve live books: prefer watched path, fall back to cached IDs
+            if watched is not None:
+                yes_book = self.live_books.get(watched.matched.polymarket.yes_token_id or "")
+                no_book = self.live_books.get(watched.matched.polymarket.no_token_id or "")
+                kalshi_live = self.live_books_kalshi.get(watched.matched.kalshi.market_id or "")
+            elif state.pm_yes_token_id is not None:
+                yes_book = self.live_books.get(state.pm_yes_token_id)
+                no_book = self.live_books.get(state.pm_no_token_id or "")
+                kalshi_live = self.live_books_kalshi.get(state.kalshi_market_id or "")
+            else:
+                continue  # Never saw this pair while watched — can't look up books
+
+            # All 4 asks from both platforms
+            pm_yes_ask = (yes_book.best_ask if yes_book and yes_book.best_ask > 0 else None)
+            pm_no_ask = (no_book.best_ask if no_book and no_book.best_ask > 0 else None)
+            kalshi_yes_ask = (kalshi_live.best_yes_ask if kalshi_live else None)
+            kalshi_no_ask = (kalshi_live.best_no_ask if kalshi_live else None)
+
+            # All 4 bids: PM bids from WS TopOfBook; Kalshi bids via binary identity (bid = 1 - other_ask)
+            pm_yes_bid = (yes_book.best_bid if yes_book and yes_book.best_bid and yes_book.best_bid > 0 else None)
+            pm_no_bid = (no_book.best_bid if no_book and no_book.best_bid and no_book.best_bid > 0 else None)
+            kalshi_yes_bid = (round(1.0 - kalshi_no_ask, 6) if kalshi_no_ask else None)
+            kalshi_no_bid = (round(1.0 - kalshi_yes_ask, 6) if kalshi_yes_ask else None)
+
+            # YES/NO asks on the venues where we actually bought
             if pos.venue_yes == "polymarket":
-                current_yes_ask = yes_book.best_ask if yes_book and yes_book.best_ask > 0 else None
+                current_yes_ask = pm_yes_ask
             else:
-                current_yes_ask = kalshi_live.best_yes_ask if kalshi_live else None
+                current_yes_ask = kalshi_yes_ask
 
-            # Current NO ask on the venue where we bought NO
             if pos.venue_no == "polymarket":
-                current_no_ask = no_book.best_ask if no_book and no_book.best_ask > 0 else None
+                current_no_ask = pm_no_ask
             else:
-                current_no_ask = kalshi_live.best_no_ask if kalshi_live else None
+                current_no_ask = kalshi_no_ask
 
             if current_yes_ask is None or current_no_ask is None:
                 continue
@@ -908,12 +930,6 @@ class FastArbWatchRunner:
                 continue
 
             current_edge = 1.0 - (current_yes_ask + current_no_ask)
-
-            # Initialize or update state
-            state = self._edge_states.get(pos.id)
-            if state is None:
-                state = _EdgeMonitorState()
-                self._edge_states[pos.id] = state
 
             # Track max edge over position lifetime
             if current_edge > state.max_edge:
@@ -924,41 +940,120 @@ class FastArbWatchRunner:
                 )
                 self.engine.db.conn.commit()
 
-            # Only check signal in the monitoring window
-            if seconds_to_expiry > self._edge_monitor_seconds:
+            # Only record ticks and check signals in the monitoring window
+            monitor_secs = (
+                self._edge_monitor_seconds_1h
+                if state.interval_minutes == 60
+                else self._edge_monitor_seconds
+            )
+            if seconds_to_expiry > monitor_secs:
                 continue
 
-            # Signal: edge >= threshold and not already fired
-            if current_edge >= self._edge_signal_threshold and not state.signal_fired:
-                state.signal_fired = True
-                state.signal_at = datetime.utcnow().isoformat()
-                state.edge_at_signal = current_edge
+            # --- Binance price (cached, fetched every 5s in background) ---
+            binance_price, binance_distance_pct = self._get_binance_data(
+                pos.symbol,
+                row["kalshi_reference_price"],
+            )
 
+            # --- Record edge tick ---
+            self.engine.db.insert_edge_tick(
+                position_id=pos.id,
+                ts=now_iso,
+                seconds_to_expiry=seconds_to_expiry,
+                pm_yes_ask=pm_yes_ask,
+                pm_no_ask=pm_no_ask,
+                kalshi_yes_ask=kalshi_yes_ask,
+                kalshi_no_ask=kalshi_no_ask,
+                yes_ask=current_yes_ask,
+                no_ask=current_no_ask,
+                edge=current_edge,
+                binance_price=binance_price,
+                binance_distance_pct=binance_distance_pct,
+                pm_yes_bid=pm_yes_bid,
+                pm_no_bid=pm_no_bid,
+                kalshi_yes_bid=kalshi_yes_bid,
+                kalshi_no_bid=kalshi_no_bid,
+            )
+
+            # --- Milestone tracking ---
+            milestone_cols: list[str] = []
+            if not state.milestone_10 and current_edge >= 0.10:
+                state.milestone_10 = True
+                milestone_cols.append("edge_first_10pct")
+            if not state.milestone_15 and current_edge >= 0.15:
+                state.milestone_15 = True
+                milestone_cols.append("edge_first_15pct")
+            if not state.milestone_20 and current_edge >= 0.20:
+                state.milestone_20 = True
+                milestone_cols.append("edge_first_20pct")
+            if milestone_cols:
+                set_clause = ", ".join(f"{c}=?" for c in milestone_cols)
+                params = [now_iso] * len(milestone_cols) + [pos.id]
                 self.engine.db.conn.execute(
-                    "UPDATE positions SET edge_signal_at=?, edge_at_signal=? WHERE id=?",
-                    (state.signal_at, round(current_edge, 6), pos.id),
+                    f"UPDATE positions SET {set_clause} WHERE id=?", params
                 )
                 self.engine.db.conn.commit()
 
-                print(
-                    f"\n[fast-arb][EDGE-SIGNAL] {pos.symbol} pos={pos.id[:8]} | "
-                    f"edge={current_edge:.1%} (yes={current_yes_ask:.4f} no={current_no_ask:.4f}) | "
-                    f"{seconds_to_expiry:.0f}s to expiry | "
-                    f"scheduling orderbook check in {self._edge_sell_delay:.1f}s"
-                )
+            # --- Signal disabled: data collection only, no exit action ---
+            # (edge exit signal was harmful overall — fires on normal positions too)
+            # Will re-enable with a better discriminator after analysing edge_ticks data.
 
-                # Schedule orderbook sell check after delay
-                pm_yes_token = matched.polymarket.yes_token_id
-                pm_no_token = matched.polymarket.no_token_id
-                kalshi_ticker = matched.kalshi.market_id
-                t = threading.Timer(
-                    self._edge_sell_delay,
-                    self._edge_record_sell_prices,
-                    args=[pos.id, pm_yes_token, pm_no_token, kalshi_ticker,
-                          pos.venue_yes, pos.venue_no,
-                          pos.yes_ask, pos.no_ask, pos.shares, pos.symbol],
+    _BINANCE_SYMBOL_MAP: dict[str, str] = {
+        "BTC": "BTCUSDT",
+        "ETH": "ETHUSDT",
+        "SOL": "SOLUSDT",
+        "XRP": "XRPUSDT",
+        "DOGE": "DOGEUSDT",
+        "BNB": "BNBUSDT",
+    }
+
+    def _get_binance_data(
+        self,
+        symbol: str,
+        reference_price: float | None,
+    ) -> tuple[float | None, float | None]:
+        """Return (binance_price, distance_pct) using a 5s cache.
+        Fetches in a daemon thread so the main loop is never blocked."""
+        now_ts = time.time()
+        cached = self._binance_cache.get(symbol)
+        if cached is not None:
+            price, fetch_ts = cached
+            if now_ts - fetch_ts < self._binance_fetch_interval:
+                # Return cached value
+                if reference_price and reference_price > 0:
+                    dist = abs(price - reference_price) / reference_price
+                    return price, dist
+                return price, None
+
+        # Time to refresh — launch daemon thread so we don't block
+        binance_sym = self._BINANCE_SYMBOL_MAP.get(symbol.upper())
+        if binance_sym is None:
+            return None, None
+
+        def _fetch(sym: str, cache_key: str) -> None:
+            try:
+                import httpx
+                resp = httpx.get(
+                    f"https://api.binance.com/api/v3/ticker/price?symbol={sym}",
+                    timeout=3.0,
                 )
-                t.start()
+                data = resp.json()
+                price_val = float(data["price"])
+                self._binance_cache[cache_key] = (price_val, time.time())
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_fetch, args=(binance_sym, symbol), daemon=True)
+        t.start()
+
+        # Return last known value while thread fetches new one
+        if cached is not None:
+            price, _ = cached
+            if reference_price and reference_price > 0:
+                dist = abs(price - reference_price) / reference_price
+                return price, dist
+            return price, None
+        return None, None
 
     def _edge_record_sell_prices(
         self,
@@ -1504,12 +1599,18 @@ class FastArbWatchRunner:
     def _build_tracking_candidates(self, matches: list[MatchedMarketPair]) -> list[CrossVenueOpportunity]:
         candidates: list[CrossVenueOpportunity] = []
         stake_per_pair_usd = float(self.engine.trading["stake_per_pair_usd"])
-        max_gap_pct = self.engine.config.get("safety", {}).get("max_oracle_gap_pct", 0.02)
+        _safety_cfg = self.engine.config.get("safety", {})
 
         for item in matches:
             pm = item.polymarket
             ka = item.kalshi
             symbol = pm.symbol
+
+            max_gap_pct = (
+                _safety_cfg.get("max_oracle_gap_pct_1h", 0.10)
+                if getattr(pm, "interval_minutes", None) == 60
+                else _safety_cfg.get("max_oracle_gap_pct", 0.02)
+            )
 
             # Oracle gap check — часть проверки матча: оба рынка должны следить за одной ценой.
             k_ref = ka.reference_price
@@ -1568,6 +1669,7 @@ class FastArbWatchRunner:
                         polymarket_rules=pm.rules_text,
                         kalshi_rules=ka.rules_text,
                         pm_event_slug=slug,
+                        interval_minutes=pm.interval_minutes,
                         buy_yes_venue=yes_venue,
                         buy_no_venue=no_venue,
                         yes_ask=yes_ask,
@@ -2411,7 +2513,7 @@ class FastArbWatchRunner:
         # Показываем текущие матчи с ценами и oracle gap
         try:
             _, kalshi_markets, matches, _ = self.engine.last_snapshot
-            max_gap_pct = self.engine.config.get("safety", {}).get("max_oracle_gap_pct", 0.02)
+            _safety_disp = self.engine.config.get("safety", {})
 
             # Какие Kalshi-символы присутствуют в матчах
             matched_symbols = {m.kalshi.symbol for m in matches}
@@ -2421,6 +2523,11 @@ class FastArbWatchRunner:
             for m in matches:
                 pm = m.polymarket
                 ka = m.kalshi
+                max_gap_pct = (
+                    _safety_disp.get("max_oracle_gap_pct_1h", 0.10)
+                    if getattr(pm, "interval_minutes", None) == 60
+                    else _safety_disp.get("max_oracle_gap_pct", 0.02)
+                )
                 k_ref = ka.reference_price
                 slug = pm.pm_event_slug
                 pm_open = self._pm_price_cache.get(slug) if slug else None

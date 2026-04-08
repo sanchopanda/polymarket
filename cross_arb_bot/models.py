@@ -70,6 +70,7 @@ class CrossVenueOpportunity:
     expected_payout: float
     expected_profit: float
     pm_event_slug: Optional[str] = None
+    interval_minutes: Optional[int] = None
 
 
 @dataclass

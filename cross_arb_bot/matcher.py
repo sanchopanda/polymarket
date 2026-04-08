@@ -104,6 +104,7 @@ def build_opportunities(
                     polymarket_rules=pm.rules_text,
                     kalshi_rules=kalshi.rules_text,
                     pm_event_slug=pm.pm_event_slug,
+                    interval_minutes=pm.interval_minutes,
                     buy_yes_venue=yes_venue,
                     buy_no_venue=no_venue,
                     yes_ask=yes_ask,

@@ -109,6 +109,39 @@ class RealArbDB:
             );
             """
         )
+        # Таблица для хранения траектории edge по тикам
+        self.conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS edge_ticks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                position_id TEXT NOT NULL,
+                ts TEXT NOT NULL,
+                seconds_to_expiry REAL,
+                pm_yes_ask REAL,
+                pm_no_ask REAL,
+                kalshi_yes_ask REAL,
+                kalshi_no_ask REAL,
+                yes_ask REAL,
+                no_ask REAL,
+                edge REAL,
+                binance_price REAL,
+                binance_distance_pct REAL,
+                pm_yes_bid REAL,
+                pm_no_bid REAL,
+                kalshi_yes_bid REAL,
+                kalshi_no_bid REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_edge_ticks_pos ON edge_ticks(position_id);
+            """
+        )
+        # Миграция: добавить bid-колонки если таблица уже существует
+        for col in ("pm_yes_bid", "pm_no_bid", "kalshi_yes_bid", "kalshi_no_bid"):
+            try:
+                self.conn.execute(f"ALTER TABLE edge_ticks ADD COLUMN {col} REAL")
+                self.conn.commit()
+            except Exception:
+                pass
+
         # Миграции для новых колонок
         for col, definition in [
             ("is_paper", "INTEGER NOT NULL DEFAULT 0"),
@@ -125,6 +158,10 @@ class RealArbDB:
             ("edge_yes_sell", "REAL"),
             ("edge_no_sell", "REAL"),
             ("edge_exit_pnl", "REAL"),
+            # Edge trajectory milestones
+            ("edge_first_10pct", "TEXT"),
+            ("edge_first_15pct", "TEXT"),
+            ("edge_first_20pct", "TEXT"),
         ]:
             try:
                 self.conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {definition}")
@@ -527,6 +564,47 @@ class RealArbDB:
             polymarket_snapshot_resolved=d.get("polymarket_snapshot_resolved"),
             kalshi_snapshot_resolved=d.get("kalshi_snapshot_resolved"),
         )
+
+    # ── Edge trajectory ticks ──────────────────────────────────────────
+
+    def insert_edge_tick(
+        self,
+        position_id: str,
+        ts: str,
+        seconds_to_expiry: float,
+        pm_yes_ask: float | None,
+        pm_no_ask: float | None,
+        kalshi_yes_ask: float | None,
+        kalshi_no_ask: float | None,
+        yes_ask: float,
+        no_ask: float,
+        edge: float,
+        binance_price: float | None = None,
+        binance_distance_pct: float | None = None,
+        pm_yes_bid: float | None = None,
+        pm_no_bid: float | None = None,
+        kalshi_yes_bid: float | None = None,
+        kalshi_no_bid: float | None = None,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO edge_ticks
+              (position_id, ts, seconds_to_expiry,
+               pm_yes_ask, pm_no_ask, kalshi_yes_ask, kalshi_no_ask,
+               yes_ask, no_ask, edge,
+               binance_price, binance_distance_pct,
+               pm_yes_bid, pm_no_bid, kalshi_yes_bid, kalshi_no_bid)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                position_id, ts, round(seconds_to_expiry, 2),
+                pm_yes_ask, pm_no_ask, kalshi_yes_ask, kalshi_no_ask,
+                round(yes_ask, 6), round(no_ask, 6), round(edge, 6),
+                binance_price, binance_distance_pct,
+                pm_yes_bid, pm_no_bid, kalshi_yes_bid, kalshi_no_bid,
+            ),
+        )
+        self.conn.commit()
 
     # ── Аудит ──────────────────────────────────────────────────────────
 

@@ -12,6 +12,22 @@ from src.api.clob import OrderBook, OrderLevel
 KALSHI_UPDOWN_RE = re.compile(r"^(?P<symbol>[A-Za-z]+)\s+price\s+up\s+in\s+next\s+(?P<minutes>\d+)\s+mins\?$", re.IGNORECASE)
 KALSHI_HOUR_RE = re.compile(r"^(?P<symbol>[A-Za-z]+)\s+price\s+up\s+this\s+hour\?$", re.IGNORECASE)
 
+# Above/below strike-based hourly series (KXBTCD, KXETHD, …)
+_ABOVE_BELOW_SERIES: frozenset[str] = frozenset(["KXBTCD", "KXETHD", "KXSOLD", "KXXRPD"])
+_SERIES_TO_SYMBOL: dict[str, str] = {
+    "KXBTCD": "BTC",
+    "KXETHD": "ETH",
+    "KXSOLD": "SOL",
+    "KXXRPD": "XRP",
+}
+_SERIES_TO_BINANCE: dict[str, str] = {
+    "KXBTCD": "BTCUSDT",
+    "KXETHD": "ETHUSDT",
+    "KXSOLD": "SOLUSDT",
+    "KXXRPD": "XRPUSDT",
+}
+_BINANCE_TICKER_URL = "https://api.binance.com/api/v3/ticker/price"
+
 
 def _parse_dt(raw: str | None) -> datetime | None:
     if not raw:
@@ -50,14 +66,26 @@ class KalshiFeed:
             return [], f"kalshi fetch failed: {exc}"
 
         symbol_filter = (self.market_filter.get("symbol") or "").strip().lower()
+
+        above_below_rows: list[dict] = []
         result: list[NormalizedMarket] = []
+
         for row in rows:
+            if row.get("series_ticker") in _ABOVE_BELOW_SERIES:
+                above_below_rows.append(row)
+                continue
             normalized = self._normalize_market(row)
             if normalized is None:
                 continue
             if symbol_filter and normalized.symbol.lower() != symbol_filter:
                 continue
             result.append(normalized)
+
+        for normalized in self._select_hourly_markets(above_below_rows):
+            if symbol_filter and normalized.symbol.lower() != symbol_filter:
+                continue
+            result.append(normalized)
+
         return result, None
 
     def fetch_market(self, ticker: str) -> tuple[dict | None, str | None]:
@@ -143,6 +171,81 @@ class KalshiFeed:
         bids = [b for b in bids if b is not None]
         bids.sort(key=lambda x: x.price, reverse=True)
         return bids, None
+
+    def _fetch_binance_price(self, binance_symbol: str) -> float | None:
+        try:
+            resp = self.http.get(_BINANCE_TICKER_URL, params={"symbol": binance_symbol})
+            resp.raise_for_status()
+            return float(resp.json()["price"])
+        except Exception:
+            return None
+
+    def _select_hourly_markets(self, rows: list[dict]) -> list[NormalizedMarket]:
+        """Group above/below sub-markets by (series, close_time), pick nearest floor_strike to Binance price."""
+        groups: dict[tuple[str, str], list[dict]] = {}
+        for row in rows:
+            series = row.get("series_ticker", "")
+            close_time = row.get("close_time") or row.get("expected_expiration_time") or row.get("expiration_time")
+            if not series or not close_time:
+                continue
+            key = (series, close_time)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(row)
+
+        # Fetch Binance price once per series
+        prices: dict[str, float | None] = {}
+        for series, _ in groups:
+            if series not in prices:
+                binance_sym = _SERIES_TO_BINANCE.get(series)
+                prices[series] = self._fetch_binance_price(binance_sym) if binance_sym else None
+
+        result: list[NormalizedMarket] = []
+        for (series, _close_time), group_rows in groups.items():
+            price = prices.get(series)
+            if price is None:
+                continue
+            symbol = _SERIES_TO_SYMBOL.get(series, series)
+            best = min(group_rows, key=lambda r: abs(_to_float(r.get("floor_strike"), 0.0) - price))
+            normalized = self._normalize_above_below_market(best, symbol)
+            if normalized is not None:
+                result.append(normalized)
+        return result
+
+    def _normalize_above_below_market(self, row: dict, symbol: str) -> NormalizedMarket | None:
+        expiry = (
+            _parse_dt(row.get("close_time"))
+            or _parse_dt(row.get("expected_expiration_time"))
+            or _parse_dt(row.get("expiration_time"))
+        )
+        if expiry is None:
+            return None
+        yes_ask = _to_float(row.get("yes_ask_dollars"))
+        no_ask = _to_float(row.get("no_ask_dollars"))
+        if yes_ask <= 0 or no_ask <= 0:
+            return None
+        return NormalizedMarket(
+            venue="kalshi",
+            market_id=str(row.get("ticker") or ""),
+            title=str(row.get("title") or ""),
+            symbol=symbol,
+            market_kind="updown",
+            expiry=expiry,
+            yes_label="Above",
+            no_label="Below",
+            yes_ask=yes_ask,
+            no_ask=no_ask,
+            yes_bid=_to_float(row.get("yes_bid_dollars")),
+            no_bid=_to_float(row.get("no_bid_dollars")),
+            yes_depth=_to_float(row.get("yes_ask_size_fp")),
+            no_depth=_to_float(row.get("no_ask_size_fp")),
+            volume=_to_float(row.get("volume")),
+            liquidity=max(_to_float(row.get("yes_ask_size_fp")), _to_float(row.get("no_ask_size_fp"))),
+            interval_minutes=60,
+            rule_family="price_direction",
+            reference_price=_to_float(row.get("floor_strike"), default=None),
+            rules_text=str(row.get("rules_primary") or ""),
+        )
 
     def _level_from_pair(self, item) -> OrderLevel | None:
         if not isinstance(item, (list, tuple)) or len(item) < 2:

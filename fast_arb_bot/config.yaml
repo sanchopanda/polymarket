@@ -28,6 +28,7 @@ safety:
   kalshi_slippage_cents: 0
   polymarket_price_buffer_cents: 0
   max_oracle_gap_pct: 0.02
+  max_oracle_gap_pct_1h: 0.10
 
 fast_arb:
   budget_usd: 60.0           # базовый бюджет (растёт с выигрышами)
@@ -36,7 +37,8 @@ fast_arb:
   scan_interval_seconds: 180
   edge_monitor:
     signal_threshold: 0.25     # edge >= 25% → сигнал на скидывание
-    monitor_seconds: 90        # мониторим последние 90с до expiry
+    monitor_seconds: 300       # мониторим последние 5 минут до expiry (15m рынки)
+    monitor_seconds_1h: 600    # мониторим последние 10 минут до expiry (1h рынки)
     sell_delay_seconds: 1.0    # задержка перед проверкой стакана
 
 market_filter:
@@ -54,6 +56,11 @@ market_filter:
     - "xrp"
     - "doge"
     - "bnb"
+  hourly_slug_symbols:
+    - "btc"
+    - "eth"
+    - "sol"
+    - "xrp"
 
 runtime:
   poll_interval_seconds: 60
@@ -85,6 +92,10 @@ kalshi:
     - "KXDOGE15M"
     - "KXBNB15M"
     - "KXXRP15M"
+    - "KXBTCD"
+    - "KXETHD"
+    - "KXSOLD"
+    - "KXXRPD"
 
 chainlink:
   rpc_urls:
