@@ -19,11 +19,6 @@ from real_arb_bot.engine import RealArbEngine
 
 from fast_arb_bot.executor import FastArbExecutor, FastExecutionResult, _empty_order
 
-try:
-    from oracle_arb_bot.chainlink_feed import ChainlinkFeed as _ChainlinkFeed
-except ImportError:
-    _ChainlinkFeed = None  # type: ignore[assignment,misc]
-
 
 @dataclass
 class WatchedPair:
@@ -136,21 +131,11 @@ class FastArbWatchRunner:
         self._binance_cache: dict[str, tuple[float, float]] = {}
         self._binance_fetch_interval: float = 5.0  # seconds between fetches
 
-        # Chainlink pre-expiry danger zone monitor (disabled — replaced by edge monitor)
-        cl_cfg = engine.config.get("chainlink", {})
-        self._danger_zone_pct: float = float(cl_cfg.get("danger_zone_pct", 0.05))
-        self._pre_expiry_seconds: float = float(cl_cfg.get("pre_expiry_check_seconds", 120))
-        self._chainlink: _ChainlinkFeed | None = None  # type: ignore[valid-type]
-        self._danger_exits: dict[str, _DangerExit] = {}  # pos_id → sell state
-        if _ChainlinkFeed and cl_cfg.get("rpc_urls"):
-            _cl_symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
-            self._chainlink = _ChainlinkFeed(
-                symbols=_cl_symbols,
-                on_price=lambda sym, price, ts: None,
-                rpc_urls=cl_cfg["rpc_urls"],
-                wss_urls=cl_cfg.get("wss_urls"),
-                poll_interval_seconds=float(cl_cfg.get("poll_interval_seconds", 30)),
-            )
+        # Chainlink полностью выключен: fast_arb больше не зависит от Polygon RPC/WS.
+        self._danger_zone_pct: float = 0.0
+        self._pre_expiry_seconds: float = 0.0
+        self._chainlink = None
+        self._danger_exits: dict[str, _DangerExit] = {}  # legacy state, unused in normal loop
 
         # Подменяем функцию статуса в Telegram-нотификаторе
         if engine.notifier:
@@ -158,17 +143,9 @@ class FastArbWatchRunner:
 
     # ── Основной цикл ──────────────────────────────────────────────────
 
-    _DANGER_CHECK_INTERVAL = 10.0  # Chainlink updates ~every 27s; 10s is enough
-
     def run(self) -> None:
         ws: MarketWebSocketClient | None = None
         last_status = 0.0
-        last_danger_check = 0.0
-
-        if self._chainlink:
-            self._chainlink.start()
-            # Chainlink danger-zone disabled — edge monitor replaces it
-            # print(f"[fast-arb] Chainlink danger-zone monitor: ±{self._danger_zone_pct}% within {self._pre_expiry_seconds:.0f}s of expiry")
 
         print(
             f"[fast-arb] Edge divergence monitor: signal >= {self._edge_signal_threshold:.0%} "
@@ -190,10 +167,6 @@ class FastArbWatchRunner:
                 self._monitor_one_leg_pm_cancel_reenter()
                 self._monitor_paper_one_legged()
                 self._monitor_edge_divergence()
-                # Chainlink danger zone disabled — replaced by edge divergence monitor
-                # if now - last_danger_check >= self._DANGER_CHECK_INTERVAL:
-                #     self._check_pre_expiry_danger()
-                #     last_danger_check = now
                 time.sleep(0.5)
         except KeyboardInterrupt:
             print("\n[fast-arb] Stopped.")
@@ -202,8 +175,6 @@ class FastArbWatchRunner:
                 ws.stop()
             if self._kalshi_ws is not None:
                 self._kalshi_ws.stop()
-            if self._chainlink:
-                self._chainlink.stop()
             for state in self._danger_exits.values():
                 if state.timer:
                     state.timer.cancel()
@@ -2434,7 +2405,8 @@ class FastArbWatchRunner:
 
     def _print_status(self) -> None:
         self._resolve_one_legged_positions()
-        self.engine.resolve()
+        if self.engine.pm_trader is not None and self.engine.kalshi_trader is not None:
+            self.engine.resolve()
         self.engine.print_status()
         open_cost = 0.0
         realized_pnl = 0.0
@@ -2478,6 +2450,7 @@ class FastArbWatchRunner:
             for m in matches:
                 pm = m.polymarket
                 ka = m.kalshi
+                interval_tag = "1h" if getattr(pm, "interval_minutes", None) == 60 else "15m"
                 k_ref = ka.reference_price
                 slug = pm.pm_event_slug
                 pm_open = self._pm_price_cache.get(slug) if slug else None
@@ -2514,7 +2487,7 @@ class FastArbWatchRunner:
                     live_str = None
 
                 match_lines.append(
-                    f"  {pm.symbol:6} | PM yes={pm.yes_ask:.3f} no={pm.no_ask:.3f}"
+                    f"  {pm.symbol:6} {interval_tag:>3} | PM yes={pm.yes_ask:.3f} no={pm.no_ask:.3f}"
                     f" | K yes={ka.yes_ask:.3f} no={ka.no_ask:.3f}"
                     f" | best_edge={best_edge:.3f}"
                     + (f" | {gap_str}" if gap_str else "")
@@ -2525,7 +2498,8 @@ class FastArbWatchRunner:
             # Kalshi-рынки без PM-матча
             unmatched_kalshi = [k for k in kalshi_markets if k.symbol not in matched_symbols]
             for k in unmatched_kalshi:
-                match_lines.append(f"  {k.symbol:6} | no PM match (K yes={k.yes_ask:.3f} no={k.no_ask:.3f})")
+                interval_tag = "1h" if getattr(k, "interval_minutes", None) == 60 else "15m"
+                match_lines.append(f"  {k.symbol:6} {interval_tag:>3} | no PM match (K yes={k.yes_ask:.3f} no={k.no_ask:.3f})")
 
             total_shown = len(matches) + len(unmatched_kalshi)
             if total_shown:

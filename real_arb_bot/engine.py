@@ -20,7 +20,7 @@ from real_arb_bot.safety import SafetyGuard
 
 
 class RealArbEngine:
-    def __init__(self, config: dict, db: RealArbDB) -> None:
+    def __init__(self, config: dict, db: RealArbDB, init_traders: bool = True) -> None:
         self.config = config
         self.db = db
         self.trading = config["trading"]
@@ -44,9 +44,10 @@ class RealArbEngine:
         )
         self.pm_clob = ClobClient(base_url="https://clob.polymarket.com", delay_ms=100)
 
-        # Реальные клиенты бирж
-        self.pm_trader = PolymarketTrader()
-        self.kalshi_trader = KalshiTrader()
+        # Реальные клиенты бирж.
+        # Для fast_arb watch --dry разрешаем discovery без немедленной auth к торговым API.
+        self.pm_trader = PolymarketTrader() if init_traders else None
+        self.kalshi_trader = KalshiTrader() if init_traders else None
 
         # Safety, executor, resolver
         self.safety = SafetyGuard(config, db)
@@ -82,6 +83,8 @@ class RealArbEngine:
     # ── Баланс ─────────────────────────────────────────────────────────
 
     def get_real_balances(self) -> dict:
+        if self.pm_trader is None or self.kalshi_trader is None:
+            return {"polymarket": None, "kalshi": None}
         try:
             pm = self.pm_trader.get_balance()
         except Exception as e:
@@ -333,6 +336,8 @@ class RealArbEngine:
     # ── Резолюция ──────────────────────────────────────────────────────
 
     def resolve(self) -> None:
+        if self.pm_trader is None or self.kalshi_trader is None:
+            raise RuntimeError("resolve недоступен без инициализированных trader clients")
         self.resolver.resolve_all()
 
     # ── Execution pricing (переиспользуем логику из cross_arb_bot) ─────
@@ -502,10 +507,12 @@ class RealArbEngine:
         stats = self.db.stats()
         balances = self.get_real_balances()
         pm_markets, kalshi_markets, matches, opportunities = self.last_snapshot
+        pm_bal = f"${balances['polymarket']:.2f}" if balances.get("polymarket") is not None else "N/A"
+        ka_bal = f"${balances['kalshi']:.2f}" if balances.get("kalshi") is not None else "N/A"
         lines = [
             f"💼 <b>Балансы</b>",
-            f"Polymarket: <b>${balances['polymarket']:.2f}</b>",
-            f"Kalshi:     <b>${balances['kalshi']:.2f}</b>",
+            f"Polymarket: <b>{pm_bal}</b>",
+            f"Kalshi:     <b>{ka_bal}</b>",
             f"",
             f"📊 <b>Позиции</b>",
             f"Открытых: {stats['open']} | Закрытых: {stats['resolved']}",

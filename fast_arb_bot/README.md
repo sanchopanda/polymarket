@@ -38,7 +38,6 @@ python3 -m fast_arb_bot resolve
 - `trading.stake_per_pair_usd`
 - `fast_arb.budget_usd`
 - `fast_arb.max_realized_loss_usd`
-- `safety.max_oracle_gap_pct`
 
 ## Переменные окружения
 

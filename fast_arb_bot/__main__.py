@@ -13,7 +13,7 @@ def _load_config(path: str) -> dict:
     return yaml.safe_load(Path(path).read_text())
 
 
-def _make_engine(config: dict):
+def _make_engine(config: dict, init_traders: bool = True):
     try:
         from real_arb_bot.db import RealArbDB
         from real_arb_bot.engine import RealArbEngine
@@ -24,7 +24,7 @@ def _make_engine(config: dict):
             "  pip install -e \".[dev]\""
         ) from exc
     db = RealArbDB(config["db"]["path"])
-    return RealArbEngine(config, db)
+    return RealArbEngine(config, db, init_traders=init_traders)
 
 
 def cmd_watch(engine, dry: bool = False) -> None:
@@ -76,9 +76,10 @@ def main() -> None:
 
     args = parser.parse_args()
     config = _load_config(args.config)
+    init_traders = not (args.cmd == "watch" and getattr(args, "dry", False))
 
     print(f"[start] fast_arb_bot | config={args.config}")
-    engine = _make_engine(config)
+    engine = _make_engine(config, init_traders=init_traders)
 
     if args.cmd == "watch":
         cmd_watch(engine, dry=getattr(args, "dry", False))

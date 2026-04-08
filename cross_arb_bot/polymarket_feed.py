@@ -223,6 +223,10 @@ class PolymarketFeed:
             return 5
         if re.search(r"\b1\s*Hour\b|\b60\s*Minutes\b", question, re.IGNORECASE):
             return 60
+        # Hourly PM crypto titles are formatted like:
+        # "Bitcoin Up or Down - April 8, 1PM ET"
+        if re.search(r"Up or Down\s*-\s*[A-Za-z]+\s+\d{1,2},\s+\d{1,2}(?::\d{2})?(?:AM|PM)\s+ET\b", question, re.IGNORECASE):
+            return 60
         return None
 
     def _detect_rule_family(self, market: Market) -> str:

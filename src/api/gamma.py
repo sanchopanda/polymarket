@@ -80,6 +80,7 @@ class GammaClient:
         self.page_size = page_size
         self.delay_s = delay_ms / 1000.0
         self._http = httpx.Client(timeout=30.0)
+        self._slug_timeout = httpx.Timeout(8.0, connect=4.0)
 
     def fetch_all_active_markets(self) -> List[Market]:
         """Загружает все активные незакрытые рынки постранично."""
@@ -216,7 +217,11 @@ class GammaClient:
         markets: List[Market] = []
         for slug in slugs:
             try:
-                resp = self._http.get(f"{self.base_url}/events", params={"slug": slug})
+                resp = self._http.get(
+                    f"{self.base_url}/events",
+                    params={"slug": slug},
+                    timeout=self._slug_timeout,
+                )
                 resp.raise_for_status()
                 events = resp.json()
                 if not events:
