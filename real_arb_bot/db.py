@@ -118,6 +118,13 @@ class RealArbDB:
             ("pm_price_to_beat", "REAL"),
             ("kalshi_close_price", "REAL"),
             ("pm_close_price", "REAL"),
+            # Edge divergence monitoring columns
+            ("max_edge", "REAL"),
+            ("edge_signal_at", "TEXT"),
+            ("edge_at_signal", "REAL"),
+            ("edge_yes_sell", "REAL"),
+            ("edge_no_sell", "REAL"),
+            ("edge_exit_pnl", "REAL"),
         ]:
             try:
                 self.conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {definition}")

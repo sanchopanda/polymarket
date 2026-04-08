@@ -217,7 +217,8 @@ class PositionResolver:
             lock_valid = (yes_wins + no_wins) == 1
 
             # PnL по плановым shares (реальных ордеров не было)
-            pnl = position.shares - position.total_cost if lock_valid else -position.total_cost
+            payout = (int(yes_wins) + int(no_wins)) * position.shares
+            pnl = payout - position.total_cost
             winning_side = "yes" if yes_wins and not no_wins else ("no" if no_wins and not yes_wins else "mismatch")
             tag = "✓ profit" if pnl > 0 else "✗ loss"
             print(

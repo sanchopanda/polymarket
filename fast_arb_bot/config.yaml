@@ -34,6 +34,10 @@ fast_arb:
   max_realized_loss_usd: 201.0  # максимальные реализованные потери — стоп
   order_book_min_liquidity_ratio: 2.0
   scan_interval_seconds: 180
+  edge_monitor:
+    signal_threshold: 0.25     # edge >= 25% → сигнал на скидывание
+    monitor_seconds: 90        # мониторим последние 90с до expiry
+    sell_delay_seconds: 1.0    # задержка перед проверкой стакана
 
 market_filter:
   symbol: ""

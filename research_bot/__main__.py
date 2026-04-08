@@ -20,6 +20,10 @@ elif cmd == "orderbook-monitor":
     from research_bot.orderbook_monitor import main as _main
     _main(sys.argv[2:])
     sys.exit(0)
+elif cmd == "danger-zone":
+    from research_bot.backtest_danger_zone import main as _main
+    _main(sys.argv[2:])
+    sys.exit(0)
 else:
     from research_bot.chainlink_monitor import main
 

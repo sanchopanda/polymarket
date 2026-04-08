@@ -56,6 +56,15 @@ class _DangerExit:
     timer: threading.Timer | None = None
 
 
+@dataclass
+class _EdgeMonitorState:
+    """Per-position edge tracking state."""
+    max_edge: float = 0.0
+    signal_fired: bool = False
+    signal_at: str | None = None
+    edge_at_signal: float = 0.0
+
+
 class FastArbWatchRunner:
     MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     STATUS_INTERVAL_SECONDS = 15
@@ -107,7 +116,14 @@ class FastArbWatchRunner:
         # pair_key → pending Timer (paper mode: 0.5s delay before orderbook check)
         self._pending_timers: dict[str, threading.Timer] = {}
 
-        # Chainlink pre-expiry danger zone monitor
+        # Edge divergence monitor (replaces Chainlink danger zone)
+        edge_cfg = fast_cfg.get("edge_monitor", {})
+        self._edge_signal_threshold: float = float(edge_cfg.get("signal_threshold", 0.20))
+        self._edge_monitor_seconds: float = float(edge_cfg.get("monitor_seconds", 90))
+        self._edge_sell_delay: float = float(edge_cfg.get("sell_delay_seconds", 1.0))
+        self._edge_states: dict[str, _EdgeMonitorState] = {}  # pos_id → state
+
+        # Chainlink pre-expiry danger zone monitor (disabled — replaced by edge monitor)
         cl_cfg = engine.config.get("chainlink", {})
         self._danger_zone_pct: float = float(cl_cfg.get("danger_zone_pct", 0.05))
         self._pre_expiry_seconds: float = float(cl_cfg.get("pre_expiry_check_seconds", 120))
@@ -138,7 +154,13 @@ class FastArbWatchRunner:
 
         if self._chainlink:
             self._chainlink.start()
-            print(f"[fast-arb] Chainlink danger-zone monitor: ±{self._danger_zone_pct}% within {self._pre_expiry_seconds:.0f}s of expiry")
+            # Chainlink danger-zone disabled — edge monitor replaces it
+            # print(f"[fast-arb] Chainlink danger-zone monitor: ±{self._danger_zone_pct}% within {self._pre_expiry_seconds:.0f}s of expiry")
+
+        print(
+            f"[fast-arb] Edge divergence monitor: signal >= {self._edge_signal_threshold:.0%} "
+            f"within {self._edge_monitor_seconds:.0f}s of expiry"
+        )
 
         try:
             while True:
@@ -154,10 +176,12 @@ class FastArbWatchRunner:
                 self._sync_one_legged_polymarket_orders()
                 self._monitor_one_leg_pm_cancel_reenter()
                 self._monitor_paper_one_legged()
-                if now - last_danger_check >= self._DANGER_CHECK_INTERVAL:
-                    self._check_pre_expiry_danger()
-                    last_danger_check = now
-                time.sleep(1)
+                self._monitor_edge_divergence()
+                # Chainlink danger zone disabled — replaced by edge divergence monitor
+                # if now - last_danger_check >= self._DANGER_CHECK_INTERVAL:
+                #     self._check_pre_expiry_danger()
+                #     last_danger_check = now
+                time.sleep(0.5)
         except KeyboardInterrupt:
             print("\n[fast-arb] Stopped.")
         finally:
@@ -827,7 +851,204 @@ class FastArbWatchRunner:
         book = self.live_books.get(token_id)
         return book.best_ask if book else None
 
-    # ── Pre-expiry danger zone (Chainlink + orderbook sell) ────────────
+    # ── Edge divergence monitor ─────────────────────────────────────────
+
+    def _monitor_edge_divergence(self) -> None:
+        """Track live edge for open paper positions. When edge >= threshold
+        in the last N seconds before expiry, record sell prices from orderbook."""
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        # Clean up states for resolved positions
+        for pid in list(self._edge_states):
+            pos = self.engine.db.get_position(pid)
+            if pos is None or pos.status != "open":
+                self._edge_states.pop(pid, None)
+
+        positions = self.engine.db.get_open_positions()
+        for pos in positions:
+            if not pos.is_paper:
+                continue
+            row = self.engine.db.conn.execute(
+                "SELECT execution_status FROM positions WHERE id=?", (pos.id,)
+            ).fetchone()
+            exec_status = row["execution_status"] if row else None
+            if exec_status not in ("paper", "paper_both_filled"):
+                continue
+
+            seconds_to_expiry = (pos.expiry - now).total_seconds()
+            if seconds_to_expiry < 0:
+                continue
+
+            # Get current asks from both platforms (same logic as _maybe_open_pair)
+            watch_key = f"{pos.pair_key}|{pos.venue_yes}|{pos.venue_no}"
+            watched = self.watch_by_pair_key.get(watch_key)
+            if watched is None:
+                continue
+
+            matched = watched.matched
+            yes_book = self.live_books.get(matched.polymarket.yes_token_id or "")
+            no_book = self.live_books.get(matched.polymarket.no_token_id or "")
+            kalshi_live = self.live_books_kalshi.get(matched.kalshi.market_id or "")
+
+            # Current YES ask on the venue where we bought YES
+            if pos.venue_yes == "polymarket":
+                current_yes_ask = yes_book.best_ask if yes_book and yes_book.best_ask > 0 else None
+            else:
+                current_yes_ask = kalshi_live.best_yes_ask if kalshi_live else None
+
+            # Current NO ask on the venue where we bought NO
+            if pos.venue_no == "polymarket":
+                current_no_ask = no_book.best_ask if no_book and no_book.best_ask > 0 else None
+            else:
+                current_no_ask = kalshi_live.best_no_ask if kalshi_live else None
+
+            if current_yes_ask is None or current_no_ask is None:
+                continue
+            if current_yes_ask <= 0 or current_no_ask <= 0:
+                continue
+
+            current_edge = 1.0 - (current_yes_ask + current_no_ask)
+
+            # Initialize or update state
+            state = self._edge_states.get(pos.id)
+            if state is None:
+                state = _EdgeMonitorState()
+                self._edge_states[pos.id] = state
+
+            # Track max edge over position lifetime
+            if current_edge > state.max_edge:
+                state.max_edge = current_edge
+                self.engine.db.conn.execute(
+                    "UPDATE positions SET max_edge=? WHERE id=?",
+                    (round(state.max_edge, 6), pos.id),
+                )
+                self.engine.db.conn.commit()
+
+            # Only check signal in the monitoring window
+            if seconds_to_expiry > self._edge_monitor_seconds:
+                continue
+
+            # Signal: edge >= threshold and not already fired
+            if current_edge >= self._edge_signal_threshold and not state.signal_fired:
+                state.signal_fired = True
+                state.signal_at = datetime.utcnow().isoformat()
+                state.edge_at_signal = current_edge
+
+                self.engine.db.conn.execute(
+                    "UPDATE positions SET edge_signal_at=?, edge_at_signal=? WHERE id=?",
+                    (state.signal_at, round(current_edge, 6), pos.id),
+                )
+                self.engine.db.conn.commit()
+
+                print(
+                    f"\n[fast-arb][EDGE-SIGNAL] {pos.symbol} pos={pos.id[:8]} | "
+                    f"edge={current_edge:.1%} (yes={current_yes_ask:.4f} no={current_no_ask:.4f}) | "
+                    f"{seconds_to_expiry:.0f}s to expiry | "
+                    f"scheduling orderbook check in {self._edge_sell_delay:.1f}s"
+                )
+
+                # Schedule orderbook sell check after delay
+                pm_yes_token = matched.polymarket.yes_token_id
+                pm_no_token = matched.polymarket.no_token_id
+                kalshi_ticker = matched.kalshi.market_id
+                t = threading.Timer(
+                    self._edge_sell_delay,
+                    self._edge_record_sell_prices,
+                    args=[pos.id, pm_yes_token, pm_no_token, kalshi_ticker,
+                          pos.venue_yes, pos.venue_no,
+                          pos.yes_ask, pos.no_ask, pos.shares, pos.symbol],
+                )
+                t.start()
+
+    def _edge_record_sell_prices(
+        self,
+        pos_id: str,
+        pm_yes_token: str | None,
+        pm_no_token: str | None,
+        kalshi_ticker: str | None,
+        venue_yes: str,
+        venue_no: str,
+        yes_entry: float,
+        no_entry: float,
+        shares: float,
+        symbol: str,
+    ) -> None:
+        """Timer callback: fetch orderbook bids and record theoretical sell prices."""
+        pos = self.engine.db.get_position(pos_id)
+        if pos is None:
+            return
+
+        # Build a temporary _DangerExit to reuse _fetch_sell_bids
+        tmp = _DangerExit(
+            pm_yes_token=pm_yes_token,
+            pm_no_token=pm_no_token,
+            kalshi_ticker=kalshi_ticker,
+            venue_yes=venue_yes,
+            venue_no=venue_no,
+            yes_entry=yes_entry,
+            no_entry=no_entry,
+            shares=shares,
+            symbol=symbol,
+            ref_price=0,
+        )
+
+        # Fetch bids and compute fill price (sell at ANY price, not just >= entry)
+        yes_bids = self._fetch_sell_bids(venue_yes, "yes", tmp)
+        yes_sell = self._compute_sell_fill(yes_bids, shares)
+
+        no_bids = self._fetch_sell_bids(venue_no, "no", tmp)
+        no_sell = self._compute_sell_fill(no_bids, shares)
+
+        # Compute PnL from selling both legs
+        if yes_sell is not None and no_sell is not None:
+            exit_pnl = round((yes_sell - yes_entry + no_sell - no_entry) * shares, 4)
+        else:
+            exit_pnl = None
+
+        self.engine.db.conn.execute(
+            "UPDATE positions SET edge_yes_sell=?, edge_no_sell=?, edge_exit_pnl=? WHERE id=?",
+            (yes_sell, no_sell, exit_pnl, pos_id),
+        )
+        self.engine.db.conn.commit()
+
+        yes_str = f"{yes_sell:.4f}" if yes_sell is not None else "NO_BIDS"
+        no_str = f"{no_sell:.4f}" if no_sell is not None else "NO_BIDS"
+        pnl_str = f"${exit_pnl:+.2f}" if exit_pnl is not None else "N/A"
+
+        state = self._edge_states.get(pos_id)
+        edge_str = f"{state.edge_at_signal:.1%}" if state else "?"
+
+        print(
+            f"[fast-arb][EDGE-SELL] {symbol} pos={pos_id[:8]} | "
+            f"edge@signal={edge_str} | "
+            f"YES: entry={yes_entry:.4f} sell={yes_str} | "
+            f"NO: entry={no_entry:.4f} sell={no_str} | "
+            f"exit_pnl={pnl_str}"
+        )
+
+    @staticmethod
+    def _compute_sell_fill(
+        bids: list[OrderLevel] | None,
+        shares: float,
+    ) -> float | None:
+        """Compute avg fill price when selling at any available price."""
+        if not bids:
+            return None
+        remaining = shares
+        total_revenue = 0.0
+        for level in bids:
+            take = min(level.size, remaining)
+            total_revenue += take * level.price
+            remaining -= take
+            if remaining <= 1e-9:
+                return round(total_revenue / shares, 6)
+        # Not enough liquidity — use partial fill avg price
+        if total_revenue > 0:
+            filled = shares - remaining
+            return round(total_revenue / filled, 6)
+        return None
+
+    # ── Pre-expiry danger zone (Chainlink + orderbook sell) [DISABLED] ───
 
     def _check_pre_expiry_danger(self) -> None:
         """Detect positions approaching expiry with Chainlink price in the
