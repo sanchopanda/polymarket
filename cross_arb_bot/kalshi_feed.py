@@ -13,18 +13,14 @@ KALSHI_UPDOWN_RE = re.compile(r"^(?P<symbol>[A-Za-z]+)\s+price\s+up\s+in\s+next\
 KALSHI_HOUR_RE = re.compile(r"^(?P<symbol>[A-Za-z]+)\s+price\s+up\s+this\s+hour\?$", re.IGNORECASE)
 
 # Above/below strike-based hourly series (KXBTCD, KXETHD, …)
-_ABOVE_BELOW_SERIES: frozenset[str] = frozenset(["KXBTCD", "KXETHD", "KXSOLD", "KXXRPD"])
-_SERIES_TO_SYMBOL: dict[str, str] = {
-    "KXBTCD": "BTC",
-    "KXETHD": "ETH",
-    "KXSOLD": "SOL",
-    "KXXRPD": "XRP",
-}
-_SERIES_TO_BINANCE: dict[str, str] = {
-    "KXBTCD": "BTCUSDT",
-    "KXETHD": "ETHUSDT",
-    "KXSOLD": "SOLUSDT",
-    "KXXRPD": "XRPUSDT",
+# Each entry: (binance_symbol, floor_strike_increment, floor_strike_correction, ticker_decimals)
+# floor_strike = n * increment - correction, formatted to ticker_decimals decimal places
+_ABOVE_BELOW_SERIES: dict[str, tuple[str, str, float, float, int]] = {
+    #  series     symbol  binance     increment  correction  decimals
+    "KXBTCD": ("BTC",  "BTCUSDT",  100.0,     0.01,       2),
+    "KXETHD": ("ETH",  "ETHUSDT",  20.0,      0.01,       2),
+    "KXSOLD": ("SOL",  "SOLUSDT",  1.0,       0.0001,     4),
+    "KXXRPD": ("XRP",  "XRPUSDT",  0.02,      0.0001,     4),
 }
 _BINANCE_TICKER_URL = "https://api.binance.com/api/v3/ticker/price"
 
@@ -66,14 +62,9 @@ class KalshiFeed:
             return [], f"kalshi fetch failed: {exc}"
 
         symbol_filter = (self.market_filter.get("symbol") or "").strip().lower()
-
-        above_below_rows: list[dict] = []
         result: list[NormalizedMarket] = []
 
         for row in rows:
-            if row.get("series_ticker") in _ABOVE_BELOW_SERIES:
-                above_below_rows.append(row)
-                continue
             normalized = self._normalize_market(row)
             if normalized is None:
                 continue
@@ -81,7 +72,7 @@ class KalshiFeed:
                 continue
             result.append(normalized)
 
-        for normalized in self._select_hourly_markets(above_below_rows):
+        for normalized in self._fetch_hourly_markets():
             if symbol_filter and normalized.symbol.lower() != symbol_filter:
                 continue
             result.append(normalized)
@@ -180,36 +171,56 @@ class KalshiFeed:
         except Exception:
             return None
 
-    def _select_hourly_markets(self, rows: list[dict]) -> list[NormalizedMarket]:
-        """Group above/below sub-markets by (series, close_time), pick nearest floor_strike to Binance price."""
-        groups: dict[tuple[str, str], list[dict]] = {}
-        for row in rows:
-            series = row.get("series_ticker", "")
-            close_time = row.get("close_time") or row.get("expected_expiration_time") or row.get("expiration_time")
-            if not series or not close_time:
+    def _get_events(self, series_ticker: str) -> list[dict]:
+        try:
+            resp = self.http.get(
+                f"{self.base_url}/events",
+                params={"series_ticker": series_ticker, "status": "open", "limit": 20},
+            )
+            resp.raise_for_status()
+            return resp.json().get("events", [])
+        except Exception:
+            return []
+
+    def _atm_tickers(self, event_ticker: str, series: str, price: float) -> list[str]:
+        """Return [nearest, next-nearest] market tickers for the given price."""
+        _, _, increment, correction, decimals = _ABOVE_BELOW_SERIES[series]
+        n = int(price / increment)
+        candidates = sorted([n, n + 1], key=lambda k: abs(k * increment - price))
+        tickers = []
+        for k in candidates:
+            if k <= 0:
                 continue
-            key = (series, close_time)
-            if key not in groups:
-                groups[key] = []
-            groups[key].append(row)
+            fs = k * increment - correction
+            tickers.append(f"{event_ticker}-T{fs:.{decimals}f}")
+        return tickers
 
-        # Fetch Binance price once per series
-        prices: dict[str, float | None] = {}
-        for series, _ in groups:
-            if series not in prices:
-                binance_sym = _SERIES_TO_BINANCE.get(series)
-                prices[series] = self._fetch_binance_price(binance_sym) if binance_sym else None
-
+    def _fetch_hourly_markets(self) -> list[NormalizedMarket]:
+        """For each KXBTCD/KXETHD/… event, fetch the ATM sub-market directly by ticker."""
         result: list[NormalizedMarket] = []
-        for (series, _close_time), group_rows in groups.items():
-            price = prices.get(series)
+        active = [s for s in self.series_tickers if s in _ABOVE_BELOW_SERIES]
+        for series in active:
+            symbol, binance_sym, _, _, _ = _ABOVE_BELOW_SERIES[series]
+            price = self._fetch_binance_price(binance_sym)
             if price is None:
                 continue
-            symbol = _SERIES_TO_SYMBOL.get(series, series)
-            best = min(group_rows, key=lambda r: abs(_to_float(r.get("floor_strike"), 0.0) - price))
-            normalized = self._normalize_above_below_market(best, symbol)
-            if normalized is not None:
-                result.append(normalized)
+            for event in self._get_events(series):
+                et = event.get("event_ticker", "")
+                if not et:
+                    continue
+                for ticker in self._atm_tickers(et, series, price):
+                    try:
+                        resp = self.http.get(f"{self.base_url}/markets/{ticker}")
+                        if resp.status_code == 404:
+                            continue
+                        resp.raise_for_status()
+                        market_data = resp.json().get("market") or {}
+                        normalized = self._normalize_above_below_market(market_data, symbol)
+                        if normalized is not None:
+                            result.append(normalized)
+                            break  # got a valid market for this event
+                    except Exception:
+                        continue
         return result
 
     def _normalize_above_below_market(self, row: dict, symbol: str) -> NormalizedMarket | None:
@@ -258,6 +269,8 @@ class KalshiFeed:
     def _get_markets(self) -> list[dict]:
         rows: list[dict] = []
         for series_ticker in self.series_tickers:
+            if series_ticker in _ABOVE_BELOW_SERIES:
+                continue  # fetched separately via _fetch_hourly_markets
             cursor: str | None = None
             for _page in range(self.max_pages):
                 params = {
