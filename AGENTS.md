@@ -89,6 +89,38 @@
 - для false-match/positive-EV reasoning есть отдельный документ:
   - [docs/false-match-positive-ev-research.md](docs/false-match-positive-ev-research.md)
 
+## Диагностика: `matches=0` при наличии Kalshi-рынков
+
+Симптом в статусе: `pm=N kalshi=M matches=0 opps=0` + `N kalshi unmatched`.
+
+Причины (в порядке вероятности):
+
+1. **Неправильный `interval_minutes` у PM-рынков.** Матчер в `matcher.py` требует
+   `pm.interval_minutes == kalshi.interval_minutes`. Если PM-рынок получил `None` вместо `60`,
+   совпадений не будет. Проверяй `_extract_interval_minutes` в `polymarket_feed.py` —
+   регулярка должна покрывать актуальный формат заголовка.
+
+   Заголовки почасовых PM-рынков содержат год:
+   `"Bitcoin Up or Down - April 9, 2026 9AM ET"`.
+   Если регулярка не учитывает год — `interval_minutes` будет `None`.
+
+   Быстрая диагностика: добавить принт после `fetch_markets_by_slugs`:
+   ```python
+   for m in hourly_markets:
+       print(f"[debug] q={m.question!r} liq={m.liquidity_num:.0f} end={m.end_date}")
+   ```
+
+2. **Окно экспирации.** `max_days_to_expiry` в `config.yaml` (0.083 ≈ 2 ч).
+   Рынки вне окна `[now, now+2h]` отфильтровываются.
+
+3. **Неправильные slugs.** Формат: `{symbol}-up-or-down-{month}-{day}-{year}-{hour}et`
+   (например `solana-up-or-down-april-9-2026-9am-et`).
+   При смене летнего/зимнего времени обновить `_ET_OFFSET` в `polymarket_feed.py`:
+   EDT = `timedelta(hours=-4)` (апрель–октябрь), EST = `timedelta(hours=-5)` (ноябрь–март).
+
+4. **Низкая ликвидность.** Фильтр `min_liquidity: 1000` в `config.yaml`.
+   Новые рынки в начале окна могут не проходить.
+
 ## Команды: `python3 -m real_arb_bot`
 
 - `status` — реальные балансы с обеих бирж + позиции + дневной P&L

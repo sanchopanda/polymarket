@@ -225,7 +225,7 @@ class PolymarketFeed:
             return 60
         # Hourly PM crypto titles are formatted like:
         # "Bitcoin Up or Down - April 8, 1PM ET"
-        if re.search(r"Up or Down\s*-\s*[A-Za-z]+\s+\d{1,2},\s+\d{1,2}(?::\d{2})?(?:AM|PM)\s+ET\b", question, re.IGNORECASE):
+        if re.search(r"Up or Down\s*-\s*[A-Za-z]+\s+\d{1,2},\s+(?:\d{4}\s+)?\d{1,2}(?::\d{2})?(?:AM|PM)\s+ET\b", question, re.IGNORECASE):
             return 60
         return None
 

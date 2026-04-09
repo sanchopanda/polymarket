@@ -25,9 +25,9 @@ data/.telegram_chat_id*
 .claude/settings.local.json
 
 # Database files
-data/*.db
-data/*.db-shm
-data/*.db-wal
+*.db
+*.db-shm
+*.db-wal
 
 # Backtest cache
 data/markets_*.json

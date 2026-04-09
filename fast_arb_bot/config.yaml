@@ -8,7 +8,7 @@ trading:
   max_lock_edge: 0.45
   stake_tier_half_above: 0.20
   stake_tier_third_above: 0.30
-  max_open_pairs: 5
+  max_open_pairs: 20
   max_entries_per_pair: 1
 
 safety:
@@ -22,7 +22,7 @@ safety:
   min_balance_kalshi: 30.0
   cooldown_seconds: 10.0
   require_confirmation: false
-  dry_run: true
+  dry_run: false
   balance_divergence_threshold: 5.0
   min_partial_fill_pct: 50
   kalshi_slippage_cents: 0
@@ -30,7 +30,7 @@ safety:
 
 fast_arb:
   budget_usd: 60.0           # базовый бюджет (растёт с выигрышами)
-  max_realized_loss_usd: 201.0  # максимальные реализованные потери — стоп
+  max_realized_loss_usd: 60.0  # максимальные реализованные потери — стоп
   order_book_min_liquidity_ratio: 2.0
   scan_interval_seconds: 180
   edge_monitor:
