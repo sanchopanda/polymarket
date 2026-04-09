@@ -106,8 +106,9 @@ class TelegramNotifier:
         kalshi_target: float | None = None,
         pm_target: float | None = None,
         interval_minutes: int | None = None,
+        pm_slug: str | None = None,
+        kalshi_ticker: str | None = None,
     ) -> None:
-        paper_tag = " [PAPER]" if is_paper else ""
         if is_paper:
             icon = "📝"
             fill_line = "paper-трейд (реальных ордеров нет)"
@@ -136,15 +137,25 @@ class TelegramNotifier:
         else:
             interval_tag = ""
 
+        links = []
+        if pm_slug:
+            links.append(f'<a href="https://polymarket.com/event/{pm_slug}">Polymarket</a>')
+        if kalshi_ticker:
+            series = kalshi_ticker.split("-")[0].lower()
+            links.append(f'<a href="https://kalshi.com/markets/{series}">Kalshi</a>')
+        link_line = " | ".join(links) + "\n" if links else ""
+
+        mode_tag = "📝 PAPER" if is_paper else "🔴 REAL"
         text = (
-            f"{icon} <b>ОТКРЫТА{paper_tag}: {symbol}{interval_tag}</b>\n"
+            f"✅ <b>ОТКРЫТА [{mode_tag}]: {symbol}{interval_tag}</b>\n"
+            f"{link_line}"
             f"{yes_venue}:YES @ {yes_ask:.4f} + {no_venue}:NO @ {no_ask:.4f}\n"
             f"ask_sum={ask_sum:.4f} | edge={edge:.4f}\n"
             f"cost=${cost:.2f} | ожид. прибыль=${expected_profit:.2f}\n"
             f"{target_line}"
             f"{fill_line}"
         )
-        self._send(text)
+        return self._send(text)
 
     def notify_resolve(
         self,
@@ -156,17 +167,20 @@ class TelegramNotifier:
         is_paper: bool = False,
         kalshi_close_price: float | None = None,
         pm_close_price: float | None = None,
+        pm_slug: str | None = None,
+        kalshi_ticker: str | None = None,
+        reply_to_msg_id: int | None = None,
     ) -> None:
-        paper_tag = " [PAPER]" if is_paper else ""
+        mode_tag = "📝 PAPER" if is_paper else "🔴 REAL"
         if pm_result == "early_exit" or kalshi_result == "early_exit":
             icon = "🚪"
-            validity = "ранний выход (danger zone)"
-        elif lock_valid:
-            icon = "💰" if pnl > 0 else "📉"
-            validity = "арбитраж ✓"
+            validity = "ранний выход"
         elif "not_traded" in (pm_result, kalshi_result):
             icon = "💰" if pnl > 0 else "📉"
             validity = "одноногая"
+        elif lock_valid:
+            icon = "💰" if pnl > 0 else "📉"
+            validity = "арбитраж ✓"
         else:
             icon = "⚠️"
             validity = "ложный матч!"
@@ -179,18 +193,33 @@ class TelegramNotifier:
         else:
             close_line = ""
 
+        links = []
+        if pm_slug:
+            links.append(f'<a href="https://polymarket.com/event/{pm_slug}">Polymarket</a>')
+        if kalshi_ticker:
+            series = kalshi_ticker.split("-")[0].lower()
+            links.append(f'<a href="https://kalshi.com/markets/{series}">Kalshi</a>')
+        link_line = " | ".join(links) + "\n" if links else ""
+
         text = (
-            f"{icon} <b>РЕЗОЛВ{paper_tag}: {symbol}</b>\n"
+            f"{icon} <b>РЕЗОЛВ [{mode_tag}]: {symbol}</b>\n"
+            f"{link_line}"
             f"PM={pm_result} | Kalshi={kalshi_result} | {validity}\n"
             f"P&L: <b>${pnl:+.2f}</b>"
             f"{close_line}"
         )
-        self._send(text)
+        self._send(text, reply_to_message_id=reply_to_msg_id)
 
-    def _send(self, text: str) -> None:
+    def _send(self, text: str, reply_to_message_id: int | None = None) -> int | None:
         if self.chat_id is None:
-            return
+            return None
         try:
-            self.bot.send_message(self.chat_id, text, reply_markup=_status_keyboard())
+            msg = self.bot.send_message(
+                self.chat_id, text,
+                reply_markup=_status_keyboard(),
+                reply_to_message_id=reply_to_message_id,
+            )
+            return msg.message_id
         except Exception as e:
             print(f"[Telegram] Ошибка отправки: {e}")
+            return None

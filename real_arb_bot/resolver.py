@@ -167,6 +167,14 @@ class PositionResolver:
             + (f" | NOT a true arb!" if not lock_valid else "")
         )
         if self.notifier:
+            _k_ticker = (
+                position.market_yes if position.venue_yes == "kalshi"
+                else position.market_no
+            )
+            _tg_row = self.db.conn.execute(
+                "SELECT telegram_msg_id FROM positions WHERE id=?", (position.id,)
+            ).fetchone()
+            _tg_msg_id = _tg_row[0] if _tg_row else None
             self.notifier.notify_resolve(
                 symbol=position.symbol,
                 pm_result=pm_result,
@@ -175,6 +183,8 @@ class PositionResolver:
                 lock_valid=lock_valid,
                 kalshi_close_price=kalshi_close_price,
                 pm_close_price=pm_close_price,
+                kalshi_ticker=_k_ticker,
+                reply_to_msg_id=_tg_msg_id,
             )
 
     def _resolve_paper(self, position) -> None:
@@ -254,6 +264,14 @@ class PositionResolver:
             pm_close_price=pm_close_price,
         )
         if self.notifier:
+            _k_ticker = (
+                position.market_yes if position.venue_yes == "kalshi"
+                else position.market_no
+            )
+            _tg_row = self.db.conn.execute(
+                "SELECT telegram_msg_id FROM positions WHERE id=?", (position.id,)
+            ).fetchone()
+            _tg_msg_id = _tg_row[0] if _tg_row else None
             self.notifier.notify_resolve(
                 symbol=position.symbol,
                 pm_result=notify_pm,
@@ -263,6 +281,8 @@ class PositionResolver:
                 is_paper=True,
                 kalshi_close_price=kalshi_close_price,
                 pm_close_price=pm_close_price,
+                kalshi_ticker=_k_ticker,
+                reply_to_msg_id=_tg_msg_id,
             )
 
     def _retry_redeem(self, position) -> None:

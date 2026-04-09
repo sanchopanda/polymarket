@@ -160,10 +160,20 @@ def _kalshi_price_to_float(value) -> float | None:
 
 class PolymarketTrader:
     def __init__(self) -> None:
+        import time as _time
         pk = os.environ["WALLET_PRIVATE_KEY"]
         funder = os.getenv("WALLET_PROXY", "")
         l1 = PyClobClient(host=CLOB_HOST, chain_id=CHAIN_ID, key=pk)
-        creds = l1.create_or_derive_api_creds()
+        creds = None
+        for attempt in range(1, 6):
+            try:
+                creds = l1.create_or_derive_api_creds()
+                break
+            except Exception as e:
+                if attempt == 5:
+                    raise
+                print(f"[auth] Polymarket CLOB: попытка {attempt}/5 не удалась ({e}), повтор через 5с...")
+                _time.sleep(5)
         self._client = PyClobClient(
             host=CLOB_HOST,
             chain_id=CHAIN_ID,

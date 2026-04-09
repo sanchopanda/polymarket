@@ -411,14 +411,15 @@ class FastArbWatchRunner:
             self._maybe_complete_one_legged(opp, matched)
             return
 
-        # 2. Лимит одновременных позиций
-        open_count = len(self.engine.db.get_open_positions())
-        if open_count >= self.engine.trading["max_open_pairs"]:
-            self._skip_log(
-                pair_key,
-                f"[fast-arb][SKIP] {opp.symbol} | reason=max_open_pairs ({open_count})",
-            )
-            return
+        # 2. Лимит одновременных позиций (не применяется в paper-режиме)
+        if not self.dry_run:
+            open_count = len(self.engine.db.get_open_positions())
+            if open_count >= self.engine.trading["max_open_pairs"]:
+                self._skip_log(
+                    pair_key,
+                    f"[fast-arb][SKIP] {opp.symbol} | reason=max_open_pairs ({open_count})",
+                )
+                return
 
         # 3. Быстрая оценка edge из WS-данных
         yes_book = self.live_books.get(matched.polymarket.yes_token_id or "")
@@ -562,13 +563,13 @@ class FastArbWatchRunner:
         )
 
         if self.dry_run:
-            self.engine.db.open_paper_position(opp, pm_price_to_beat=_p_tgt)
+            opened_paper = self.engine.db.open_paper_position(opp, pm_price_to_beat=_p_tgt)
             print(
                 f"[fast-arb][PAPER] {opp.symbol} | {opp.buy_yes_venue}:YES@{opp.yes_ask:.4f} "
                 f"+ {opp.buy_no_venue}:NO@{opp.no_ask:.4f} | edge={opp.edge_per_share:.4f}{_tgt_str}"
             )
             if self.engine.notifier:
-                self.engine.notifier.notify_open(
+                msg_id = self.engine.notifier.notify_open(
                     symbol=opp.symbol,
                     yes_venue=opp.buy_yes_venue,
                     no_venue=opp.buy_no_venue,
@@ -583,7 +584,15 @@ class FastArbWatchRunner:
                     kalshi_target=_k_tgt,
                     pm_target=_p_tgt,
                     interval_minutes=opp.interval_minutes,
+                    pm_slug=opp.pm_event_slug,
+                    kalshi_ticker=opp.kalshi_market_id,
                 )
+                if msg_id and opened_paper:
+                    self.engine.db.conn.execute(
+                        "UPDATE positions SET telegram_msg_id=? WHERE id=?",
+                        (msg_id, opened_paper.id),
+                    )
+                    self.engine.db.conn.commit()
             return
 
         # Прописываем правильные token_id для PM ног
@@ -633,7 +642,7 @@ class FastArbWatchRunner:
         if self.engine.notifier:
             kalshi_fill = result.kalshi_order.fill_price if result.kalshi_order else 0.0
             pm_fill = result.polymarket_order.fill_price if result.polymarket_order else 0.0
-            self.engine.notifier.notify_open(
+            msg_id = self.engine.notifier.notify_open(
                 symbol=opp.symbol,
                 yes_venue=opp.buy_yes_venue,
                 no_venue=opp.buy_no_venue,
@@ -649,7 +658,15 @@ class FastArbWatchRunner:
                 kalshi_target=_k_tgt,
                 pm_target=_p_tgt,
                 interval_minutes=opp.interval_minutes,
+                pm_slug=opp.pm_event_slug,
+                kalshi_ticker=opp.kalshi_market_id,
             )
+            if msg_id:
+                self.engine.db.conn.execute(
+                    "UPDATE positions SET telegram_msg_id=? WHERE id=?",
+                    (msg_id, opened.id),
+                )
+                self.engine.db.conn.commit()
 
     # ── Paper simulation: задержка + одноногие позиции ────────────────
 
@@ -885,9 +902,10 @@ class FastArbWatchRunner:
             # Track max edge over position lifetime
             if current_edge > state.max_edge:
                 state.max_edge = current_edge
+                max_edge_at = datetime.now(timezone.utc).isoformat()
                 self.engine.db.conn.execute(
-                    "UPDATE positions SET max_edge=? WHERE id=?",
-                    (round(state.max_edge, 6), pos.id),
+                    "UPDATE positions SET max_edge=?, max_edge_at=? WHERE id=?",
+                    (round(state.max_edge, 6), max_edge_at, pos.id),
                 )
                 self.engine.db.conn.commit()
 
@@ -1238,14 +1256,20 @@ class FastArbWatchRunner:
                 f"pnl=${pnl:+.2f}"
             )
             if self.engine.notifier:
+                _tg_row = self.engine.db.conn.execute(
+                    "SELECT telegram_msg_id, is_paper FROM positions WHERE id=?", (pos_id,)
+                ).fetchone()
+                _tg_msg_id = _tg_row[0] if _tg_row else None
+                _is_paper = bool(_tg_row[1]) if _tg_row else True
                 self.engine.notifier.notify_resolve(
                     symbol=state.symbol,
                     pm_result="early_exit",
                     kalshi_result="early_exit",
                     pnl=pnl,
                     lock_valid=True,
-                    is_paper=True,
+                    is_paper=_is_paper,
                     kalshi_close_price=cl_price,
+                    reply_to_msg_id=_tg_msg_id,
                 )
             return
 
@@ -1532,7 +1556,7 @@ class FastArbWatchRunner:
                 "    THEN kalshi_fill_shares * kalshi_fill_price + COALESCE(kalshi_order_fee, 0) "
                 "WHEN execution_status='one_legged_polymarket' "
                 "    THEN polymarket_fill_shares * polymarket_fill_price + COALESCE(polymarket_order_fee, 0) "
-                "ELSE total_cost END), 0) FROM positions WHERE status='open'"
+                "ELSE total_cost END), 0) FROM positions WHERE status='open' AND is_paper = 0"
             )
             open_cost = float(cursor.fetchone()[0]) + new_position_cost
             if open_cost > effective_budget:
@@ -1824,63 +1848,119 @@ class FastArbWatchRunner:
 
     def _get_status_text(self) -> str:
         db = self.engine.db
-        try:
+        is_real = not self.dry_run
+
+        def _fetch_stats(paper_flag: int) -> tuple:
             r = db.conn.execute(
                 "SELECT COUNT(*) as total,"
                 " SUM(CASE WHEN actual_pnl > 0 THEN 1 ELSE 0 END) as wins,"
                 " SUM(CASE WHEN actual_pnl < 0 THEN 1 ELSE 0 END) as losses,"
                 " COALESCE(SUM(actual_pnl), 0) as pnl"
-                " FROM positions WHERE status='resolved' AND is_paper=1"
+                " FROM positions WHERE status='resolved' AND is_paper=?",
+                (paper_flag,),
             ).fetchone()
             total, wins, losses, pnl = int(r[0]), int(r[1] or 0), int(r[2] or 0), float(r[3])
-
             today = db.conn.execute(
                 "SELECT COUNT(*) as cnt, COALESCE(SUM(actual_pnl), 0) as pnl"
-                " FROM positions WHERE status='resolved' AND is_paper=1"
-                " AND DATE(opened_at) = DATE('now')"
+                " FROM positions WHERE status='resolved' AND is_paper=?"
+                " AND DATE(opened_at) = DATE('now')",
+                (paper_flag,),
             ).fetchone()
             today_cnt, today_pnl = int(today[0]), float(today[1])
-
             mm = db.conn.execute(
                 "SELECT COUNT(*) FROM positions"
-                " WHERE status='resolved' AND is_paper=1"
+                " WHERE status='resolved' AND is_paper=?"
                 " AND polymarket_result != kalshi_result"
-                " AND polymarket_result IS NOT NULL AND kalshi_result IS NOT NULL"
+                " AND polymarket_result NOT IN ('not_traded', 'early_exit')"
+                " AND kalshi_result NOT IN ('not_traded', 'early_exit')"
+                " AND polymarket_result IS NOT NULL AND kalshi_result IS NOT NULL",
+                (paper_flag,),
             ).fetchone()
             mm_cnt = int(mm[0])
+            return total, wins, losses, pnl, today_cnt, today_pnl, mm_cnt
 
-            open_r = db.conn.execute(
-                "SELECT COUNT(*) FROM positions WHERE status='open'"
+        try:
+            open_real_r = db.conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(total_cost), 0) FROM positions WHERE status='open' AND is_paper=0"
             ).fetchone()
-            open_cnt = int(open_r[0])
+            open_real_cnt, open_real_cost = int(open_real_r[0]), float(open_real_r[1])
 
-            one_leg = db.conn.execute(
-                "SELECT COUNT(*) FROM positions"
-                " WHERE status='resolved' AND is_paper=1"
-                " AND ((yes_filled_shares > 0 AND (no_filled_shares IS NULL OR no_filled_shares = 0))"
-                "   OR (no_filled_shares > 0 AND (yes_filled_shares IS NULL OR yes_filled_shares = 0)))"
+            one_leg_real = db.conn.execute(
+                "SELECT COUNT(*) FROM positions WHERE status='resolved' AND is_paper=0"
+                " AND (polymarket_result='not_traded' OR kalshi_result='not_traded')"
             ).fetchone()
-            one_leg_cnt = int(one_leg[0])
+            one_leg_real_cnt = int(one_leg_real[0])
+
+            one_leg_paper = db.conn.execute(
+                "SELECT COUNT(*) FROM positions WHERE status='resolved' AND is_paper=1"
+                " AND (polymarket_result='not_traded' OR kalshi_result='not_traded')"
+            ).fetchone()
+            one_leg_paper_cnt = int(one_leg_paper[0])
+
+            if is_real:
+                total, wins, losses, pnl, today_cnt, today_pnl, mm_cnt = _fetch_stats(0)
+                p_total, p_wins, p_losses, p_pnl, p_today_cnt, p_today_pnl, p_mm_cnt = _fetch_stats(1)
+            else:
+                total, wins, losses, pnl, today_cnt, today_pnl, mm_cnt = _fetch_stats(1)
+            if not is_real:
+                open_real_cnt, open_real_cost = 0, 0.0
         except Exception:
-            return "📝 <b>Fast Arb (paper)</b>\n⚠️ Ошибка чтения БД"
+            mode = "REAL" if is_real else "paper"
+            return f"🔴 <b>Fast Arb ({mode})</b>\n⚠️ Ошибка чтения БД"
 
-        wr = (wins / total * 100) if total > 0 else 0
-        lines = [
-            f"📝 <b>Fast Arb (paper)</b>",
-            f"",
-            f"📊 <b>Всего:</b> {total} сделок | WR: <b>{wr:.0f}%</b> ({wins}W / {losses}L)",
-            f"💰 <b>P&L:</b> <b>${pnl:+.2f}</b>",
-            f"📅 <b>Сегодня:</b> {today_cnt} сделок, <b>${today_pnl:+.2f}</b>",
-        ]
-        if mm_cnt:
-            lines.append(f"⚠️ Mismatches: {mm_cnt}")
-        if one_leg_cnt:
-            lines.append(f"🦵 Одноногих: {one_leg_cnt}")
-        if open_cnt:
-            lines.append(f"📌 Открытых: {open_cnt}")
-        lines.append(f"\n🔍 Пар в мониторинге: {len(self.watch_by_pair_key)}")
-        if self.dry_run:
-            lines.append("⏸ <b>РЕЖИМ: paper</b>")
+        bal = self._cached_balances
+        pm_bal = bal.get("polymarket")
+        k_bal = bal.get("kalshi")
+        bal_str = ""
+        if pm_bal is not None or k_bal is not None:
+            pm_s = f"${pm_bal:.2f}" if pm_bal is not None else "N/A"
+            k_s = f"${k_bal:.2f}" if k_bal is not None else "N/A"
+            bal_str = f"💵 PM: {pm_s} | Kalshi: {k_s}"
+
+        if is_real:
+            wr = (wins / total * 100) if total > 0 else 0
+            realized_pnl = pnl
+            effective_budget = self.budget_usd + max(0.0, realized_pnl)
+            lines = [
+                "🔴 <b>Fast Arb (REAL)</b>",
+                "",
+                f"📊 <b>Real:</b> {total} сделок | WR: <b>{wr:.0f}%</b> ({wins}W / {losses}L)",
+                f"💰 <b>P&L real:</b> <b>${pnl:+.2f}</b>",
+                f"📅 <b>Сегодня real:</b> {today_cnt} сделок, <b>${today_pnl:+.2f}</b>",
+            ]
+            if mm_cnt:
+                lines.append(f"⚠️ Mismatches (real): {mm_cnt}")
+            if one_leg_real_cnt:
+                lines.append(f"🦵 Одноногих real: {one_leg_real_cnt}")
+            if open_real_cnt:
+                lines.append(f"📂 Открытых real: {open_real_cnt} (${open_real_cost:.2f})")
+            lines.append("")
+            p_wr = (p_wins / p_total * 100) if p_total > 0 else 0
+            lines.append(f"📝 <b>Paper:</b> {p_total} сделок | WR: {p_wr:.0f}% | P&L: ${p_pnl:+.2f}")
+            if p_today_cnt:
+                lines.append(f"📅 Сегодня paper: {p_today_cnt} сделок, ${p_today_pnl:+.2f}")
+            if p_mm_cnt:
+                lines.append(f"⚠️ Mismatches (paper): {p_mm_cnt}")
+            if one_leg_paper_cnt:
+                lines.append(f"🦵 Одноногих paper: {one_leg_paper_cnt}")
+        else:
+            wr = (wins / total * 100) if total > 0 else 0
+            lines = [
+                "📝 <b>Fast Arb (paper)</b>",
+                "",
+                f"📊 <b>Всего:</b> {total} сделок | WR: <b>{wr:.0f}%</b> ({wins}W / {losses}L)",
+                f"💰 <b>P&L:</b> <b>${pnl:+.2f}</b>",
+                f"📅 <b>Сегодня:</b> {today_cnt} сделок, <b>${today_pnl:+.2f}</b>",
+            ]
+            if mm_cnt:
+                lines.append(f"⚠️ Mismatches: {mm_cnt}")
+            if one_leg_paper_cnt:
+                lines.append(f"🦵 Одноногих: {one_leg_paper_cnt}")
+        if bal_str:
+            lines.append(f"\n{bal_str}")
+        lines.append(f"🔍 Пар в мониторинге: {len(self.watch_by_pair_key)}")
+        if is_real:
+            lines.append(f"💼 Бюджет: ${effective_budget:.2f} (стоп: -${self.max_realized_loss_usd:.0f})")
         return "\n".join(lines)
 
     def _watch_key(self, opp: CrossVenueOpportunity) -> str:
@@ -2393,6 +2473,14 @@ class FastArbWatchRunner:
                 notify_kalshi = "not_traded"
                 notify_kalshi_close = None
                 notify_pm_close = pm_close_price
+            _k_ticker = (
+                position.market_yes if position.venue_yes == "kalshi"
+                else position.market_no
+            )
+            _tg_row = self.engine.db.conn.execute(
+                "SELECT telegram_msg_id FROM positions WHERE id=?", (position.id,)
+            ).fetchone()
+            _tg_msg_id = _tg_row[0] if _tg_row else None
             self.engine.notifier.notify_resolve(
                 symbol=position.symbol,
                 pm_result=notify_pm,
@@ -2401,6 +2489,8 @@ class FastArbWatchRunner:
                 lock_valid=False,
                 kalshi_close_price=notify_kalshi_close,
                 pm_close_price=notify_pm_close,
+                kalshi_ticker=_k_ticker,
+                reply_to_msg_id=_tg_msg_id,
             )
 
     def _print_status(self) -> None:
@@ -2417,7 +2507,7 @@ class FastArbWatchRunner:
                 "    THEN kalshi_fill_shares * kalshi_fill_price + COALESCE(kalshi_order_fee, 0) "
                 "WHEN execution_status='one_legged_polymarket' "
                 "    THEN polymarket_fill_shares * polymarket_fill_price + COALESCE(polymarket_order_fee, 0) "
-                "ELSE total_cost END), 0) FROM positions WHERE status='open'"
+                "ELSE total_cost END), 0) FROM positions WHERE status='open' AND is_paper = 0"
             )
             open_cost = float(c1.fetchone()[0])
             c2 = self.engine.db.conn.execute(
