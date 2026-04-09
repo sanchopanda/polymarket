@@ -8,7 +8,7 @@ trading:
   max_lock_edge: 0.45
   stake_tier_half_above: 0.20
   stake_tier_third_above: 0.30
-  max_open_pairs: 20
+  max_open_pairs: 50
   max_entries_per_pair: 1
 
 safety:
