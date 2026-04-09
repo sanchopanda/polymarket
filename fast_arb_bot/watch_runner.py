@@ -453,6 +453,14 @@ class FastArbWatchRunner:
 
         # 5. (XRP и SOL торгуются как обычные пары)
 
+        # 5b. В real-режиме параллельно планируем бумажное отслеживание
+        if not self.dry_run:
+            _paper_key = "paper:" + self._watch_key(opp)
+            if _paper_key not in self._pending_timers:
+                t = threading.Timer(1.5, self._delayed_paper_tracking, args=[_paper_key, opp, matched])
+                self._pending_timers[_paper_key] = t
+                t.start()
+
         # 6. Balance check (пропускаем в paper-режиме — реальные деньги не тратятся)
         if not self.dry_run:
             _bal = self._cached_balances
@@ -563,36 +571,7 @@ class FastArbWatchRunner:
         )
 
         if self.dry_run:
-            opened_paper = self.engine.db.open_paper_position(opp, pm_price_to_beat=_p_tgt)
-            print(
-                f"[fast-arb][PAPER] {opp.symbol} | {opp.buy_yes_venue}:YES@{opp.yes_ask:.4f} "
-                f"+ {opp.buy_no_venue}:NO@{opp.no_ask:.4f} | edge={opp.edge_per_share:.4f}{_tgt_str}"
-            )
-            if self.engine.notifier:
-                msg_id = self.engine.notifier.notify_open(
-                    symbol=opp.symbol,
-                    yes_venue=opp.buy_yes_venue,
-                    no_venue=opp.buy_no_venue,
-                    yes_ask=opp.yes_ask,
-                    no_ask=opp.no_ask,
-                    ask_sum=opp.ask_sum,
-                    edge=opp.edge_per_share,
-                    cost=opp.total_cost,
-                    expected_profit=opp.expected_profit,
-                    execution_status="paper",
-                    is_paper=True,
-                    kalshi_target=_k_tgt,
-                    pm_target=_p_tgt,
-                    interval_minutes=opp.interval_minutes,
-                    pm_slug=opp.pm_event_slug,
-                    kalshi_ticker=opp.kalshi_market_id,
-                )
-                if msg_id and opened_paper:
-                    self.engine.db.conn.execute(
-                        "UPDATE positions SET telegram_msg_id=? WHERE id=?",
-                        (msg_id, opened_paper.id),
-                    )
-                    self.engine.db.conn.commit()
+            self._open_paper_from_opp(opp, _k_tgt, _p_tgt, _tgt_str)
             return
 
         # Прописываем правильные token_id для PM ног
@@ -686,7 +665,7 @@ class FastArbWatchRunner:
 
         max_entries = int(self.engine.trading.get("max_entries_per_pair", 1))
         with self._signal_lock:
-            if self._count_open_positions_for_pair(opp.pair_key) >= max_entries:
+            if self._count_open_paper_for_pair(opp.pair_key) >= max_entries:
                 return
 
             executed, yes_leg, no_leg = self._apply_execution_pricing_parallel(opp, matched)
@@ -701,6 +680,76 @@ class FastArbWatchRunner:
                 if executed.expected_profit <= 0:
                     return
                 self._execute_and_record(executed, matched, yes_leg, no_leg)
+            else:
+                self._maybe_open_paper_one_legged(opp, yes_leg, no_leg)
+
+    def _open_paper_from_opp(
+        self,
+        opp: CrossVenueOpportunity,
+        _k_tgt: float | None,
+        _p_tgt: float | None,
+        _tgt_str: str = "",
+    ) -> None:
+        """Открывает бумажную позицию и уведомляет в Telegram."""
+        opened_paper = self.engine.db.open_paper_position(opp, pm_price_to_beat=_p_tgt)
+        print(
+            f"[fast-arb][PAPER] {opp.symbol} | {opp.buy_yes_venue}:YES@{opp.yes_ask:.4f} "
+            f"+ {opp.buy_no_venue}:NO@{opp.no_ask:.4f} | edge={opp.edge_per_share:.4f}{_tgt_str}"
+        )
+        if self.engine.notifier:
+            msg_id = self.engine.notifier.notify_open(
+                symbol=opp.symbol,
+                yes_venue=opp.buy_yes_venue,
+                no_venue=opp.buy_no_venue,
+                yes_ask=opp.yes_ask,
+                no_ask=opp.no_ask,
+                ask_sum=opp.ask_sum,
+                edge=opp.edge_per_share,
+                cost=opp.total_cost,
+                expected_profit=opp.expected_profit,
+                execution_status="paper",
+                is_paper=True,
+                kalshi_target=_k_tgt,
+                pm_target=_p_tgt,
+                interval_minutes=opp.interval_minutes,
+                pm_slug=opp.pm_event_slug,
+                kalshi_ticker=opp.kalshi_market_id,
+            )
+            if msg_id and opened_paper:
+                self.engine.db.conn.execute(
+                    "UPDATE positions SET telegram_msg_id=? WHERE id=?",
+                    (msg_id, opened_paper.id),
+                )
+                self.engine.db.conn.commit()
+
+    def _delayed_paper_tracking(
+        self, paper_key: str, opp: CrossVenueOpportunity, matched: MatchedMarketPair
+    ) -> None:
+        """Открывает бумажную позицию параллельно с реальным режимом."""
+        self._pending_timers.pop(paper_key, None)
+
+        if self._is_too_close_to_expiry(opp.expiry):
+            return
+
+        max_entries = int(self.engine.trading.get("max_entries_per_pair", 1))
+        with self._signal_lock:
+            if self._count_open_paper_for_pair(opp.pair_key) >= max_entries:
+                return
+
+            executed, yes_leg, no_leg = self._apply_execution_pricing_parallel(opp, matched)
+
+            if executed is not None:
+                if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
+                    return
+                if not self._prices_within_bounds(executed.yes_ask, executed.no_ask):
+                    return
+                if self._edge_above_max_allowed(executed.yes_ask, executed.no_ask):
+                    return
+                if executed.expected_profit <= 0:
+                    return
+                _k_tgt = executed.kalshi_reference_price
+                _p_tgt = self._fetch_pm_open_price(executed.pm_event_slug) if executed.pm_event_slug else None
+                self._open_paper_from_opp(executed, _k_tgt, _p_tgt)
             else:
                 self._maybe_open_paper_one_legged(opp, yes_leg, no_leg)
 
@@ -2008,8 +2057,17 @@ class FastArbWatchRunner:
         self.engine.db.conn.commit()
 
     def _count_open_positions_for_pair(self, pair_key: str) -> int:
+        """Считает только реальные (is_paper=0) открытые позиции для пары."""
         row = self.engine.db.conn.execute(
-            "SELECT COUNT(*) FROM positions WHERE pair_key=? AND status='open'",
+            "SELECT COUNT(*) FROM positions WHERE pair_key=? AND status='open' AND is_paper=0",
+            (pair_key,),
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+
+    def _count_open_paper_for_pair(self, pair_key: str) -> int:
+        """Считает только бумажные (is_paper=1) открытые позиции для пары."""
+        row = self.engine.db.conn.execute(
+            "SELECT COUNT(*) FROM positions WHERE pair_key=? AND status='open' AND is_paper=1",
             (pair_key,),
         ).fetchone()
         return int(row[0] or 0) if row else 0
