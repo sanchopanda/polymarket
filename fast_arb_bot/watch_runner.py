@@ -1885,6 +1885,11 @@ class FastArbWatchRunner:
             ).fetchone()
             open_real_cnt, open_real_cost = int(open_real_r[0]), float(open_real_r[1])
 
+            open_paper_r = db.conn.execute(
+                "SELECT COUNT(*) FROM positions WHERE status='open' AND is_paper=1"
+            ).fetchone()
+            open_paper_cnt = int(open_paper_r[0])
+
             one_leg_real = db.conn.execute(
                 "SELECT COUNT(*) FROM positions WHERE status='resolved' AND is_paper=0"
                 " AND (polymarket_result='not_traded' OR kalshi_result='not_traded')"
@@ -1893,7 +1898,8 @@ class FastArbWatchRunner:
 
             one_leg_paper = db.conn.execute(
                 "SELECT COUNT(*) FROM positions WHERE status='resolved' AND is_paper=1"
-                " AND (polymarket_result='not_traded' OR kalshi_result='not_traded')"
+                " AND (execution_status LIKE '%one_legged%'"
+                "   OR polymarket_result='not_traded' OR kalshi_result='not_traded')"
             ).fetchone()
             one_leg_paper_cnt = int(one_leg_paper[0])
 
@@ -1943,6 +1949,8 @@ class FastArbWatchRunner:
                 lines.append(f"⚠️ Mismatches (paper): {p_mm_cnt}")
             if one_leg_paper_cnt:
                 lines.append(f"🦵 Одноногих paper: {one_leg_paper_cnt}")
+            if open_paper_cnt:
+                lines.append(f"📂 Открытых paper: {open_paper_cnt}")
         else:
             wr = (wins / total * 100) if total > 0 else 0
             lines = [
@@ -1956,6 +1964,8 @@ class FastArbWatchRunner:
                 lines.append(f"⚠️ Mismatches: {mm_cnt}")
             if one_leg_paper_cnt:
                 lines.append(f"🦵 Одноногих: {one_leg_paper_cnt}")
+            if open_paper_cnt:
+                lines.append(f"📂 Открытых paper: {open_paper_cnt}")
         if bal_str:
             lines.append(f"\n{bal_str}")
         lines.append(f"🔍 Пар в мониторинге: {len(self.watch_by_pair_key)}")
