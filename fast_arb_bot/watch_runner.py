@@ -732,26 +732,26 @@ class FastArbWatchRunner:
             return
 
         max_entries = int(self.engine.trading.get("max_entries_per_pair", 1))
-        with self._signal_lock:
-            if self._count_open_paper_for_pair(opp.pair_key) >= max_entries:
+        if self._count_open_paper_for_pair(opp.pair_key) >= max_entries:
+            return
+
+        # REST-запрос к стакану без _signal_lock — не блокируем real hot path
+        executed, yes_leg, no_leg = self._apply_execution_pricing_parallel(opp, matched)
+
+        if executed is not None:
+            if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
                 return
-
-            executed, yes_leg, no_leg = self._apply_execution_pricing_parallel(opp, matched)
-
-            if executed is not None:
-                if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
-                    return
-                if not self._prices_within_bounds(executed.yes_ask, executed.no_ask):
-                    return
-                if self._edge_above_max_allowed(executed.yes_ask, executed.no_ask):
-                    return
-                if executed.expected_profit <= 0:
-                    return
-                _k_tgt = executed.kalshi_reference_price
-                _p_tgt = self._fetch_pm_open_price(executed.pm_event_slug) if executed.pm_event_slug else None
-                self._open_paper_from_opp(executed, _k_tgt, _p_tgt)
-            else:
-                self._maybe_open_paper_one_legged(opp, yes_leg, no_leg)
+            if not self._prices_within_bounds(executed.yes_ask, executed.no_ask):
+                return
+            if self._edge_above_max_allowed(executed.yes_ask, executed.no_ask):
+                return
+            if executed.expected_profit <= 0:
+                return
+            _k_tgt = executed.kalshi_reference_price
+            _p_tgt = self._fetch_pm_open_price(executed.pm_event_slug) if executed.pm_event_slug else None
+            self._open_paper_from_opp(executed, _k_tgt, _p_tgt)
+        else:
+            self._maybe_open_paper_one_legged(opp, yes_leg, no_leg)
 
     def _maybe_open_paper_one_legged(
         self,
