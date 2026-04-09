@@ -103,6 +103,7 @@ class FastArbWatchRunner:
         self.pairs_by_kalshi_ticker: dict[str, set[str]] = {}
         self._kalshi_ws: KalshiWebSocketClient | None = None
         self._signal_lock = threading.Lock()
+        self._paper_lock = threading.Lock()  # отдельный лок для бумажных позиций
         self._last_skip_log: dict[str, float] = {}
         self._SKIP_LOG_INTERVAL = 30.0
         self._last_completion_attempt: dict[str, float] = {}
@@ -664,7 +665,7 @@ class FastArbWatchRunner:
             return
 
         max_entries = int(self.engine.trading.get("max_entries_per_pair", 1))
-        with self._signal_lock:
+        with self._paper_lock:
             if self._count_open_paper_for_pair(opp.pair_key) >= max_entries:
                 return
 
@@ -732,8 +733,6 @@ class FastArbWatchRunner:
             return
 
         max_entries = int(self.engine.trading.get("max_entries_per_pair", 1))
-        if self._count_open_paper_for_pair(opp.pair_key) >= max_entries:
-            return
 
         # REST-запрос к стакану без _signal_lock — не блокируем real hot path
         executed, yes_leg, no_leg = self._apply_execution_pricing_parallel(opp, matched)
@@ -747,11 +746,15 @@ class FastArbWatchRunner:
                 return
             if executed.expected_profit <= 0:
                 return
-            _k_tgt = executed.kalshi_reference_price
-            _p_tgt = self._fetch_pm_open_price(executed.pm_event_slug) if executed.pm_event_slug else None
-            self._open_paper_from_opp(executed, _k_tgt, _p_tgt)
+            with self._paper_lock:
+                if self._count_open_paper_for_pair(opp.pair_key) >= max_entries:
+                    return
+                _k_tgt = executed.kalshi_reference_price
+                _p_tgt = self._fetch_pm_open_price(executed.pm_event_slug) if executed.pm_event_slug else None
+                self._open_paper_from_opp(executed, _k_tgt, _p_tgt)
         else:
-            self._maybe_open_paper_one_legged(opp, yes_leg, no_leg)
+            with self._paper_lock:
+                self._maybe_open_paper_one_legged(opp, yes_leg, no_leg)
 
     def _maybe_open_paper_one_legged(
         self,
