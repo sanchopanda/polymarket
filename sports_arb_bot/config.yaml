@@ -51,7 +51,7 @@ telegram:
   token_env: SIMPLE_BOT_TOKEN
 
 real_trading:
-  enabled: true
+  enabled: false
   kalshi_slippage_cents: 2      # добавляем к цене Kalshi при выставлении ордера
   pm_price_buffer_cents: 2      # добавляем к цене PM при первой попытке
   min_fill_pct: 80              # минимальный процент заполнения (0–100)

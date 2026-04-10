@@ -1022,8 +1022,8 @@ class SportsArbWatchRunner:
                     ka_leg_stake = shares * leg_ka_price
                     print(
                         f"[sports-arb] SKIP {pair_key} | depth insufficient "
-                        f"pm=${pm_depth or 0:.0f}/{pm_leg_stake * 1.5:.0f} "
-                        f"ka=${ka_depth:.0f}/{ka_leg_stake * 1.5:.0f}"
+                        f"pm=${pm_depth or 0:.0f}/{pm_leg_stake * 2.0:.0f} "
+                        f"ka=${ka_depth:.0f}/{ka_leg_stake * 2.0:.0f}"
                     )
 
     def _register_paper_pending(self, pos_id: str, filled_leg: str, data: dict) -> None:
@@ -1086,7 +1086,7 @@ class SportsArbWatchRunner:
                 if not live or live.best_ask <= 0 or live.best_ask > pending["max_price"]:
                     return
                 pm_depth = self._pm_depth_at_ask(pm_token_id, live.best_ask)
-                required_depth = pending["shares"] * live.best_ask * 1.5
+                required_depth = pending["shares"] * live.best_ask * 2.0
                 if pm_depth is None or pm_depth < required_depth:
                     return
                 self.db.complete_paper_one_legged(pos_id, "pm", live.best_ask, pending["shares"])
@@ -1108,7 +1108,7 @@ class SportsArbWatchRunner:
                 if not live or live.best_yes_ask <= 0 or live.best_yes_ask > pending["max_price"]:
                     return
                 ka_depth = self._ka_depth_at_ask(ka_ticker, live.best_yes_ask)
-                required_depth = pending["shares"] * live.best_yes_ask * 1.5
+                required_depth = pending["shares"] * live.best_yes_ask * 2.0
                 if ka_depth is None or ka_depth < required_depth:
                     return
                 self.db.complete_paper_one_legged(pos_id, "ka", live.best_yes_ask, pending["shares"])
