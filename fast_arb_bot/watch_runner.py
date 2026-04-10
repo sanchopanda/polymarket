@@ -2075,19 +2075,23 @@ class FastArbWatchRunner:
                     f"PnL от депозита: <b>${real_pnl:+.2f}</b>"
                 )
                 # Дельта reconciliation: посчитанный vs реальный баланс
-                try:
-                    if not self._reconciliation_baseline_reset:
-                        # Первый статус после рестарта — сохраняем свежий baseline
-                        self.engine.db.save_balance_snapshot(_pm, _k, source="startup")
-                        self._reconciliation_baseline_reset = True
-                    else:
-                        ok, delta, details = self.engine.db.check_balance_reconciliation(
-                            _pm, _k, threshold=self.RECONCILIATION_THRESHOLD,
-                        )
-                        lines.append(f"🔄 Дельта reconciliation: ${delta:+.2f}")
-                        self._handle_reconciliation(ok, delta, details, _pm, _k)
-                except Exception:
-                    pass
+                # Пропускаем если балансы ещё не получены с бирж
+                _has_balances = (fresh.get("polymarket") is not None
+                                 and fresh.get("kalshi") is not None)
+                if _has_balances:
+                    try:
+                        if not self._reconciliation_baseline_reset:
+                            # Первый статус после рестарта — сохраняем свежий baseline
+                            self.engine.db.save_balance_snapshot(_pm, _k, source="startup")
+                            self._reconciliation_baseline_reset = True
+                        else:
+                            ok, delta, details = self.engine.db.check_balance_reconciliation(
+                                _pm, _k, threshold=self.RECONCILIATION_THRESHOLD,
+                            )
+                            lines.append(f"🔄 Дельта reconciliation: ${delta:+.2f}")
+                            self._handle_reconciliation(ok, delta, details, _pm, _k)
+                    except Exception:
+                        pass
         return "\n".join(lines)
 
     def _watch_key(self, opp: CrossVenueOpportunity) -> str:
