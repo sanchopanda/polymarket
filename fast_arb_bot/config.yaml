@@ -35,7 +35,7 @@ fast_arb:
     BTC: 50
     ETH: 10
     SOL: 0.50
-    XRP: 0.01
+    XRP: 0.02
   balance_refresh_interval_seconds: 30  # как часто фоновый поток обновляет балансы
   deposits:
     pm_start: 195.22
