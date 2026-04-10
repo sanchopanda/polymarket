@@ -12,38 +12,55 @@ from __future__ import annotations
 import json
 import sys
 import time
-from collections import defaultdict
+import warnings
 from pathlib import Path
+
+warnings.filterwarnings("ignore")
 
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-import httpx
+import requests
+requests.packages.urllib3.disable_warnings()
+
 from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
 from real_arb_bot.clients import PolymarketTrader
 
 GAMMA = "https://gamma-api.polymarket.com"
+SESSION = requests.Session()
+SESSION.verify = False
 
 
-def main():
-    auto = "--yes" in sys.argv
+def _get(url, **kwargs) -> dict | list:
+    for attempt in range(4):
+        try:
+            r = SESSION.get(url, timeout=20, **kwargs)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            if attempt == 3:
+                raise
+            print(f"    retry {attempt+1}: {e}")
+            time.sleep(2 * (attempt + 1))
 
-    pm = PolymarketTrader()
-    client = pm._client
 
-    # Refresh + show balance
-    try:
-        client.update_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
-    except Exception:
-        pass
-    wallet_before = pm.get_balance()
-    print(f"Wallet: ${wallet_before:.4f}")
-
-    # Fetch trades
+def fetch_trades(client) -> list:
+    """Забирает все trades через py_clob_client с retry."""
     all_trades = []
     cursor = "MA=="
     for _ in range(30):
-        resp = client.get_trades(next_cursor=cursor)
+        resp = None
+        for attempt in range(4):
+            try:
+                resp = client.get_trades(next_cursor=cursor)
+                break
+            except Exception as e:
+                if attempt == 3:
+                    raise
+                print(f"    retry {attempt+1}: {e}")
+                time.sleep(3 * (attempt + 1))
+        if resp is None:
+            break
         if isinstance(resp, list):
             all_trades.extend(resp)
             break
@@ -54,16 +71,41 @@ def main():
             cursor = nc
         else:
             break
+    return all_trades
+
+
+def main():
+    auto = "--yes" in sys.argv
+
+    pm = PolymarketTrader()
+    client = pm._client
+
+    # Баланс до
+    try:
+        client.update_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
+    except Exception:
+        pass
+    wallet_before = pm.get_balance()
+    wallet_addr = pm._client._signer.address if hasattr(pm._client, "_signer") else ""
+    print(f"Wallet: ${wallet_before:.4f}  addr={wallet_addr[:10]}...")
+
+    # Загружаем trades через requests (минуем py_clob_client с таймаутом)
+    print("Загружаю историю trades...", flush=True)
+    try:
+        all_trades = fetch_trades(client)
+    except Exception as e:
+        print(f"Ошибка загрузки trades: {e}")
+        return
 
     now = time.time()
     confirmed = [
         t for t in all_trades
         if t.get("status") == "CONFIRMED"
-        and 3600 <= now - float(t.get("match_time", 0)) <= 2 * 86400  # от 1ч до 2д
+        and 3600 <= now - float(t.get("match_time", 0)) <= 2 * 86400
     ]
     print(f"\nCONFIRMED trades (1h–2d old): {len(confirmed)}")
 
-    # Group by market
+    # Группируем по рынку
     by_market: dict[str, dict] = {}
     for t in confirmed:
         mid = t["market"]
@@ -74,7 +116,7 @@ def main():
         by_market[mid]["shares"] += float(t["size"])
         by_market[mid]["outcome"] = t.get("outcome", "?")
 
-    # Check each market via Gamma
+    # Проверяем каждый рынок через Gamma
     winners = []
     total_cost = 0.0
     total_loss = 0.0
@@ -83,8 +125,7 @@ def main():
         aid = list(info["asset_ids"])[0]
         total_cost += info["cost"]
         try:
-            r = httpx.get(f"{GAMMA}/markets?clob_token_ids={aid}", timeout=10)
-            gdata = r.json()
+            gdata = _get(f"{GAMMA}/markets", params={"clob_token_ids": aid})
             if not gdata:
                 print(f"  ? no gamma data for {mid[:20]}...")
                 continue
@@ -107,7 +148,7 @@ def main():
             tag = "WIN" if won else ("LOSS" if resolved else "OPEN")
 
             print(f"  [{tag}] {q}")
-            print(f"        cost=${info['cost']:.2f} shares={info['shares']:.1f} our={info['outcome']} winner={winner} gamma_id={gamma_id}")
+            print(f"        cost=${info['cost']:.2f} shares={info['shares']:.1f} our={info['outcome']} winner={winner} id={gamma_id}")
 
             if won:
                 winners.append({
@@ -155,7 +196,7 @@ def main():
             print(f"    EXCEPTION: {e}")
         time.sleep(3)
 
-    # Final balance
+    # Баланс после
     try:
         client.update_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
     except Exception:
