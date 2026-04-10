@@ -356,8 +356,6 @@ class SportsArbWatchRunner:
                 f"[{pair.sport.upper()}] {players_str} | {game_dt}"
             )
 
-        if self.tg and new_pair_descriptions:
-            self.tg.notify_scan(new_pair_descriptions, len(self.watchlist))
 
         # Remove pairs that are gone or match_over
         to_remove = [
@@ -991,6 +989,24 @@ class SportsArbWatchRunner:
                         f"  {leg_pm_player}@PM={leg_pm_price:.3f} | Kalshi depth insufficient\n"
                         f"  edge={best_edge:.4f} shares={shares} | {depth_str}"
                     )
+                    if self.tg:
+                        self.tg.notify_bet(
+                            pos_id=pos_id,
+                            pm_slug=pair.pm_event.slug,
+                            leg_pm_player=leg_pm_player,
+                            leg_pm_price=leg_pm_price,
+                            leg_ka_player=leg_ka_player,
+                            leg_ka_ticker=leg_ka_ticker,
+                            leg_ka_price=leg_ka_price,
+                            cost=best_cost,
+                            edge=best_edge,
+                            shares=shares,
+                            total_cost=total_cost,
+                            expected_profit=expected_profit,
+                            pm_depth=pm_depth,
+                            ka_depth=ka_depth,
+                            lock_valid=False,
+                        )
             elif ka_has_depth and not pm_has_depth:
                 # Only Kalshi liquid → one-legged Kalshi
                 # Не открываем если уже есть открытая одноногая Ka для этого матча
@@ -1013,6 +1029,24 @@ class SportsArbWatchRunner:
                         f"  {leg_ka_player}@Kalshi={leg_ka_price:.3f} | PM depth insufficient\n"
                         f"  edge={best_edge:.4f} shares={shares} | {depth_str}"
                     )
+                    if self.tg:
+                        self.tg.notify_bet(
+                            pos_id=pos_id,
+                            pm_slug=pair.pm_event.slug,
+                            leg_pm_player=leg_pm_player,
+                            leg_pm_price=leg_pm_price,
+                            leg_ka_player=leg_ka_player,
+                            leg_ka_ticker=leg_ka_ticker,
+                            leg_ka_price=leg_ka_price,
+                            cost=best_cost,
+                            edge=best_edge,
+                            shares=shares,
+                            total_cost=total_cost,
+                            expected_profit=expected_profit,
+                            pm_depth=pm_depth,
+                            ka_depth=ka_depth,
+                            lock_valid=False,
+                        )
             else:
                 # Neither liquid
                 skip_state = (round(pm_depth or 0, 1), round(ka_depth, 1))
@@ -1527,9 +1561,12 @@ class SportsArbWatchRunner:
                 title = "Открытые real позиции: 0" if mode == "real" else "Открытые paper позиции: 0"
                 lines.append(title)
 
+        sports_active = sorted(set(wp.pair.sport.upper() for wp in self.watchlist.values()))
+        sports_str = ", ".join(sports_active) if sports_active else "—"
         lines = [
             f"🎾 <b>sports_arb_bot</b> [{ts}]",
-            f"Пар: {len(self.watchlist)} | Открытых: {len(open_pos)} (paper: {len(paper_open)}, real: {len(real_open)})",
+            f"Пар: {len(self.watchlist)} | Спорты: {sports_str}",
+            f"Открытых: {len(open_pos)} (paper: {len(paper_open)}, real: {len(real_open)})",
         ]
 
         if self._real_trading:
