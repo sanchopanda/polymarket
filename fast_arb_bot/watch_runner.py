@@ -2082,6 +2082,9 @@ class FastArbWatchRunner:
                             _pm, _k, threshold=self.RECONCILIATION_THRESHOLD,
                         )
                         lines.append(f"🔄 Дельта reconciliation: ${delta:+.2f}")
+                        # Если halted и дельта уже в норме — форсируем немедленную проверку
+                        if self._reconciliation_halted and abs(delta) <= self.RECONCILIATION_THRESHOLD:
+                            self._last_reconciliation_ts = 0
                 except Exception:
                     pass
         return "\n".join(lines)
