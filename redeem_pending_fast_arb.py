@@ -20,6 +20,7 @@ def _pending_redeem_rows(db: RealArbDB, position_id: str | None) -> list:
               AND (
                     (venue_yes='polymarket' AND polymarket_result='yes')
                  OR (venue_no='polymarket' AND polymarket_result='no')
+                 OR polymarket_result='won'
               )
             """,
             (position_id,),
@@ -35,6 +36,7 @@ def _pending_redeem_rows(db: RealArbDB, position_id: str | None) -> list:
           AND (
                 (venue_yes='polymarket' AND polymarket_result='yes')
              OR (venue_no='polymarket' AND polymarket_result='no')
+             OR polymarket_result='won'
           )
         ORDER BY resolved_at ASC
         """

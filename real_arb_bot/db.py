@@ -13,7 +13,7 @@ from real_arb_bot.clients import OrderResult
 
 class RealArbDB:
     def __init__(self, path: str) -> None:
-        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self._migrate()
 
@@ -109,6 +109,21 @@ class RealArbDB:
             );
             """
         )
+        # Таблица для снапшотов баланса (reconciliation)
+        self.conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS balance_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                pm_balance REAL NOT NULL,
+                k_balance REAL NOT NULL,
+                open_cost REAL NOT NULL DEFAULT 0,
+                resolved_pnl REAL NOT NULL DEFAULT 0,
+                resolved_count INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'periodic'
+            );
+            """
+        )
         # Таблица для хранения траектории edge по тикам
         self.conn.executescript(
             """
@@ -162,6 +177,8 @@ class RealArbDB:
             ("edge_first_10pct", "TEXT"),
             ("edge_first_15pct", "TEXT"),
             ("edge_first_20pct", "TEXT"),
+            # Entry-time Binance distance
+            ("entry_binance_distance_pct", "REAL"),
         ]:
             try:
                 self.conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {definition}")
@@ -183,6 +200,7 @@ class RealArbDB:
         yes_leg=None,
         no_leg=None,
         pm_price_to_beat: float | None = None,
+        entry_binance_distance_pct: float | None = None,
     ) -> CrossPosition:
         pos_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
@@ -207,10 +225,10 @@ class RealArbDB:
                 kalshi_order_id, kalshi_fill_price, kalshi_fill_shares, kalshi_order_fee, kalshi_order_latency_ms, kalshi_order_status,
                 polymarket_order_id, polymarket_fill_price, polymarket_fill_shares, polymarket_order_fee, polymarket_order_latency_ms, polymarket_order_status,
                 execution_status, execution_started_at, execution_completed_at,
-                pm_price_to_beat
+                pm_price_to_beat, entry_binance_distance_pct
             ) VALUES (
                 ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
             )
             """,
             (
@@ -271,6 +289,7 @@ class RealArbDB:
                 now,
                 now,
                 pm_price_to_beat,
+                entry_binance_distance_pct,
             ),
         )
         self.conn.commit()
@@ -288,6 +307,7 @@ class RealArbDB:
         self,
         opportunity: CrossVenueOpportunity,
         pm_price_to_beat: float | None = None,
+        entry_binance_distance_pct: float | None = None,
     ) -> CrossPosition:
         pos_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
@@ -298,8 +318,9 @@ class RealArbDB:
                 polymarket_title, kalshi_title, match_score, expiry_delta_seconds,
                 polymarket_reference_price, kalshi_reference_price, polymarket_rules, kalshi_rules,
                 shares, yes_ask, no_ask, ask_sum, total_cost, expected_profit,
-                opened_at, status, execution_status, is_paper, pm_price_to_beat
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                opened_at, status, execution_status, is_paper, pm_price_to_beat,
+                entry_binance_distance_pct
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 pos_id,
@@ -326,6 +347,7 @@ class RealArbDB:
                 opportunity.total_cost,
                 opportunity.expected_profit,
                 now, "open", "paper", 1, pm_price_to_beat,
+                entry_binance_distance_pct,
             ),
         )
         self.conn.commit()
@@ -605,6 +627,102 @@ class RealArbDB:
             ),
         )
         self.conn.commit()
+
+    # ── Balance reconciliation ──────────────────────────────────────────
+
+    def save_balance_snapshot(
+        self,
+        pm_balance: float,
+        k_balance: float,
+        source: str = "periodic",
+    ) -> int:
+        """Сохраняет текущие балансы + состояние позиций. Возвращает id снапшота."""
+        now = datetime.utcnow().isoformat()
+        r = self.conn.execute(
+            "SELECT COALESCE(SUM(CASE "
+            "WHEN execution_status='one_legged_kalshi' "
+            "    THEN kalshi_fill_shares * kalshi_fill_price + COALESCE(kalshi_order_fee, 0) "
+            "WHEN execution_status='one_legged_polymarket' "
+            "    THEN polymarket_fill_shares * polymarket_fill_price + COALESCE(polymarket_order_fee, 0) "
+            "ELSE total_cost END), 0) FROM positions WHERE status='open' AND is_paper=0"
+        ).fetchone()
+        open_cost = float(r[0])
+        r2 = self.conn.execute(
+            "SELECT COALESCE(SUM(actual_pnl), 0), COUNT(*) FROM positions "
+            "WHERE status='resolved' AND is_paper=0"
+        ).fetchone()
+        resolved_pnl = float(r2[0])
+        resolved_count = int(r2[1])
+
+        cursor = self.conn.execute(
+            "INSERT INTO balance_snapshots "
+            "(ts, pm_balance, k_balance, open_cost, resolved_pnl, resolved_count, source) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (now, pm_balance, k_balance, open_cost, resolved_pnl, resolved_count, source),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_last_balance_snapshot(self) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM balance_snapshots ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+    def check_balance_reconciliation(
+        self,
+        pm_balance: float,
+        k_balance: float,
+        threshold: float = 5.0,
+    ) -> tuple[bool, float, str]:
+        """Сравнивает текущие балансы с последним снапшотом + изменения в БД.
+
+        Возвращает (ok, delta, details).
+        ok=True если расхождение в пределах порога.
+        """
+        snap = self.get_last_balance_snapshot()
+        if snap is None:
+            return True, 0.0, "no_previous_snapshot"
+
+        # Текущее состояние
+        r = self.conn.execute(
+            "SELECT COALESCE(SUM(CASE "
+            "WHEN execution_status='one_legged_kalshi' "
+            "    THEN kalshi_fill_shares * kalshi_fill_price + COALESCE(kalshi_order_fee, 0) "
+            "WHEN execution_status='one_legged_polymarket' "
+            "    THEN polymarket_fill_shares * polymarket_fill_price + COALESCE(polymarket_order_fee, 0) "
+            "ELSE total_cost END), 0) FROM positions WHERE status='open' AND is_paper=0"
+        ).fetchone()
+        current_open_cost = float(r[0])
+        r2 = self.conn.execute(
+            "SELECT COALESCE(SUM(actual_pnl), 0), COUNT(*) FROM positions "
+            "WHERE status='resolved' AND is_paper=0"
+        ).fetchone()
+        current_resolved_pnl = float(r2[0])
+        current_resolved_count = int(r2[1])
+
+        # Дельта resolved PnL с момента снапшота
+        pnl_change = current_resolved_pnl - snap["resolved_pnl"]
+        # Дельта open cost
+        open_cost_change = current_open_cost - snap["open_cost"]
+
+        # Ожидаемое изменение баланса = pnl_change - open_cost_change
+        # (resolved PnL добавляет к балансу, новые open позиции уменьшают)
+        prev_total = snap["pm_balance"] + snap["k_balance"]
+        current_total = pm_balance + k_balance
+        expected_total = prev_total + pnl_change - open_cost_change
+
+        delta = current_total - expected_total
+
+        new_resolved = current_resolved_count - snap["resolved_count"]
+        details = (
+            f"prev={prev_total:.2f} curr={current_total:.2f} "
+            f"expected={expected_total:.2f} delta={delta:+.2f} | "
+            f"pnl_change={pnl_change:+.2f} open_cost_change={open_cost_change:+.2f} "
+            f"new_resolved={new_resolved}"
+        )
+
+        return abs(delta) <= threshold, delta, details
 
     # ── Аудит ──────────────────────────────────────────────────────────
 

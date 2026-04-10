@@ -136,6 +136,26 @@ class FastArbExecutor:
         p_filled = p_result is not None and p_result.shares_matched > 0
 
         if k_filled and p_filled:
+            # Если Kalshi рестингует — часть акций ещё не куплена, позиция несбалансирована.
+            # Записываем как one_legged_polymarket чтобы sync loop отслеживал рестинг-ордер
+            # и дозаполнил до both_filled когда Kalshi исполнится полностью.
+            if k_result.status == "resting":
+                k_fill_pct = k_result.shares_matched / kalshi_count if kalshi_count > 0 else 1.0
+                self.db.audit("order_partial_resting", None, {
+                    "venue": "kalshi",
+                    "filled": k_result.shares_matched,
+                    "requested": kalshi_count,
+                    "fill_pct": round(k_fill_pct, 4),
+                    "action": "downgrade_to_one_legged_polymarket",
+                })
+                print(
+                    f"[executor] Kalshi partial resting: {k_result.shares_matched}/{kalshi_count} "
+                    f"({k_fill_pct:.0%}) → one_legged_polymarket"
+                )
+                return FastExecutionResult(
+                    False, k_result, p_result, "one_legged_polymarket",
+                    f"kalshi_partial_resting: {k_result.shares_matched}/{kalshi_count} ({k_fill_pct:.0%})",
+                )
             return FastExecutionResult(True, k_result, p_result, "both_filled")
 
         elif k_filled and not p_filled:

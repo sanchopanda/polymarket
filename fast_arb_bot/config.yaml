@@ -18,8 +18,8 @@ safety:
   max_leg_price: 0.90
   blocked_leg_price_min: 0.0
   blocked_leg_price_max: 0.0
-  min_balance_polymarket: 30.0
-  min_balance_kalshi: 30.0
+  min_balance_polymarket: 0.0
+  min_balance_kalshi: 0.0
   cooldown_seconds: 10.0
   require_confirmation: false
   dry_run: false
@@ -31,8 +31,13 @@ safety:
 fast_arb:
   budget_usd: 60.0           # базовый бюджет (растёт с выигрышами)
   max_realized_loss_usd: 60.0  # максимальные реализованные потери — стоп
+  deposits:
+    pm_start: 195.22
+    k_start: 65.25
+    k_topups: 39.59
   order_book_min_liquidity_ratio: 2.0
   scan_interval_seconds: 180
+  max_kalshi_drift_cents: 5   # отмена если Kalshi REST-цена выше WS-снапшота > N центов
   edge_monitor:
     signal_threshold: 0.25     # edge >= 25% → сигнал на скидывание
     monitor_seconds: 300       # мониторим последние 5 минут до expiry (15m рынки)

@@ -73,6 +73,8 @@ class FastArbWatchRunner:
     MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     STATUS_INTERVAL_SECONDS = 15
     HIGH_EDGE_THRESHOLD = 0.15
+    RECONCILIATION_THRESHOLD = 5.0  # $5 допустимое расхождение
+    RECONCILIATION_AFTER_RESOLVE_DELAY = 30  # 30 сек после резолва — проверяем
 
     def __init__(self, engine: RealArbEngine, dry_run: bool = False) -> None:
         self.engine = engine
@@ -138,6 +140,19 @@ class FastArbWatchRunner:
         self._chainlink = None
         self._danger_exits: dict[str, _DangerExit] = {}  # legacy state, unused in normal loop
 
+        # Balance reconciliation
+        self._last_reconciliation_ts: float = time.time()  # skip first 10 min after startup
+        self._reconciliation_halted: bool = False
+        self._reconciliation_consecutive_fails: int = 0
+        self._started_as_real: bool = not self.dry_run  # для статуса после стопа
+
+        # Deposits tracking
+        deposits_cfg = fast_cfg.get("deposits", {})
+        self._deposit_pm_start = float(deposits_cfg.get("pm_start", 0))
+        self._deposit_k_start = float(deposits_cfg.get("k_start", 0))
+        self._deposit_k_topups = float(deposits_cfg.get("k_topups", 0))
+        self._total_deposited = self._deposit_pm_start + self._deposit_k_start + self._deposit_k_topups
+
         # Подменяем функцию статуса в Telegram-нотификаторе
         if engine.notifier:
             engine.notifier._get_status = self._get_status_text
@@ -168,6 +183,7 @@ class FastArbWatchRunner:
                 self._monitor_one_leg_pm_cancel_reenter()
                 self._monitor_paper_one_legged()
                 self._monitor_edge_divergence()
+                self._balance_reconciliation_check()
                 time.sleep(0.5)
         except KeyboardInterrupt:
             print("\n[fast-arb] Stopped.")
@@ -303,6 +319,8 @@ class FastArbWatchRunner:
                     continue
                 if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
                     continue
+                if self._kalshi_drifted(opp, yes_leg, no_leg):
+                    continue
                 if self._edge_above_max_allowed(executed.yes_ask, executed.no_ask):
                     continue
                 if executed.expected_profit <= 0:
@@ -412,16 +430,6 @@ class FastArbWatchRunner:
             self._maybe_complete_one_legged(opp, matched)
             return
 
-        # 2. Лимит одновременных позиций (не применяется в paper-режиме)
-        if not self.dry_run:
-            open_count = len(self.engine.db.get_open_positions())
-            if open_count >= self.engine.trading["max_open_pairs"]:
-                self._skip_log(
-                    pair_key,
-                    f"[fast-arb][SKIP] {opp.symbol} | reason=max_open_pairs ({open_count})",
-                )
-                return
-
         # 3. Быстрая оценка edge из WS-данных
         yes_book = self.live_books.get(matched.polymarket.yes_token_id or "")
         no_book = self.live_books.get(matched.polymarket.no_token_id or "")
@@ -465,15 +473,21 @@ class FastArbWatchRunner:
         # 6. Balance check (пропускаем в paper-режиме — реальные деньги не тратятся)
         if not self.dry_run:
             _bal = self._cached_balances
-            _min_pm = float(self.engine.safety.min_balance_polymarket)
-            _min_k = float(self.engine.safety.min_balance_kalshi)
             _pm_bal = _bal.get("polymarket") or 0.0
             _k_bal = _bal.get("kalshi") or 0.0
-            if _pm_bal > 0 and _pm_bal < _min_pm:
-                self._skip_log(pair_key, f"[fast-arb][HALT] {opp.symbol} | pm_balance_low (${_pm_bal:.2f} < ${_min_pm:.2f})")
+            _ask_sum = opp.ask_sum or 1.0
+            _buffer = 2.0
+            if opp.buy_yes_venue == "kalshi":
+                _k_leg_cost = (opp.yes_ask / _ask_sum) * opp.total_cost
+                _pm_leg_cost = (opp.no_ask / _ask_sum) * opp.total_cost
+            else:
+                _pm_leg_cost = (opp.yes_ask / _ask_sum) * opp.total_cost
+                _k_leg_cost = (opp.no_ask / _ask_sum) * opp.total_cost
+            if _k_bal < _k_leg_cost + _buffer:
+                self._skip_log(pair_key, f"[fast-arb][HALT] {opp.symbol} | kalshi_balance_low (${_k_bal:.2f} < leg ${_k_leg_cost:.2f} + ${_buffer:.0f})")
                 return
-            if _k_bal > 0 and _k_bal < _min_k:
-                self._skip_log(pair_key, f"[fast-arb][HALT] {opp.symbol} | kalshi_balance_low (${_k_bal:.2f} < ${_min_k:.2f})")
+            if _pm_bal < _pm_leg_cost + _buffer:
+                self._skip_log(pair_key, f"[fast-arb][HALT] {opp.symbol} | pm_balance_low (${_pm_bal:.2f} < leg ${_pm_leg_cost:.2f} + ${_buffer:.0f})")
                 return
 
         # 7. Loss limit check (пропускаем в paper-режиме)
@@ -514,6 +528,14 @@ class FastArbWatchRunner:
                 self._skip_log(
                     pair_key,
                     f"[fast-arb][SKIP] {opp.symbol} | edge_disappeared ({executed.edge_per_share:.4f})",
+                )
+                return
+            if self._kalshi_drifted(opp, yes_leg, no_leg):
+                self._skip_log(
+                    pair_key,
+                    f"[fast-arb][SKIP] {opp.symbol} | kalshi_price_drifted "
+                    f"(ws={opp.yes_ask if opp.buy_yes_venue == 'kalshi' else opp.no_ask:.4f} "
+                    f"rest={yes_leg.best_ask if opp.buy_yes_venue == 'kalshi' else no_leg.best_ask:.4f})",
                 )
                 return
             if not self._prices_within_bounds(executed.yes_ask, executed.no_ask):
@@ -601,6 +623,7 @@ class FastArbWatchRunner:
         kalshi_res = result.kalshi_order or _empty_order("no_order")
         pm_res = result.polymarket_order or _empty_order("no_order")
 
+        _, _entry_binance_dist = self._get_binance_data(opp.symbol, opp.kalshi_reference_price)
         opened = self.engine.db.open_position(
             opportunity=opp,
             kalshi_result=kalshi_res,
@@ -612,6 +635,7 @@ class FastArbWatchRunner:
             yes_leg=yes_leg,
             no_leg=no_leg,
             pm_price_to_beat=_p_tgt,
+            entry_binance_distance_pct=_entry_binance_dist,
         )
         if result.execution_status == "both_filled":
             self._cancel_redundant_one_legged_polymarket_orders(
@@ -674,6 +698,8 @@ class FastArbWatchRunner:
             if executed is not None:
                 if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
                     return
+                if self._kalshi_drifted(opp, yes_leg, no_leg):
+                    return
                 if not self._prices_within_bounds(executed.yes_ask, executed.no_ask):
                     return
                 if self._edge_above_max_allowed(executed.yes_ask, executed.no_ask):
@@ -692,7 +718,12 @@ class FastArbWatchRunner:
         _tgt_str: str = "",
     ) -> None:
         """Открывает бумажную позицию и уведомляет в Telegram."""
-        opened_paper = self.engine.db.open_paper_position(opp, pm_price_to_beat=_p_tgt)
+        _, _entry_binance_dist = self._get_binance_data(opp.symbol, opp.kalshi_reference_price)
+        opened_paper = self.engine.db.open_paper_position(
+            opp,
+            pm_price_to_beat=_p_tgt,
+            entry_binance_distance_pct=_entry_binance_dist,
+        )
         print(
             f"[fast-arb][PAPER] {opp.symbol} | {opp.buy_yes_venue}:YES@{opp.yes_ask:.4f} "
             f"+ {opp.buy_no_venue}:NO@{opp.no_ask:.4f} | edge={opp.edge_per_share:.4f}{_tgt_str}"
@@ -740,6 +771,8 @@ class FastArbWatchRunner:
         if executed is not None:
             if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
                 return
+            if self._kalshi_drifted(opp, yes_leg, no_leg):
+                return
             if not self._prices_within_bounds(executed.yes_ask, executed.no_ask):
                 return
             if self._edge_above_max_allowed(executed.yes_ask, executed.no_ask):
@@ -754,6 +787,9 @@ class FastArbWatchRunner:
                 self._open_paper_from_opp(executed, _k_tgt, _p_tgt)
         else:
             with self._paper_lock:
+                max_entries = int(self.engine.trading.get("max_entries_per_pair", 1))
+                if self._count_open_paper_for_pair(opp.pair_key) >= max_entries:
+                    return
                 self._maybe_open_paper_one_legged(opp, yes_leg, no_leg)
 
     def _maybe_open_paper_one_legged(
@@ -878,14 +914,12 @@ class FastArbWatchRunner:
 
         positions = self.engine.db.get_open_positions()
         for pos in positions:
-            if not pos.is_paper:
-                continue
             row = self.engine.db.conn.execute(
                 "SELECT execution_status, kalshi_reference_price FROM positions WHERE id=?",
                 (pos.id,),
             ).fetchone()
             exec_status = row["execution_status"] if row else None
-            if exec_status not in ("paper", "paper_both_filled"):
+            if exec_status not in ("paper", "paper_both_filled", "both_filled"):
                 continue
 
             seconds_to_expiry = (pos.expiry - now).total_seconds()
@@ -1900,7 +1934,7 @@ class FastArbWatchRunner:
 
     def _get_status_text(self) -> str:
         db = self.engine.db
-        is_real = not self.dry_run
+        is_real = self._started_as_real
 
         def _fetch_stats(paper_flag: int) -> tuple:
             r = db.conn.execute(
@@ -1969,18 +2003,17 @@ class FastArbWatchRunner:
         bal = self._cached_balances
         pm_bal = bal.get("polymarket")
         k_bal = bal.get("kalshi")
-        bal_str = ""
-        if pm_bal is not None or k_bal is not None:
-            pm_s = f"${pm_bal:.2f}" if pm_bal is not None else "N/A"
-            k_s = f"${k_bal:.2f}" if k_bal is not None else "N/A"
-            bal_str = f"💵 PM: {pm_s} | Kalshi: {k_s}"
+        pm_s = f"${pm_bal:.2f}" if pm_bal is not None else "N/A"
+        k_s = f"${k_bal:.2f}" if k_bal is not None else "N/A"
+        bal_str = f"💵 PM: {pm_s} | Kalshi: {k_s}"
 
         if is_real:
             wr = (wins / total * 100) if total > 0 else 0
             realized_pnl = pnl
             effective_budget = self.budget_usd + max(0.0, realized_pnl)
+            header = "🔴 <b>Fast Arb (REAL)</b>" if not self.dry_run else "⛔ <b>Fast Arb (HALTED)</b>"
             lines = [
-                "🔴 <b>Fast Arb (REAL)</b>",
+                header,
                 "",
                 f"📊 <b>Real:</b> {total} сделок | WR: <b>{wr:.0f}%</b> ({wins}W / {losses}L)",
                 f"💰 <b>P&L real:</b> <b>${pnl:+.2f}</b>",
@@ -1992,6 +2025,8 @@ class FastArbWatchRunner:
                 lines.append(f"🦵 Одноногих real: {one_leg_real_cnt}")
             if open_real_cnt:
                 lines.append(f"📂 Открытых real: {open_real_cnt} (${open_real_cost:.2f})")
+            if self._reconciliation_halted:
+                lines.append("🚨 <b>ОСТАНОВЛЕН: расхождение балансов!</b>")
             lines.append("")
             p_wr = (p_wins / p_total * 100) if p_total > 0 else 0
             lines.append(f"📝 <b>Paper:</b> {p_total} сделок | WR: {p_wr:.0f}% | P&L: ${p_pnl:+.2f}")
@@ -2023,6 +2058,32 @@ class FastArbWatchRunner:
         lines.append(f"🔍 Пар в мониторинге: {len(self.watch_by_pair_key)}")
         if is_real:
             lines.append(f"💼 Бюджет: ${effective_budget:.2f} (стоп: -${self.max_realized_loss_usd:.0f})")
+            if self._total_deposited > 0:
+                # Свежие балансы чтобы не рассинхрониться с open_cost из БД
+                try:
+                    fresh = self.engine.get_real_balances()
+                    _pm = fresh.get("polymarket") or pm_bal or 0
+                    _k = fresh.get("kalshi") or k_bal or 0
+                except Exception:
+                    _pm = pm_bal or 0
+                    _k = k_bal or 0
+                current_total = _pm + _k + open_real_cost
+                real_pnl = current_total - self._total_deposited
+                lines.append(
+                    f"💸 Депозит: ${self._total_deposited:.0f} | "
+                    f"Сейчас: ${current_total:.2f} | "
+                    f"PnL от депозита: <b>${real_pnl:+.2f}</b>"
+                )
+                # Дельта reconciliation: посчитанный vs реальный баланс
+                try:
+                    snap = self.engine.db.get_last_balance_snapshot()
+                    if snap:
+                        _, delta, _ = self.engine.db.check_balance_reconciliation(
+                            _pm, _k, threshold=self.RECONCILIATION_THRESHOLD,
+                        )
+                        lines.append(f"🔄 Дельта reconciliation: ${delta:+.2f}")
+                except Exception:
+                    pass
         return "\n".join(lines)
 
     def _watch_key(self, opp: CrossVenueOpportunity) -> str:
@@ -2113,6 +2174,24 @@ class FastArbWatchRunner:
             return False
         polarized = (yes_price > 0.5) != (no_price > 0.5)
         return not polarized
+
+    def _kalshi_drifted(
+        self,
+        opp: CrossVenueOpportunity,
+        yes_leg: ExecutionLegInfo,
+        no_leg: ExecutionLegInfo,
+    ) -> bool:
+        """True если Kalshi-цена на REST выше WS-снапшота больше чем на порог."""
+        max_drift = float(
+            self.engine.config.get("fast_arb", {}).get("max_kalshi_drift_cents", 5)
+        ) / 100.0
+        if opp.buy_yes_venue == "kalshi":
+            ws_ask = opp.yes_ask
+            rest_ask = yes_leg.best_ask
+        else:
+            ws_ask = opp.no_ask
+            rest_ask = no_leg.best_ask
+        return rest_ask > ws_ask + max_drift
 
     def _build_pm_completion_candidates_from_asks(
         self,
@@ -2495,6 +2574,9 @@ class FastArbWatchRunner:
             pm_cost = pm_shares * pm_price + pm_fee
 
             pm_payout_real = 0.0
+            redeem_tx = None
+            redeem_gas = None
+            redeem_ms = None
             if pm_won and pm_shares > 0:
                 pm_market_id = (
                     position.market_yes if position.venue_yes == "polymarket"
@@ -2502,15 +2584,19 @@ class FastArbWatchRunner:
                 )
                 print(f"[fast-arb][resolve] Polymarket redeem (one_legged): {pm_market_id}")
                 redeem = self.engine.pm_trader.redeem(pm_market_id)
-                if not redeem.success and not redeem.pending:
-                    print(f"[fast-arb][resolve] redeem failed: {redeem.error}, retry later")
+                if not redeem.success:
+                    print(f"[fast-arb][resolve] redeem {'pending' if redeem.pending else 'failed'}: {redeem.error}, retry later")
                     self.engine.db.audit("redeem_retry_pending", position.id, {
                         "symbol": position.symbol,
                         "market_id": pm_market_id,
                         "error": redeem.error or "unknown_error",
+                        "pending": redeem.pending,
                     })
-                    return
-                pm_payout_real = redeem.payout_usdc if redeem.success else 0.0
+                    return  # НЕ резолвим пока redeem не успешен
+                pm_payout_real = redeem.payout_usdc
+                redeem_tx = redeem.tx_hash
+                redeem_gas = redeem.gas_cost_pol
+                redeem_ms = redeem.total_ms
 
             pnl = (pm_payout_real if pm_won and pm_shares > 0 else 0.0) - pm_cost
             pm_close_price = resolver._fetch_pm_close_price(position)
@@ -2525,6 +2611,9 @@ class FastArbWatchRunner:
                 lock_valid=False,
                 polymarket_snapshot_resolved=pm_snapshot,
                 pm_close_price=pm_close_price,
+                polymarket_redeem_tx=redeem_tx,
+                polymarket_redeem_gas_cost=redeem_gas,
+                polymarket_redeem_ms=redeem_ms,
             )
             close_str = f" | PM.close={pm_close_price:.4f}" if pm_close_price is not None else ""
             tag = f"WIN +${pnl:.2f}" if pnl > 0 else f"LOSE ${pnl:.2f}"
@@ -2563,6 +2652,132 @@ class FastArbWatchRunner:
                 kalshi_ticker=_k_ticker,
                 reply_to_msg_id=_tg_msg_id,
             )
+
+    # ── Balance reconciliation ──────────────────────────────────────────
+
+    def _balance_reconciliation_check(self) -> None:
+        """Сверяет реальные балансы с ожидаемыми по БД.
+
+        Запускается через 30 сек после каждого резолва.
+        При halted — проверяет каждые 60 сек для авто-восстановления.
+        """
+        from datetime import datetime
+
+        try:
+            last_resolve = self.engine.db.conn.execute(
+                "SELECT MAX(resolved_at) FROM positions WHERE status='resolved' AND is_paper=0"
+            ).fetchone()[0]
+        except Exception:
+            return
+
+        now_ts = time.time()
+
+        if self._reconciliation_halted:
+            # В halted — проверяем каждые 60 сек для восстановления
+            if now_ts - self._last_reconciliation_ts < 60:
+                return
+        else:
+            # Нормальный режим — проверяем через 30 сек после резолва
+            if not last_resolve:
+                return
+            resolve_age = (datetime.utcnow() - datetime.fromisoformat(last_resolve)).total_seconds()
+            # Проверяем в окне [30, 90] секунд после резолва (один раз)
+            if resolve_age < self.RECONCILIATION_AFTER_RESOLVE_DELAY:
+                return  # ещё рано
+            if resolve_age > 90:
+                return  # уже проверяли или слишком давно
+            # Не проверять повторно для того же резолва
+            if self._last_reconciliation_ts > now_ts - 120:
+                return
+
+        self._last_reconciliation_ts = now_ts
+
+        # Свежие балансы
+        try:
+            self._cached_balances = self.engine.get_real_balances()
+        except Exception:
+            return
+        bal = self._cached_balances
+        pm_bal = bal.get("polymarket")
+        k_bal = bal.get("kalshi")
+        if pm_bal is None or k_bal is None:
+            return
+
+        try:
+            snap = self.engine.db.get_last_balance_snapshot()
+            if snap is None:
+                self.engine.db.save_balance_snapshot(pm_bal, k_bal, source="startup")
+                print(f"[reconciliation] Initial snapshot saved: PM=${pm_bal:.2f} K=${k_bal:.2f}")
+                return
+
+            ok, delta, details = self.engine.db.check_balance_reconciliation(
+                pm_bal, k_bal, threshold=self.RECONCILIATION_THRESHOLD,
+            )
+
+            if ok:
+                # Всё ок — обновляем снапшот и сбрасываем счётчик
+                self._reconciliation_consecutive_fails = 0
+                self.engine.db.save_balance_snapshot(pm_bal, k_bal, source="periodic")
+
+                # Авто-восстановление если был стоп
+                if self._reconciliation_halted:
+                    self.dry_run = False
+                    self.engine.safety.dry_run = False
+                    self._reconciliation_halted = False
+                    print(f"[reconciliation] RECOVERED — real mode restored")
+                    self.engine.db.audit("balance_reconciliation_recovered", None, {
+                        "delta": delta, "pm_balance": pm_bal, "k_balance": k_bal,
+                    })
+                    if self.engine.notifier:
+                        try:
+                            self.engine.notifier.send(
+                                f"✅ <b>BALANCE OK — REAL MODE RESTORED</b>\n"
+                                f"Дельта: ${delta:+.2f}\n"
+                                f"PM: ${pm_bal:.2f} | Kalshi: ${k_bal:.2f}"
+                            )
+                        except Exception:
+                            pass
+                return
+
+            # Расхождение — сразу останавливаем
+            msg = (
+                f"🚨 <b>BALANCE MISMATCH — REAL STOPPED</b>\n\n"
+                f"Расхождение: <b>${delta:+.2f}</b> (порог: ${self.RECONCILIATION_THRESHOLD:.0f})\n"
+                f"PM: ${pm_bal:.2f} | Kalshi: ${k_bal:.2f}\n"
+                f"{details}\n\n"
+                f"Требуется ручная проверка!"
+            )
+            print(f"[reconciliation] HALT: {details}")
+
+            self.dry_run = True
+            self.engine.safety.dry_run = True
+            self._reconciliation_halted = True
+
+            self.engine.db.save_balance_snapshot(pm_bal, k_bal, source="mismatch")
+            self.engine.db.audit("balance_mismatch", None, {
+                "delta": delta, "details": details,
+                "pm_balance": pm_bal, "k_balance": k_bal,
+            })
+
+            if self.engine.notifier:
+                try:
+                    self.engine.notifier.send(msg)
+                except Exception as e:
+                    print(f"[reconciliation] Failed to send alert: {e}")
+
+        except Exception as e:
+            print(f"[reconciliation] Error: {e}")
+
+    def _save_post_trade_snapshot(self) -> None:
+        """Сохраняет снапшот после трейда для reconciliation."""
+        bal = self._cached_balances
+        pm_bal = bal.get("polymarket")
+        k_bal = bal.get("kalshi")
+        if pm_bal is not None and k_bal is not None:
+            try:
+                self.engine.db.save_balance_snapshot(pm_bal, k_bal, source="post_trade")
+            except Exception as e:
+                print(f"[reconciliation] Snapshot error: {e}")
 
     def _print_status(self) -> None:
         self._resolve_one_legged_positions()
