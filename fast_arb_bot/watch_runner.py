@@ -84,6 +84,8 @@ class FastArbWatchRunner:
         self.max_realized_loss_usd: float = float(fast_cfg.get("max_realized_loss_usd", 20.0))
         self.liquidity_ratio: float = float(fast_cfg.get("order_book_min_liquidity_ratio", 1.5))
         self.scan_interval: float = float(fast_cfg.get("scan_interval_seconds", 60.0))
+        self.max_target_gap_pct: float = float(fast_cfg.get("max_target_gap_pct", 0.15))
+        self._balance_refresh_interval: float = float(fast_cfg.get("balance_refresh_interval_seconds", 30.0))
 
         safety_cfg = engine.config.get("safety", {})
         self.kalshi_slippage_cents: int = int(safety_cfg.get("kalshi_slippage_cents", 1))
@@ -112,6 +114,7 @@ class FastArbWatchRunner:
         self._last_kalshi_resting_sync_ts: float = 0.0
         self._KALSHI_RESTING_SYNC_INTERVAL = 2.0
         self._cached_balances: dict = {"polymarket": None, "kalshi": None}
+        self._balance_refresh_event = threading.Event()
         self._last_scan_ts: float = 0.0
         self._pm_price_cache: dict[str, float] = {}  # slug → openPrice
         # one_legged_polymarket cancel/reenter state machine
@@ -158,9 +161,30 @@ class FastArbWatchRunner:
 
     # ── Основной цикл ──────────────────────────────────────────────────
 
+    def _balance_refresh_loop(self) -> None:
+        """Фоновый поток: обновляет _cached_balances каждые balance_refresh_interval_seconds.
+
+        Может быть разбужен досрочно через _balance_refresh_event.set()
+        (например, сразу после исполнения трейда).
+        """
+        while True:
+            try:
+                fresh = self.engine.get_real_balances()
+                self._cached_balances = fresh
+            except Exception as e:
+                print(f"[fast-arb] Balance refresh error: {e}")
+            self._balance_refresh_event.wait(timeout=self._balance_refresh_interval)
+            self._balance_refresh_event.clear()
+
     def run(self) -> None:
         ws: MarketWebSocketClient | None = None
         last_status = 0.0
+
+        threading.Thread(
+            target=self._balance_refresh_loop,
+            daemon=True,
+            name="fast-arb-balance",
+        ).start()
 
         print(
             f"[fast-arb] Edge divergence monitor: signal >= {self._edge_signal_threshold:.0%} "
@@ -201,9 +225,6 @@ class FastArbWatchRunner:
         self.engine.pm_clob._dead_tokens.clear()
         self.engine.scan(execute=False)
         pm_markets, kalshi_markets, matches, opportunities = self.engine.last_snapshot
-
-        # Обновляем балансы при каждом скане (кешируем для hot path)
-        self._cached_balances = self.engine.get_real_balances()
 
         max_edge = self.engine.trading["max_lock_edge"]
         tracking_candidates = self._build_tracking_candidates(matches)
@@ -324,6 +345,8 @@ class FastArbWatchRunner:
                 if executed.expected_profit <= 0:
                     continue
                 self._execute_and_record(executed, matched, yes_leg, no_leg)
+                # Синхронное обновление: следующая оппортьюнити в этом же скане
+                # должна видеть актуальный баланс после трейда
                 self._cached_balances = self.engine.get_real_balances()
 
     # ── Kalshi WS ──────────────────────────────────────────────────────
@@ -582,14 +605,24 @@ class FastArbWatchRunner:
             _gap_pct = abs(_p_tgt - _k_tgt) / _k_tgt * 100
             _tgt_str = f" | K.tgt={_k_tgt:.2f} PM.tgt={_p_tgt:.2f} gap={_gap_pct:.4f}%"
         elif _k_tgt:
+            _gap_pct = None
             _tgt_str = f" | K.tgt={_k_tgt:.2f} PM.tgt=N/A"
         else:
+            _gap_pct = None
             _tgt_str = ""
         print(
             f"\n[fast-arb][OPEN] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
             f"                 ask_sum={opp.ask_sum:.4f} edge={opp.edge_per_share:.4f} "
             f"cost=${opp.total_cost:.2f} exp_profit=${opp.expected_profit:.2f}{_tgt_str}"
         )
+
+        # Блокировка: без PM open price нельзя проверить что Kalshi подрынок правильный
+        if not self.dry_run and _k_tgt and not _p_tgt:
+            print(f"[fast-arb][SKIP] {opp.symbol} | PM open price unavailable — can't verify target match")
+            return
+        if not self.dry_run and _gap_pct is not None and _gap_pct > self.max_target_gap_pct:
+            print(f"[fast-arb][SKIP] {opp.symbol} | target gap {_gap_pct:.4f}% > {self.max_target_gap_pct:.2f}%")
+            return
 
         if self.dry_run:
             self._open_paper_from_opp(opp, _k_tgt, _p_tgt, _tgt_str)
@@ -1617,10 +1650,10 @@ class FastArbWatchRunner:
     # ── Loss limit ─────────────────────────────────────────────────────
 
     def _check_loss_limits(self, new_position_cost: float = 0.0) -> tuple[bool, str]:
-        """Проверяет бюджет и лимит потерь.
+        """Проверяет лимит потерь.
 
-        Бюджет = budget_usd + realized_pnl — растёт с выигрышами, уменьшается с потерями.
         Стоп если реализованные потери > max_realized_loss_usd.
+        Ограничение по реальным балансам — в balance check перед открытием.
 
         Возвращает (halt, reason).
         """
@@ -1634,23 +1667,6 @@ class FastArbWatchRunner:
             # Стоп по потерям (только реальные)
             if realized_pnl < -self.max_realized_loss_usd:
                 return True, f"realized_losses_exceeded (pnl=${realized_pnl:+.2f}, limit=-${self.max_realized_loss_usd:.0f})"
-
-            # Эффективный бюджет: растёт с выигрышами, уменьшается с потерями
-            effective_budget = self.budget_usd + realized_pnl
-
-            # Открытые позиции + новая не должны превышать бюджет
-            cursor = self.engine.db.conn.execute(
-                "SELECT COALESCE(SUM(CASE "
-                "WHEN execution_status='one_legged_kalshi' "
-                "    THEN kalshi_fill_shares * kalshi_fill_price + COALESCE(kalshi_order_fee, 0) "
-                "ELSE total_cost END), 0) FROM positions WHERE status='open' AND is_paper = 0"
-            )
-            open_cost = float(cursor.fetchone()[0]) + new_position_cost
-            if open_cost > effective_budget:
-                return True, (
-                    f"budget_exceeded (open=${open_cost:.2f} > budget=${effective_budget:.2f}"
-                    f" [base=${self.budget_usd:.0f} pnl=${realized_pnl:+.2f}])"
-                )
 
         except Exception:
             pass
@@ -1668,6 +1684,16 @@ class FastArbWatchRunner:
             symbol = pm.symbol
             k_ref = ka.reference_price
             slug = pm.pm_event_slug
+            pm_ref = pm.reference_price or (self._fetch_pm_open_price(slug) if slug else None)
+
+            # Без PM reference нельзя проверить Kalshi подрынок — пропускаем
+            if k_ref and not pm_ref:
+                continue
+            # Gap между таргетами слишком большой — пропускаем
+            if k_ref and pm_ref:
+                gap_pct = abs(pm_ref - k_ref) / k_ref * 100
+                if gap_pct > self.max_target_gap_pct:
+                    continue
 
             legs = [
                 ("polymarket", "kalshi", pm.yes_ask, ka.no_ask),
@@ -1703,7 +1729,7 @@ class FastArbWatchRunner:
                         kalshi_title=ka.title,
                         match_score=item.score,
                         expiry_delta_seconds=abs((pm.expiry - ka.expiry).total_seconds()),
-                        polymarket_reference_price=pm.reference_price,
+                        polymarket_reference_price=pm_ref,
                         kalshi_reference_price=k_ref,
                         polymarket_rules=pm.rules_text,
                         kalshi_rules=ka.rules_text,
@@ -2060,14 +2086,8 @@ class FastArbWatchRunner:
         if is_real:
             lines.append(f"💼 Бюджет: ${effective_budget:.2f} (стоп: -${self.max_realized_loss_usd:.0f})")
             if self._total_deposited > 0:
-                # Свежие балансы чтобы не рассинхрониться с open_cost из БД
-                try:
-                    fresh = self.engine.get_real_balances()
-                    _pm = fresh.get("polymarket") or pm_bal or 0
-                    _k = fresh.get("kalshi") or k_bal or 0
-                except Exception:
-                    _pm = pm_bal or 0
-                    _k = k_bal or 0
+                _pm = pm_bal or 0
+                _k = k_bal or 0
                 current_total = _pm + _k + open_real_cost
                 real_pnl = current_total - self._total_deposited
                 lines.append(
@@ -2077,8 +2097,7 @@ class FastArbWatchRunner:
                 )
                 # Дельта reconciliation: посчитанный vs реальный баланс
                 # Пропускаем если балансы ещё не получены с бирж
-                _has_balances = (fresh.get("polymarket") is not None
-                                 and fresh.get("kalshi") is not None)
+                _has_balances = (pm_bal is not None and k_bal is not None)
                 if _has_balances:
                     try:
                         if not self._reconciliation_baseline_reset:
@@ -2241,7 +2260,12 @@ class FastArbWatchRunner:
         return candidates
 
     def _fetch_pm_open_price(self, slug: str) -> float | None:
-        """Парсим openPrice текущего окна с HTML-страницы Polymarket (кэшируется по slug)."""
+        """Парсим reference price с HTML-страницы Polymarket (кэшируется по slug).
+
+        Ищем в порядке приоритета:
+        1. "priceToBeat": 84.88  — часовые Up or Down рынки
+        2. "openPrice": 84.88, "closePrice": null  — 15-мин рынки (текущее окно)
+        """
         if slug in self._pm_price_cache:
             return self._pm_price_cache[slug]
         import re as _re
@@ -2250,10 +2274,15 @@ class FastArbWatchRunner:
         try:
             resp = _httpx.get(url, timeout=5.0, follow_redirects=True,
                               headers={"User-Agent": "Mozilla/5.0"})
-            m = _re.search(
-                r'"openPrice"\s*:\s*([0-9.]+)\s*,\s*"closePrice"\s*:\s*null',
-                resp.text,
-            )
+            text = resp.text
+            # priceToBeat — hourly markets
+            m = _re.search(r'"priceToBeat"\s*:\s*([0-9.]+)', text)
+            if not m:
+                # openPrice with closePrice=null — 15-min markets (current window)
+                m = _re.search(
+                    r'"openPrice"\s*:\s*([0-9.]+)\s*,\s*"closePrice"\s*:\s*null',
+                    text,
+                )
             if m:
                 price = float(m.group(1))
                 self._pm_price_cache[slug] = price

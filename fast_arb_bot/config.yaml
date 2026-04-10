@@ -31,6 +31,8 @@ safety:
 fast_arb:
   budget_usd: 60.0           # базовый бюджет (растёт с выигрышами)
   max_realized_loss_usd: 60.0  # максимальные реализованные потери — стоп
+  max_target_gap_pct: 0.15     # максимальный gap между PM openPrice и Kalshi reference (%)
+  balance_refresh_interval_seconds: 30  # как часто фоновый поток обновляет балансы
   deposits:
     pm_start: 195.22
     k_start: 65.25
