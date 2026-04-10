@@ -646,6 +646,8 @@ class RealArbDB:
             "SELECT COALESCE(SUM(CASE "
             "WHEN execution_status='one_legged_kalshi' "
             "    THEN kalshi_fill_shares * kalshi_fill_price + COALESCE(kalshi_order_fee, 0) "
+            "WHEN execution_status='one_legged_polymarket' "
+            "    THEN polymarket_fill_shares * polymarket_fill_price + COALESCE(polymarket_order_fee, 0) "
             "ELSE total_cost END), 0) FROM positions WHERE status='open' AND is_paper=0"
         ).fetchone()
         open_cost = float(r[0])
@@ -691,6 +693,8 @@ class RealArbDB:
             "SELECT COALESCE(SUM(CASE "
             "WHEN execution_status='one_legged_kalshi' "
             "    THEN kalshi_fill_shares * kalshi_fill_price + COALESCE(kalshi_order_fee, 0) "
+            "WHEN execution_status='one_legged_polymarket' "
+            "    THEN polymarket_fill_shares * polymarket_fill_price + COALESCE(polymarket_order_fee, 0) "
             "ELSE total_cost END), 0) FROM positions WHERE status='open' AND is_paper=0"
         ).fetchone()
         current_open_cost = float(r[0])
