@@ -84,7 +84,10 @@ class FastArbWatchRunner:
         self.max_realized_loss_usd: float = float(fast_cfg.get("max_realized_loss_usd", 20.0))
         self.liquidity_ratio: float = float(fast_cfg.get("order_book_min_liquidity_ratio", 1.5))
         self.scan_interval: float = float(fast_cfg.get("scan_interval_seconds", 60.0))
-        self.max_target_gap_pct: float = float(fast_cfg.get("max_target_gap_pct", 0.15))
+        self._max_target_gap: dict[str, float] = {
+            k.upper(): float(v)
+            for k, v in (fast_cfg.get("max_target_gap") or {}).items()
+        }
         self._balance_refresh_interval: float = float(fast_cfg.get("balance_refresh_interval_seconds", 30.0))
 
         safety_cfg = engine.config.get("safety", {})
@@ -602,14 +605,15 @@ class FastArbWatchRunner:
     ) -> None:
         _k_tgt = opp.kalshi_reference_price
         _p_tgt = self._fetch_pm_open_price(opp.pm_event_slug) if opp.pm_event_slug else None
+        _max_gap = self._max_target_gap.get(opp.symbol.upper())
         if _k_tgt and _p_tgt:
-            _gap_pct = abs(_p_tgt - _k_tgt) / _k_tgt * 100
-            _tgt_str = f" | K.tgt={_k_tgt:.2f} PM.tgt={_p_tgt:.2f} gap={_gap_pct:.4f}%"
+            _gap_abs = abs(_p_tgt - _k_tgt)
+            _tgt_str = f" | K.tgt={_k_tgt:.2f} PM.tgt={_p_tgt:.2f} gap=${_gap_abs:.2f}"
         elif _k_tgt:
-            _gap_pct = None
+            _gap_abs = None
             _tgt_str = f" | K.tgt={_k_tgt:.2f} PM.tgt=N/A"
         else:
-            _gap_pct = None
+            _gap_abs = None
             _tgt_str = ""
         print(
             f"\n[fast-arb][OPEN] {opp.symbol} | {opp.buy_yes_venue}:YES + {opp.buy_no_venue}:NO\n"
@@ -621,8 +625,8 @@ class FastArbWatchRunner:
         if not self.dry_run and _k_tgt and not _p_tgt:
             print(f"[fast-arb][SKIP] {opp.symbol} | PM open price unavailable — can't verify target match")
             return
-        if not self.dry_run and _gap_pct is not None and _gap_pct > self.max_target_gap_pct:
-            print(f"[fast-arb][SKIP] {opp.symbol} | target gap {_gap_pct:.4f}% > {self.max_target_gap_pct:.2f}%")
+        if not self.dry_run and _max_gap is not None and _gap_abs is not None and _gap_abs > _max_gap:
+            print(f"[fast-arb][SKIP] {opp.symbol} | target gap ${_gap_abs:.2f} > ${_max_gap:.2f}")
             return
 
         if self.dry_run:
@@ -1691,9 +1695,9 @@ class FastArbWatchRunner:
             if k_ref and not pm_ref:
                 continue
             # Gap между таргетами слишком большой — пропускаем
-            if k_ref and pm_ref:
-                gap_pct = abs(pm_ref - k_ref) / k_ref * 100
-                if gap_pct > self.max_target_gap_pct:
+            max_gap = self._max_target_gap.get(symbol.upper())
+            if k_ref and pm_ref and max_gap is not None:
+                if abs(pm_ref - k_ref) > max_gap:
                     continue
 
             legs = [
