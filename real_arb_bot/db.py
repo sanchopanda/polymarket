@@ -179,6 +179,8 @@ class RealArbDB:
             ("edge_first_20pct", "TEXT"),
             # Entry-time Binance distance
             ("entry_binance_distance_pct", "REAL"),
+            # Which leg filled first when position opened one-legged
+            ("initially_one_legged", "TEXT"),
         ]:
             try:
                 self.conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {definition}")
@@ -225,10 +227,10 @@ class RealArbDB:
                 kalshi_order_id, kalshi_fill_price, kalshi_fill_shares, kalshi_order_fee, kalshi_order_latency_ms, kalshi_order_status,
                 polymarket_order_id, polymarket_fill_price, polymarket_fill_shares, polymarket_order_fee, polymarket_order_latency_ms, polymarket_order_status,
                 execution_status, execution_started_at, execution_completed_at,
-                pm_price_to_beat, entry_binance_distance_pct
+                pm_price_to_beat, entry_binance_distance_pct, initially_one_legged
             ) VALUES (
                 ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
             )
             """,
             (
@@ -290,6 +292,8 @@ class RealArbDB:
                 now,
                 pm_price_to_beat,
                 entry_binance_distance_pct,
+                "kalshi" if execution_status == "one_legged_kalshi" else
+                "polymarket" if execution_status == "one_legged_polymarket" else None,
             ),
         )
         self.conn.commit()
@@ -378,8 +382,8 @@ class RealArbDB:
                 polymarket_reference_price, kalshi_reference_price, polymarket_rules, kalshi_rules,
                 shares, yes_ask, no_ask, ask_sum, total_cost, expected_profit,
                 yes_avg_price, no_avg_price, yes_filled_shares, no_filled_shares,
-                opened_at, status, execution_status, is_paper
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                opened_at, status, execution_status, is_paper, initially_one_legged
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 pos_id,
@@ -396,7 +400,7 @@ class RealArbDB:
                 opportunity.shares, opportunity.yes_ask, opportunity.no_ask, opportunity.ask_sum,
                 leg_cost, -leg_cost,
                 yes_avg, no_avg, yes_shares, no_shares,
-                now, "open", exec_status, 1,
+                now, "open", exec_status, 1, side,
             ),
         )
         self.conn.commit()
@@ -642,8 +646,6 @@ class RealArbDB:
             "SELECT COALESCE(SUM(CASE "
             "WHEN execution_status='one_legged_kalshi' "
             "    THEN kalshi_fill_shares * kalshi_fill_price + COALESCE(kalshi_order_fee, 0) "
-            "WHEN execution_status='one_legged_polymarket' "
-            "    THEN polymarket_fill_shares * polymarket_fill_price + COALESCE(polymarket_order_fee, 0) "
             "ELSE total_cost END), 0) FROM positions WHERE status='open' AND is_paper=0"
         ).fetchone()
         open_cost = float(r[0])
@@ -689,8 +691,6 @@ class RealArbDB:
             "SELECT COALESCE(SUM(CASE "
             "WHEN execution_status='one_legged_kalshi' "
             "    THEN kalshi_fill_shares * kalshi_fill_price + COALESCE(kalshi_order_fee, 0) "
-            "WHEN execution_status='one_legged_polymarket' "
-            "    THEN polymarket_fill_shares * polymarket_fill_price + COALESCE(polymarket_order_fee, 0) "
             "ELSE total_cost END), 0) FROM positions WHERE status='open' AND is_paper=0"
         ).fetchone()
         current_open_cost = float(r[0])

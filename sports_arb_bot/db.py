@@ -250,8 +250,8 @@ class SportsArbDB:
                 cost, edge, shares, total_cost, expected_profit,
                 game_date, opened_at, status, lock_valid,
                 is_paper, execution_status, market_max_edge,
-                pm_ask_depth_usd, ka_ask_depth_usd
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, 1, ?, ?, ?, ?)""",
+                pm_ask_depth_usd, ka_ask_depth_usd, initially_one_legged
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, 1, ?, ?, ?, ?, ?)""",
             (
                 pos_id, sport, pm_slug, pm_title, pm_market_id,
                 ka_event_ticker, ka_title, match_confidence,
@@ -260,7 +260,7 @@ class SportsArbDB:
                 leg_ka_player, leg_ka_ticker, leg_ka_price,
                 cost, edge, shares, total_cost, expected_profit,
                 game_date.isoformat(), now, exec_status, market_max_edge,
-                pm_ask_depth_usd, ka_ask_depth_usd,
+                pm_ask_depth_usd, ka_ask_depth_usd, filled_leg,
             ),
         )
         self.conn.execute(
@@ -464,8 +464,8 @@ class SportsArbDB:
                 is_paper, execution_status,
                 ka_order_id, ka_fill_price, ka_fill_shares,
                 pm_order_id, pm_fill_price, pm_fill_shares,
-                pm_ask_depth_usd, ka_ask_depth_usd
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                pm_ask_depth_usd, ka_ask_depth_usd, initially_one_legged
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 pos_id, sport, pm_slug, pm_title, pm_market_id,
                 ka_event_ticker, ka_title, match_confidence,
@@ -478,6 +478,8 @@ class SportsArbDB:
                 ka_order_id, ka_fill_price, ka_fill_shares,
                 pm_order_id, pm_fill_price, pm_fill_shares,
                 pm_ask_depth_usd, ka_ask_depth_usd,
+                "kalshi" if execution_status == "one_legged_kalshi" else
+                "pm" if execution_status == "one_legged_polymarket" else None,
             ),
         )
         self._commit()
@@ -536,12 +538,13 @@ class SportsArbDB:
         ).fetchone()
         return int(row["cnt"] or 0)
 
-    def has_open_one_legged(self, ka_event_ticker: str, exec_status: str) -> bool:
-        """Есть ли открытая одноногая позиция данного типа для этого матча (paper)."""
+    def has_open_one_legged(self, ka_event_ticker: str) -> bool:
+        """Есть ли открытая одноногая позиция (любого типа) для этого матча (paper)."""
         row = self.conn.execute(
             "SELECT COUNT(*) AS cnt FROM positions "
-            "WHERE ka_event_ticker=? AND status='open' AND execution_status=?",
-            (ka_event_ticker, exec_status),
+            "WHERE ka_event_ticker=? AND status='open' "
+            "AND execution_status IN ('paper_one_legged_pm', 'paper_one_legged_ka')",
+            (ka_event_ticker,),
         ).fetchone()
         return int(row["cnt"] or 0) > 0
 

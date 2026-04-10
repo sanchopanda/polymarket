@@ -74,7 +74,6 @@ class FastArbWatchRunner:
     STATUS_INTERVAL_SECONDS = 15
     HIGH_EDGE_THRESHOLD = 0.15
     RECONCILIATION_THRESHOLD = 5.0  # $5 допустимое расхождение
-    RECONCILIATION_AFTER_RESOLVE_DELAY = 30  # 30 сек после резолва — проверяем
 
     def __init__(self, engine: RealArbEngine, dry_run: bool = False) -> None:
         self.engine = engine
@@ -141,9 +140,9 @@ class FastArbWatchRunner:
         self._danger_exits: dict[str, _DangerExit] = {}  # legacy state, unused in normal loop
 
         # Balance reconciliation
-        self._last_reconciliation_ts: float = time.time()  # skip first 10 min after startup
         self._reconciliation_halted: bool = False
         self._reconciliation_consecutive_fails: int = 0
+        self._reconciliation_baseline_reset: bool = False  # сброс при первом статусе
         self._started_as_real: bool = not self.dry_run  # для статуса после стопа
 
         # Deposits tracking
@@ -183,7 +182,6 @@ class FastArbWatchRunner:
                 self._monitor_one_leg_pm_cancel_reenter()
                 self._monitor_paper_one_legged()
                 self._monitor_edge_divergence()
-                self._balance_reconciliation_check()
                 time.sleep(0.5)
         except KeyboardInterrupt:
             print("\n[fast-arb] Stopped.")
@@ -1644,8 +1642,6 @@ class FastArbWatchRunner:
                 "SELECT COALESCE(SUM(CASE "
                 "WHEN execution_status='one_legged_kalshi' "
                 "    THEN kalshi_fill_shares * kalshi_fill_price + COALESCE(kalshi_order_fee, 0) "
-                "WHEN execution_status='one_legged_polymarket' "
-                "    THEN polymarket_fill_shares * polymarket_fill_price + COALESCE(polymarket_order_fee, 0) "
                 "ELSE total_cost END), 0) FROM positions WHERE status='open' AND is_paper = 0"
             )
             open_cost = float(cursor.fetchone()[0]) + new_position_cost
@@ -2080,15 +2076,16 @@ class FastArbWatchRunner:
                 )
                 # Дельта reconciliation: посчитанный vs реальный баланс
                 try:
-                    snap = self.engine.db.get_last_balance_snapshot()
-                    if snap:
-                        _, delta, _ = self.engine.db.check_balance_reconciliation(
+                    if not self._reconciliation_baseline_reset:
+                        # Первый статус после рестарта — сохраняем свежий baseline
+                        self.engine.db.save_balance_snapshot(_pm, _k, source="startup")
+                        self._reconciliation_baseline_reset = True
+                    else:
+                        ok, delta, details = self.engine.db.check_balance_reconciliation(
                             _pm, _k, threshold=self.RECONCILIATION_THRESHOLD,
                         )
                         lines.append(f"🔄 Дельта reconciliation: ${delta:+.2f}")
-                        # Если halted и дельта уже в норме — форсируем немедленную проверку
-                        if self._reconciliation_halted and abs(delta) <= self.RECONCILIATION_THRESHOLD:
-                            self._last_reconciliation_ts = 0
+                        self._handle_reconciliation(ok, delta, details, _pm, _k)
                 except Exception:
                     pass
         return "\n".join(lines)
@@ -2662,118 +2659,63 @@ class FastArbWatchRunner:
 
     # ── Balance reconciliation ──────────────────────────────────────────
 
-    def _balance_reconciliation_check(self) -> None:
-        """Сверяет реальные балансы с ожидаемыми по БД.
+    def _handle_reconciliation(
+        self, ok: bool, delta: float, details: str, pm_bal: float, k_bal: float
+    ) -> None:
+        """Обрабатывает результат reconciliation: стоп/восстановление/снапшот.
 
-        Запускается через 30 сек после каждого резолва.
-        При halted — проверяет каждые 60 сек для авто-восстановления.
+        Вызывается каждые STATUS_INTERVAL_SECONDS секунд из статус-билдера.
         """
-        from datetime import datetime
-
-        try:
-            last_resolve = self.engine.db.conn.execute(
-                "SELECT MAX(resolved_at) FROM positions WHERE status='resolved' AND is_paper=0"
-            ).fetchone()[0]
-        except Exception:
+        if ok:
+            self._reconciliation_consecutive_fails = 0
+            if self._reconciliation_halted:
+                self.dry_run = False
+                self.engine.safety.dry_run = False
+                self._reconciliation_halted = False
+                print(f"[reconciliation] RECOVERED — real mode restored")
+                self.engine.db.audit("balance_reconciliation_recovered", None, {
+                    "delta": delta, "pm_balance": pm_bal, "k_balance": k_bal,
+                })
+                if self.engine.notifier:
+                    try:
+                        self.engine.notifier.send(
+                            f"✅ <b>BALANCE OK — REAL MODE RESTORED</b>\n"
+                            f"Дельта: ${delta:+.2f}\n"
+                            f"PM: ${pm_bal:.2f} | Kalshi: ${k_bal:.2f}"
+                        )
+                    except Exception:
+                        pass
+            self.engine.db.save_balance_snapshot(pm_bal, k_bal, source="periodic")
             return
-
-        now_ts = time.time()
 
         if self._reconciliation_halted:
-            # В halted — проверяем каждые 60 сек для восстановления
-            if now_ts - self._last_reconciliation_ts < 60:
-                return
-        else:
-            # Нормальный режим — проверяем через 30 сек после резолва
-            if not last_resolve:
-                return
-            resolve_age = (datetime.utcnow() - datetime.fromisoformat(last_resolve)).total_seconds()
-            # Проверяем в окне [30, 90] секунд после резолва (один раз)
-            if resolve_age < self.RECONCILIATION_AFTER_RESOLVE_DELAY:
-                return  # ещё рано
-            if resolve_age > 90:
-                return  # уже проверяли или слишком давно
-            # Не проверять повторно для того же резолва
-            if self._last_reconciliation_ts > now_ts - 120:
-                return
+            return  # Уже остановлены, ждём восстановления
 
-        self._last_reconciliation_ts = now_ts
+        # Расхождение — останавливаем
+        print(f"[reconciliation] HALT: {details}")
+        self.dry_run = True
+        self.engine.safety.dry_run = True
+        self._reconciliation_halted = True
 
-        # Свежие балансы
-        try:
-            self._cached_balances = self.engine.get_real_balances()
-        except Exception:
-            return
-        bal = self._cached_balances
-        pm_bal = bal.get("polymarket")
-        k_bal = bal.get("kalshi")
-        if pm_bal is None or k_bal is None:
-            return
+        # НЕ обновляем снапшот — baseline должен оставаться прежним,
+        # чтобы дельта не обнулялась и recovery работал корректно
+        self.engine.db.audit("balance_mismatch", None, {
+            "delta": delta, "details": details,
+            "pm_balance": pm_bal, "k_balance": k_bal,
+        })
 
-        try:
-            snap = self.engine.db.get_last_balance_snapshot()
-            if snap is None:
-                self.engine.db.save_balance_snapshot(pm_bal, k_bal, source="startup")
-                print(f"[reconciliation] Initial snapshot saved: PM=${pm_bal:.2f} K=${k_bal:.2f}")
-                return
-
-            ok, delta, details = self.engine.db.check_balance_reconciliation(
-                pm_bal, k_bal, threshold=self.RECONCILIATION_THRESHOLD,
-            )
-
-            if ok:
-                # Всё ок — обновляем снапшот и сбрасываем счётчик
-                self._reconciliation_consecutive_fails = 0
-                self.engine.db.save_balance_snapshot(pm_bal, k_bal, source="periodic")
-
-                # Авто-восстановление если был стоп
-                if self._reconciliation_halted:
-                    self.dry_run = False
-                    self.engine.safety.dry_run = False
-                    self._reconciliation_halted = False
-                    print(f"[reconciliation] RECOVERED — real mode restored")
-                    self.engine.db.audit("balance_reconciliation_recovered", None, {
-                        "delta": delta, "pm_balance": pm_bal, "k_balance": k_bal,
-                    })
-                    if self.engine.notifier:
-                        try:
-                            self.engine.notifier.send(
-                                f"✅ <b>BALANCE OK — REAL MODE RESTORED</b>\n"
-                                f"Дельта: ${delta:+.2f}\n"
-                                f"PM: ${pm_bal:.2f} | Kalshi: ${k_bal:.2f}"
-                            )
-                        except Exception:
-                            pass
-                return
-
-            # Расхождение — сразу останавливаем
-            msg = (
-                f"🚨 <b>BALANCE MISMATCH — REAL STOPPED</b>\n\n"
-                f"Расхождение: <b>${delta:+.2f}</b> (порог: ${self.RECONCILIATION_THRESHOLD:.0f})\n"
-                f"PM: ${pm_bal:.2f} | Kalshi: ${k_bal:.2f}\n"
-                f"{details}\n\n"
-                f"Требуется ручная проверка!"
-            )
-            print(f"[reconciliation] HALT: {details}")
-
-            self.dry_run = True
-            self.engine.safety.dry_run = True
-            self._reconciliation_halted = True
-
-            self.engine.db.save_balance_snapshot(pm_bal, k_bal, source="mismatch")
-            self.engine.db.audit("balance_mismatch", None, {
-                "delta": delta, "details": details,
-                "pm_balance": pm_bal, "k_balance": k_bal,
-            })
-
-            if self.engine.notifier:
-                try:
-                    self.engine.notifier.send(msg)
-                except Exception as e:
-                    print(f"[reconciliation] Failed to send alert: {e}")
-
-        except Exception as e:
-            print(f"[reconciliation] Error: {e}")
+        msg = (
+            f"🚨 <b>BALANCE MISMATCH — REAL STOPPED</b>\n\n"
+            f"Расхождение: <b>${delta:+.2f}</b> (порог: ${self.RECONCILIATION_THRESHOLD:.0f})\n"
+            f"PM: ${pm_bal:.2f} | Kalshi: ${k_bal:.2f}\n"
+            f"{details}\n\n"
+            f"Требуется ручная проверка!"
+        )
+        if self.engine.notifier:
+            try:
+                self.engine.notifier.send(msg)
+            except Exception as e:
+                print(f"[reconciliation] Failed to send alert: {e}")
 
     def _save_post_trade_snapshot(self) -> None:
         """Сохраняет снапшот после трейда для reconciliation."""
@@ -2798,8 +2740,6 @@ class FastArbWatchRunner:
                 "SELECT COALESCE(SUM(CASE "
                 "WHEN execution_status='one_legged_kalshi' "
                 "    THEN kalshi_fill_shares * kalshi_fill_price + COALESCE(kalshi_order_fee, 0) "
-                "WHEN execution_status='one_legged_polymarket' "
-                "    THEN polymarket_fill_shares * polymarket_fill_price + COALESCE(polymarket_order_fee, 0) "
                 "ELSE total_cost END), 0) FROM positions WHERE status='open' AND is_paper = 0"
             )
             open_cost = float(c1.fetchone()[0])
