@@ -1616,7 +1616,7 @@ class FastArbWatchRunner:
     def _check_loss_limits(self, new_position_cost: float = 0.0) -> tuple[bool, str]:
         """Проверяет бюджет и лимит потерь.
 
-        Бюджет = budget_usd + max(0, total_realized_pnl) — растёт с выигрышами.
+        Бюджет = budget_usd + realized_pnl — растёт с выигрышами, уменьшается с потерями.
         Стоп если реализованные потери > max_realized_loss_usd.
 
         Возвращает (halt, reason).
@@ -1632,8 +1632,8 @@ class FastArbWatchRunner:
             if realized_pnl < -self.max_realized_loss_usd:
                 return True, f"realized_losses_exceeded (pnl=${realized_pnl:+.2f}, limit=-${self.max_realized_loss_usd:.0f})"
 
-            # Эффективный бюджет растёт с выигрышами
-            effective_budget = self.budget_usd + max(0.0, realized_pnl)
+            # Эффективный бюджет: растёт с выигрышами, уменьшается с потерями
+            effective_budget = self.budget_usd + realized_pnl
 
             # Открытые позиции + новая не должны превышать бюджет
             cursor = self.engine.db.conn.execute(
@@ -1648,7 +1648,7 @@ class FastArbWatchRunner:
             if open_cost > effective_budget:
                 return True, (
                     f"budget_exceeded (open=${open_cost:.2f} > budget=${effective_budget:.2f}"
-                    f" [base=${self.budget_usd:.0f} + wins=${max(0.0, realized_pnl):.2f}])"
+                    f" [base=${self.budget_usd:.0f} pnl=${realized_pnl:+.2f}])"
                 )
 
         except Exception:
@@ -2010,7 +2010,7 @@ class FastArbWatchRunner:
         if is_real:
             wr = (wins / total * 100) if total > 0 else 0
             realized_pnl = pnl
-            effective_budget = self.budget_usd + max(0.0, realized_pnl)
+            effective_budget = self.budget_usd + realized_pnl
             header = "🔴 <b>Fast Arb (REAL)</b>" if not self.dry_run else "⛔ <b>Fast Arb (HALTED)</b>"
             lines = [
                 header,
@@ -2802,7 +2802,7 @@ class FastArbWatchRunner:
             realized_pnl = float(c2.fetchone()[0])
         except Exception:
             pass
-        effective_budget = self.budget_usd + max(0.0, realized_pnl)
+        effective_budget = self.budget_usd + realized_pnl
         kalshi_ws_status = (
             f"tickers={len(self._current_kalshi_tickers)}"
             if self._kalshi_ws is not None
