@@ -114,6 +114,8 @@ class SportsArbDB:
             ("pm_fill_price", "REAL"),
             ("pm_fill_shares", "REAL"),
             ("initially_one_legged", "TEXT"),  # e.g. "pm" or "ka" — which leg was filled first
+            ("pm_ask_depth_usd", "REAL DEFAULT 0"),
+            ("ka_ask_depth_usd", "REAL DEFAULT 0"),
         ]:
             try:
                 self.conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {definition}")
@@ -165,6 +167,8 @@ class SportsArbDB:
         game_date: datetime,
         lock_valid: bool = True,
         market_max_edge: float = 0.0,
+        pm_ask_depth_usd: float = 0.0,
+        ka_ask_depth_usd: float = 0.0,
     ) -> str:
         pos_id = str(uuid.uuid4())[:8]
         total_cost = shares * cost
@@ -178,8 +182,9 @@ class SportsArbDB:
                 leg_pm_player, leg_pm_token_id, leg_pm_price,
                 leg_ka_player, leg_ka_ticker, leg_ka_price,
                 cost, edge, shares, total_cost, expected_profit,
-                game_date, opened_at, status, lock_valid, market_max_edge
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)""",
+                game_date, opened_at, status, lock_valid, market_max_edge,
+                pm_ask_depth_usd, ka_ask_depth_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)""",
             (
                 pos_id, sport, pm_slug, pm_title, pm_market_id,
                 ka_event_ticker, ka_title, match_confidence,
@@ -188,6 +193,7 @@ class SportsArbDB:
                 leg_ka_player, leg_ka_ticker, leg_ka_price,
                 cost, edge, shares, total_cost, expected_profit,
                 game_date.isoformat(), now, int(lock_valid), market_max_edge,
+                pm_ask_depth_usd, ka_ask_depth_usd,
             ),
         )
         # Deduct stake from balance
@@ -224,6 +230,8 @@ class SportsArbDB:
         game_date: datetime,
         filled_leg: str,  # "pm" or "ka"
         market_max_edge: float = 0.0,
+        pm_ask_depth_usd: float = 0.0,
+        ka_ask_depth_usd: float = 0.0,
     ) -> str:
         """Open a one-legged paper position where only one venue was liquid."""
         pos_id = str(uuid.uuid4())[:8]
@@ -241,8 +249,9 @@ class SportsArbDB:
                 leg_ka_player, leg_ka_ticker, leg_ka_price,
                 cost, edge, shares, total_cost, expected_profit,
                 game_date, opened_at, status, lock_valid,
-                is_paper, execution_status, market_max_edge
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, 1, ?, ?)""",
+                is_paper, execution_status, market_max_edge,
+                pm_ask_depth_usd, ka_ask_depth_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, 1, ?, ?, ?, ?)""",
             (
                 pos_id, sport, pm_slug, pm_title, pm_market_id,
                 ka_event_ticker, ka_title, match_confidence,
@@ -251,6 +260,7 @@ class SportsArbDB:
                 leg_ka_player, leg_ka_ticker, leg_ka_price,
                 cost, edge, shares, total_cost, expected_profit,
                 game_date.isoformat(), now, exec_status, market_max_edge,
+                pm_ask_depth_usd, ka_ask_depth_usd,
             ),
         )
         self.conn.execute(
@@ -434,6 +444,8 @@ class SportsArbDB:
         pm_order_id: str = "",
         pm_fill_price: float = 0.0,
         pm_fill_shares: float = 0.0,
+        pm_ask_depth_usd: float = 0.0,
+        ka_ask_depth_usd: float = 0.0,
     ) -> str:
         """Record a real (non-paper) trade. Does not touch virtual_balance."""
         pos_id = str(uuid.uuid4())[:8]
@@ -451,8 +463,9 @@ class SportsArbDB:
                 game_date, opened_at, status, lock_valid,
                 is_paper, execution_status,
                 ka_order_id, ka_fill_price, ka_fill_shares,
-                pm_order_id, pm_fill_price, pm_fill_shares
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 1, 0, ?, ?, ?, ?, ?, ?, ?)""",
+                pm_order_id, pm_fill_price, pm_fill_shares,
+                pm_ask_depth_usd, ka_ask_depth_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 pos_id, sport, pm_slug, pm_title, pm_market_id,
                 ka_event_ticker, ka_title, match_confidence,
@@ -464,6 +477,7 @@ class SportsArbDB:
                 execution_status,
                 ka_order_id, ka_fill_price, ka_fill_shares,
                 pm_order_id, pm_fill_price, pm_fill_shares,
+                pm_ask_depth_usd, ka_ask_depth_usd,
             ),
         )
         self._commit()

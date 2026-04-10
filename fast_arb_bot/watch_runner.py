@@ -1504,6 +1504,10 @@ class FastArbWatchRunner:
             if yes_leg.usable_shares < min_required or no_leg.usable_shares < min_required:
                 return None, yes_leg, no_leg
 
+        # Пересчитываем usable_shares по фактическим ценам исполнения (не сигнальным)
+        yes_leg = replace(yes_leg, usable_shares=sum(l.size for l in yes_asks if l.price <= 1.0 - no_leg.avg_price - min_edge))
+        no_leg = replace(no_leg, usable_shares=sum(l.size for l in no_asks if l.price <= 1.0 - yes_leg.avg_price - min_edge))
+
         yes_ask = yes_leg.avg_price
         no_ask = no_leg.avg_price
         ask_sum = yes_ask + no_ask

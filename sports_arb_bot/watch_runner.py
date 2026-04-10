@@ -782,6 +782,8 @@ class SportsArbWatchRunner:
                         pm_order_id=result.pm_order_id,
                         pm_fill_price=result.pm_fill_price,
                         pm_fill_shares=result.pm_fill_shares,
+                        pm_ask_depth_usd=pm_depth or 0.0,
+                        ka_ask_depth_usd=ka_depth or 0.0,
                     )
                     print(
                         f"[sports-arb] REAL {result.status.upper()} {real_pos_id} | "
@@ -936,6 +938,8 @@ class SportsArbWatchRunner:
                 shares=shares,
                 game_date=pair.pm_event.game_date,
                 market_max_edge=market_max_edge,
+                pm_ask_depth_usd=pm_depth or 0.0,
+                ka_ask_depth_usd=ka_depth or 0.0,
             )
 
             if pm_has_depth and ka_has_depth:
