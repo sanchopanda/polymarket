@@ -166,7 +166,10 @@ class FastArbWatchRunner:
 
         Может быть разбужен досрочно через _balance_refresh_event.set()
         (например, сразу после исполнения трейда).
+        Первый фетч — после небольшой задержки, чтобы не мешаться в лог старта.
         """
+        self._balance_refresh_event.wait(timeout=5.0)
+        self._balance_refresh_event.clear()
         while True:
             try:
                 fresh = self.engine.get_real_balances()
@@ -345,9 +348,7 @@ class FastArbWatchRunner:
                 if executed.expected_profit <= 0:
                     continue
                 self._execute_and_record(executed, matched, yes_leg, no_leg)
-                # Синхронное обновление: следующая оппортьюнити в этом же скане
-                # должна видеть актуальный баланс после трейда
-                self._cached_balances = self.engine.get_real_balances()
+                self._balance_refresh_event.set()
 
     # ── Kalshi WS ──────────────────────────────────────────────────────
 
@@ -2774,6 +2775,8 @@ class FastArbWatchRunner:
                 "SELECT COALESCE(SUM(CASE "
                 "WHEN execution_status='one_legged_kalshi' "
                 "    THEN kalshi_fill_shares * kalshi_fill_price + COALESCE(kalshi_order_fee, 0) "
+                "WHEN execution_status='one_legged_polymarket' "
+                "    THEN polymarket_fill_shares * polymarket_fill_price + COALESCE(polymarket_order_fee, 0) "
                 "ELSE total_cost END), 0) FROM positions WHERE status='open' AND is_paper = 0"
             )
             open_cost = float(c1.fetchone()[0])
