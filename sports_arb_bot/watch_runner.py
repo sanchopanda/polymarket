@@ -587,13 +587,6 @@ class SportsArbWatchRunner:
             if not pm_token_id:
                 return
 
-            # Hard cap: total positions (real + paper) per pair
-            total_for_pair = self.db.count_all_positions_for_pair(
-                pair.kalshi_event.event_ticker
-            )
-            if total_for_pair >= self._max_positions_per_pair:
-                return
-
             # Determine real vs paper mode before cooldown check
             use_paper = True
             paper_reason = "paper_mode"
@@ -601,6 +594,14 @@ class SportsArbWatchRunner:
                 use_paper, paper_reason = self._should_use_paper(
                     pair.kalshi_event.event_ticker
                 )
+
+            # Hard cap на paper позиции — не блокирует реальные
+            if use_paper:
+                total_for_pair = self.db.count_all_positions_for_pair(
+                    pair.kalshi_event.event_ticker
+                )
+                if total_for_pair >= self._max_positions_per_pair:
+                    return
 
             # Per-pair cooldown: paper only (real trades have no cooldown)
             if use_paper:
@@ -731,6 +732,13 @@ class SportsArbWatchRunner:
                         )
                         self._pending_timers[pair_key] = t
                         t.start()
+                    return
+
+                if self.db.has_open_one_legged_real(pair.kalshi_event.event_ticker):
+                    print(
+                        f"[sports-arb] REAL SKIP {pair_key} | "
+                        f"already open one-legged real position for this match"
+                    )
                     return
 
                 result = self._executor.execute(
@@ -882,7 +890,7 @@ class SportsArbWatchRunner:
 
             pm_depth = self._pm_depth_at_ask(pm_token_id, leg_pm_price)
             pm_leg_stake = shares * leg_pm_price
-            pm_has_depth = pm_depth is not None and pm_depth >= pm_leg_stake * 1.5
+            pm_has_depth = pm_depth is not None and pm_depth >= pm_leg_stake * 2.0
 
             total_cost = shares * best_cost
             expected_profit = shares * best_edge
@@ -899,6 +907,11 @@ class SportsArbWatchRunner:
                 ka_yes_ask=leg_ka_price,
                 ka_ask_depth_usd=ka_depth,
             )
+
+            # Обновляем max_edge_seen для пары (после проверки стакана)
+            if pm_has_depth or ka_has_depth:
+                self.db.update_max_edge_seen(pair_key, best_edge)
+            market_max_edge = self.db.get_max_edge_seen(pair_key)
 
             depth_str = (
                 f"pm_depth=${pm_depth or 0:.0f} ka_depth=${ka_depth:.0f}"
@@ -924,6 +937,7 @@ class SportsArbWatchRunner:
                 edge=best_edge,
                 shares=shares,
                 game_date=pair.pm_event.game_date,
+                market_max_edge=market_max_edge,
             )
 
             if pm_has_depth and ka_has_depth:
@@ -957,34 +971,48 @@ class SportsArbWatchRunner:
                     )
             elif pm_has_depth and not ka_has_depth:
                 # Only PM liquid → one-legged PM
-                pos_id = self.db.open_one_legged_position(
-                    filled_leg="pm", **common_kwargs
-                )
-                self._register_paper_pending(pos_id, "pm", {
-                    "leg_ka_ticker": leg_ka_ticker,
-                    "leg_pm_price": leg_pm_price,
-                    "shares": shares,
-                })
-                print(
-                    f"[sports-arb] PAPER ONE-LEG(PM) {pos_id} | {pair.pm_event.slug}\n"
-                    f"  {leg_pm_player}@PM={leg_pm_price:.3f} | Kalshi depth insufficient\n"
-                    f"  edge={best_edge:.4f} shares={shares} | {depth_str}"
-                )
+                # Не открываем если уже есть открытая одноногая PM для этого матча
+                if self.db.has_open_one_legged(pair.kalshi_event.event_ticker, "paper_one_legged_pm"):
+                    print(
+                        f"[sports-arb] SKIP ONE-LEG(PM) {pair_key} | "
+                        f"already open one_legged_pm for this match"
+                    )
+                else:
+                    pos_id = self.db.open_one_legged_position(
+                        filled_leg="pm", **common_kwargs
+                    )
+                    self._register_paper_pending(pos_id, "pm", {
+                        "leg_ka_ticker": leg_ka_ticker,
+                        "leg_pm_price": leg_pm_price,
+                        "shares": shares,
+                    })
+                    print(
+                        f"[sports-arb] PAPER ONE-LEG(PM) {pos_id} | {pair.pm_event.slug}\n"
+                        f"  {leg_pm_player}@PM={leg_pm_price:.3f} | Kalshi depth insufficient\n"
+                        f"  edge={best_edge:.4f} shares={shares} | {depth_str}"
+                    )
             elif ka_has_depth and not pm_has_depth:
                 # Only Kalshi liquid → one-legged Kalshi
-                pos_id = self.db.open_one_legged_position(
-                    filled_leg="ka", **common_kwargs
-                )
-                self._register_paper_pending(pos_id, "ka", {
-                    "pm_token_id": pm_token_id,
-                    "leg_ka_price": leg_ka_price,
-                    "shares": shares,
-                })
-                print(
-                    f"[sports-arb] PAPER ONE-LEG(Ka) {pos_id} | {pair.pm_event.slug}\n"
-                    f"  {leg_ka_player}@Kalshi={leg_ka_price:.3f} | PM depth insufficient\n"
-                    f"  edge={best_edge:.4f} shares={shares} | {depth_str}"
-                )
+                # Не открываем если уже есть открытая одноногая Ka для этого матча
+                if self.db.has_open_one_legged(pair.kalshi_event.event_ticker, "paper_one_legged_ka"):
+                    print(
+                        f"[sports-arb] SKIP ONE-LEG(Ka) {pair_key} | "
+                        f"already open one_legged_ka for this match"
+                    )
+                else:
+                    pos_id = self.db.open_one_legged_position(
+                        filled_leg="ka", **common_kwargs
+                    )
+                    self._register_paper_pending(pos_id, "ka", {
+                        "pm_token_id": pm_token_id,
+                        "leg_ka_price": leg_ka_price,
+                        "shares": shares,
+                    })
+                    print(
+                        f"[sports-arb] PAPER ONE-LEG(Ka) {pos_id} | {pair.pm_event.slug}\n"
+                        f"  {leg_ka_player}@Kalshi={leg_ka_price:.3f} | PM depth insufficient\n"
+                        f"  edge={best_edge:.4f} shares={shares} | {depth_str}"
+                    )
             else:
                 # Neither liquid
                 skip_state = (round(pm_depth or 0, 1), round(ka_depth, 1))
@@ -1212,7 +1240,7 @@ class SportsArbWatchRunner:
         self,
         token_id: str,
         leg_ka_price: float,
-        depth_multiplier: float = 1.5,
+        depth_multiplier: float = 2.0,
     ) -> Optional[tuple[float, float]]:
         """Ищет наилучшую цену на PM с достаточной ликвидностью.
         Сканирует ask-уровни от дешёвых к дорогим; останавливается когда edge < min_edge.
@@ -1264,7 +1292,7 @@ class SportsArbWatchRunner:
         self,
         ticker: str,
         leg_pm_price: float,
-        depth_multiplier: float = 1.5,
+        depth_multiplier: float = 2.0,
     ) -> Optional[tuple[float, float]]:
         """Ищет наилучшую цену на Kalshi с достаточной ликвидностью.
         Сканирует уровни от дешёвых к дорогим; останавливается когда edge < min_edge.
@@ -1354,6 +1382,27 @@ class SportsArbWatchRunner:
                         print(f"[sports-arb] REDEEM sent for {pos['id']} market={pos['pm_market_id']}")
                     except Exception as e:
                         print(f"[sports-arb] redeem FAILED {pos['id']}: {e}")
+            elif exec_status in ("one_legged_kalshi", "one_legged_polymarket"):
+                pnl = self.db.resolve_real_one_legged_position(
+                    pos_id=pos["id"],
+                    exec_status=exec_status,
+                    pm_winner=pm_winner,
+                    ka_result=ka_result,
+                )
+                tag = "WIN" if pnl > 0 else "LOSE"
+                leg = "Kalshi" if exec_status == "one_legged_kalshi" else "PM"
+                print(
+                    f"[sports-arb] RESOLVED REAL ONE-LEG({leg}) {pos['id']} | "
+                    f"{pos['pm_slug']} | pnl=${pnl:+.2f} ({tag})"
+                )
+                if self.tg:
+                    self.tg.notify_resolve(
+                        pos_id=pos["id"],
+                        pm_slug=pos["pm_slug"],
+                        winner=pm_winner,
+                        pnl=pnl,
+                        one_legged=leg,
+                    )
             elif exec_status in ("paper_one_legged_pm", "paper_one_legged_ka"):
                 pnl = self.db.resolve_one_legged_position(
                     pos_id=pos["id"],

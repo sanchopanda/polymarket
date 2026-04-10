@@ -103,7 +103,7 @@ class SportsArbDB:
                 details TEXT
             );
         """)
-        # Add real-trading columns to existing positions table (idempotent)
+        # Add columns idempotently
         for col, definition in [
             ("is_paper", "INTEGER NOT NULL DEFAULT 1"),
             ("execution_status", "TEXT"),
@@ -120,6 +120,18 @@ class SportsArbDB:
                 self._commit()
             except sqlite3.OperationalError:
                 pass  # column already exists
+
+        try:
+            self.conn.execute("ALTER TABLE matched_pairs ADD COLUMN max_edge_seen REAL")
+            self._commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+        try:
+            self.conn.execute("ALTER TABLE positions ADD COLUMN market_max_edge REAL")
+            self._commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
         now = datetime.now(tz=timezone.utc).isoformat()
         self.conn.execute(
@@ -152,6 +164,7 @@ class SportsArbDB:
         shares: int,
         game_date: datetime,
         lock_valid: bool = True,
+        market_max_edge: float = 0.0,
     ) -> str:
         pos_id = str(uuid.uuid4())[:8]
         total_cost = shares * cost
@@ -165,8 +178,8 @@ class SportsArbDB:
                 leg_pm_player, leg_pm_token_id, leg_pm_price,
                 leg_ka_player, leg_ka_ticker, leg_ka_price,
                 cost, edge, shares, total_cost, expected_profit,
-                game_date, opened_at, status, lock_valid
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)""",
+                game_date, opened_at, status, lock_valid, market_max_edge
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)""",
             (
                 pos_id, sport, pm_slug, pm_title, pm_market_id,
                 ka_event_ticker, ka_title, match_confidence,
@@ -174,7 +187,7 @@ class SportsArbDB:
                 leg_pm_player, leg_pm_token_id, leg_pm_price,
                 leg_ka_player, leg_ka_ticker, leg_ka_price,
                 cost, edge, shares, total_cost, expected_profit,
-                game_date.isoformat(), now, int(lock_valid),
+                game_date.isoformat(), now, int(lock_valid), market_max_edge,
             ),
         )
         # Deduct stake from balance
@@ -210,6 +223,7 @@ class SportsArbDB:
         shares: int,
         game_date: datetime,
         filled_leg: str,  # "pm" or "ka"
+        market_max_edge: float = 0.0,
     ) -> str:
         """Open a one-legged paper position where only one venue was liquid."""
         pos_id = str(uuid.uuid4())[:8]
@@ -227,8 +241,8 @@ class SportsArbDB:
                 leg_ka_player, leg_ka_ticker, leg_ka_price,
                 cost, edge, shares, total_cost, expected_profit,
                 game_date, opened_at, status, lock_valid,
-                is_paper, execution_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, 1, ?)""",
+                is_paper, execution_status, market_max_edge
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, 1, ?, ?)""",
             (
                 pos_id, sport, pm_slug, pm_title, pm_market_id,
                 ka_event_ticker, ka_title, match_confidence,
@@ -236,7 +250,7 @@ class SportsArbDB:
                 leg_pm_player, leg_pm_token_id, leg_pm_price,
                 leg_ka_player, leg_ka_ticker, leg_ka_price,
                 cost, edge, shares, total_cost, expected_profit,
-                game_date.isoformat(), now, exec_status,
+                game_date.isoformat(), now, exec_status, market_max_edge,
             ),
         )
         self.conn.execute(
@@ -341,6 +355,55 @@ class SportsArbDB:
                     (abs(pnl), now),
                 )
         self._commit()
+        return pnl
+
+    def resolve_real_one_legged_position(
+        self,
+        pos_id: str,
+        exec_status: str,  # "one_legged_kalshi" | "one_legged_polymarket"
+        pm_winner: Optional[str],
+        ka_result: Optional[str],
+    ) -> float:
+        """Резолв реальной одноногой позиции по фактически заполненной ноге."""
+        pos = self.conn.execute(
+            "SELECT leg_pm_player, leg_ka_player, "
+            "ka_fill_price, ka_fill_shares, pm_fill_price, pm_fill_shares "
+            "FROM positions WHERE id = ?",
+            (pos_id,),
+        ).fetchone()
+        if pos is None:
+            return 0.0
+
+        if exec_status == "one_legged_kalshi":
+            # Ka заполнен, PM нет → пayout за Ka YES
+            actual_cost = float(pos["ka_fill_price"] or 0) * float(pos["ka_fill_shares"] or 0)
+            shares = float(pos["ka_fill_shares"] or 0)
+            leg_won = ka_result == "yes"
+            winner = pos["leg_ka_player"] if leg_won else pm_winner or "opponent"
+        else:
+            # PM заполнен, Ka нет → payout за PM YES
+            actual_cost = float(pos["pm_fill_price"] or 0) * float(pos["pm_fill_shares"] or 0)
+            shares = float(pos["pm_fill_shares"] or 0)
+            leg_won = pm_winner == pos["leg_pm_player"]
+            winner = pm_winner if leg_won else "opponent"
+
+        payout = shares if leg_won else 0.0
+        pnl = payout - actual_cost
+
+        now = datetime.now(tz=timezone.utc).isoformat()
+        self.conn.execute(
+            """UPDATE positions SET
+                status='resolved', resolved_at=?, winner=?,
+                pm_result=?, ka_result=?, pnl=?,
+                total_cost=?, lock_valid=0
+            WHERE id=?""",
+            (now, winner, pm_winner or "unknown", ka_result or "unknown",
+             pnl, actual_cost, pos_id),
+        )
+        self._commit()
+        self.audit("real_one_legged_resolved", pos_id, {
+            "exec_status": exec_status, "pnl": pnl, "actual_cost": actual_cost,
+        })
         return pnl
 
     def open_real_position(
@@ -452,12 +515,31 @@ class SportsArbDB:
         return int(row["cnt"] or 0)
 
     def count_all_positions_for_pair(self, pair_key: str) -> int:
-        """Общее количество позиций (real + paper) по паре рынков."""
+        """Количество paper позиций по паре рынков."""
         row = self.conn.execute(
-            "SELECT COUNT(*) AS cnt FROM positions WHERE ka_event_ticker=?",
+            "SELECT COUNT(*) AS cnt FROM positions WHERE ka_event_ticker=? AND (is_paper=1 OR is_paper IS NULL)",
             (pair_key,),
         ).fetchone()
         return int(row["cnt"] or 0)
+
+    def has_open_one_legged(self, ka_event_ticker: str, exec_status: str) -> bool:
+        """Есть ли открытая одноногая позиция данного типа для этого матча (paper)."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM positions "
+            "WHERE ka_event_ticker=? AND status='open' AND execution_status=?",
+            (ka_event_ticker, exec_status),
+        ).fetchone()
+        return int(row["cnt"] or 0) > 0
+
+    def has_open_one_legged_real(self, ka_event_ticker: str) -> bool:
+        """Есть ли открытая реальная одноногая позиция для этого матча."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM positions "
+            "WHERE ka_event_ticker=? AND status='open' AND is_paper=0 "
+            "AND execution_status IN ('one_legged_kalshi', 'one_legged_polymarket')",
+            (ka_event_ticker,),
+        ).fetchone()
+        return int(row["cnt"] or 0) > 0
 
     def get_total_real_pnl(self) -> float:
         """Суммарный P&L по закрытым реальным позициям (отрицательный = потери)."""
@@ -664,6 +746,22 @@ class SportsArbDB:
             ),
         )
         self._commit()
+
+    def update_max_edge_seen(self, pair_key: str, edge: float) -> None:
+        """Обновляет max_edge_seen если новый edge больше текущего."""
+        self.conn.execute(
+            "UPDATE matched_pairs SET max_edge_seen = MAX(COALESCE(max_edge_seen, 0), ?) "
+            "WHERE pair_key = ?",
+            (edge, pair_key),
+        )
+        self._commit()
+
+    def get_max_edge_seen(self, pair_key: str) -> float:
+        row = self.conn.execute(
+            "SELECT max_edge_seen FROM matched_pairs WHERE pair_key = ?",
+            (pair_key,),
+        ).fetchone()
+        return float(row["max_edge_seen"] or 0.0) if row else 0.0
 
     def get_matched_pairs(self) -> list[sqlite3.Row]:
         return self.conn.execute(
