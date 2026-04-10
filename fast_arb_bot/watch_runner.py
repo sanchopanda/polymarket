@@ -800,8 +800,9 @@ class FastArbWatchRunner:
         shares = math.floor(opp.shares)
         if shares <= 0:
             return
-        yes_ok = yes_leg is not None and yes_leg.filled_shares + 1e-6 >= shares
-        no_ok = no_leg is not None and no_leg.filled_shares + 1e-6 >= shares
+        min_price = self.engine.safety.min_leg_price
+        yes_ok = yes_leg is not None and yes_leg.filled_shares + 1e-6 >= shares and yes_leg.avg_price >= min_price
+        no_ok = no_leg is not None and no_leg.filled_shares + 1e-6 >= shares and no_leg.avg_price >= min_price
         if yes_ok and not no_ok:
             self.engine.db.open_paper_one_legged_position(opp, "yes", yes_leg)
             print(
