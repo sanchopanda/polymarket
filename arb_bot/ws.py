@@ -41,7 +41,7 @@ class MarketWebSocketClient:
     def _run(self) -> None:
         while not self._stop:
             try:
-                with connect(self.url, open_timeout=10, close_timeout=3, ping_interval=None) as ws:
+                with connect(self.url, open_timeout=10, close_timeout=3, ping_interval=None, max_size=4 * 1024 * 1024) as ws:
                     ws.send(
                         json.dumps(
                             {

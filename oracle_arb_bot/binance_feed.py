@@ -13,6 +13,8 @@ _SYMBOL_MAP: dict[str, str] = {
     "ETHUSDT": "ETH",
     "SOLUSDT": "SOL",
     "XRPUSDT": "XRP",
+    "DOGEUSDT": "DOGE",
+    "BNBUSDT": "BNB",
 }
 
 
@@ -51,7 +53,7 @@ class BinanceFeed:
             return self._prices.get(symbol)
 
     def _run(self) -> None:
-        streams = "/".join(s.lower() + "@aggTrade" for s in self._binance_symbols)
+        streams = "/".join(s.lower() + "@bookTicker" for s in self._binance_symbols)
         url = f"{self.WS_BASE}?streams={streams}"
 
         while not self._stop:
@@ -81,20 +83,22 @@ class BinanceFeed:
         stream = msg.get("stream") or ""
         data = msg.get("data") or {}
 
-        # "btcusdt@aggTrade" → "BTCUSDT"
+        # "btcusdt@bookTicker" → "BTCUSDT"
         binance_sym = stream.split("@")[0].upper() if stream else ""
         symbol = _SYMBOL_MAP.get(binance_sym)
         if not symbol:
             return
 
         try:
-            price = float(data.get("p", 0))
-            ts_ms = int(data.get("T", 0))
+            bid = float(data.get("b", 0))
+            ask = float(data.get("a", 0))
+            ts_ms = int(data.get("E", 0))
         except (TypeError, ValueError):
             return
 
-        if price <= 0:
+        if bid <= 0 or ask <= 0:
             return
+        price = (bid + ask) / 2
 
         with self._lock:
             self._prices[symbol] = price

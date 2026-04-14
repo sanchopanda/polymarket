@@ -122,6 +122,7 @@ class SportsTelegramNotifier:
         pm_depth: Optional[float],
         ka_depth: Optional[float],
         lock_valid: bool,
+        one_legged: Optional[str] = None,
     ) -> None:
         depth_str = ""
         if pm_depth is not None and ka_depth is not None:
@@ -130,8 +131,14 @@ class SportsTelegramNotifier:
         pm_url = f"https://polymarket.com/event/{pm_slug}"
         ka_event_ticker = leg_ka_ticker.rsplit("-", 1)[0]
         ka_url = f"https://kalshi.com/markets/{ka_event_ticker}"
+        if one_legged == "pm":
+            header = f"⚡ <b>PAPER BET {pos_id} (одноногая — только PM)</b>"
+        elif one_legged == "ka":
+            header = f"⚡ <b>PAPER BET {pos_id} (одноногая — только Kalshi)</b>"
+        else:
+            header = f"📝 <b>PAPER BET {pos_id}</b>"
         text = (
-            f"📝 <b>PAPER BET {pos_id}</b>\n"
+            f"{header}\n"
             f"PM: {leg_pm_player} @ {leg_pm_price:.3f}\n"
             f"Kalshi: {leg_ka_player} ({leg_ka_ticker}) @ {leg_ka_price:.3f}\n"
             f"edge={edge:.4f} cost={cost:.4f} shares={shares}\n"

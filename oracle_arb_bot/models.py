@@ -105,6 +105,7 @@ class OracleBet:
     volume: Optional[float] = None          # market volume at bet time
     binance_price_at_close: Optional[float] = None  # Binance price at resolution time
     strategy: str = "crossing"               # "crossing" | "cl_contradiction"
+    paper_config: Optional[str] = None       # multi-config paper label ("A", "B", etc.)
     status: str = "open"
     resolved_at: Optional[datetime] = None
     winning_side: Optional[str] = None

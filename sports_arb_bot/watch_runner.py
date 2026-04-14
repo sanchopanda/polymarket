@@ -973,11 +973,11 @@ class SportsArbWatchRunner:
                     )
             elif pm_has_depth and not ka_has_depth:
                 # Only PM liquid → one-legged PM
-                # Не открываем если уже есть открытая одноногая PM для этого матча
-                if self.db.has_open_one_legged(pair.kalshi_event.event_ticker, "paper_one_legged_pm"):
+                # Не открываем если уже есть открытая одноногая (любого типа) для этого матча
+                if self.db.has_open_one_legged(pair.kalshi_event.event_ticker):
                     print(
                         f"[sports-arb] SKIP ONE-LEG(PM) {pair_key} | "
-                        f"already open one_legged_pm for this match"
+                        f"already open one-legged for this match"
                     )
                 else:
                     pos_id = self.db.open_one_legged_position(
@@ -1010,14 +1010,15 @@ class SportsArbWatchRunner:
                             pm_depth=pm_depth,
                             ka_depth=ka_depth,
                             lock_valid=False,
+                            one_legged="pm",
                         )
             elif ka_has_depth and not pm_has_depth:
                 # Only Kalshi liquid → one-legged Kalshi
-                # Не открываем если уже есть открытая одноногая Ka для этого матча
-                if self.db.has_open_one_legged(pair.kalshi_event.event_ticker, "paper_one_legged_ka"):
+                # Не открываем если уже есть открытая одноногая (любого типа) для этого матча
+                if self.db.has_open_one_legged(pair.kalshi_event.event_ticker):
                     print(
                         f"[sports-arb] SKIP ONE-LEG(Ka) {pair_key} | "
-                        f"already open one_legged_ka for this match"
+                        f"already open one-legged for this match"
                     )
                 else:
                     pos_id = self.db.open_one_legged_position(
@@ -1050,6 +1051,7 @@ class SportsArbWatchRunner:
                             pm_depth=pm_depth,
                             ka_depth=ka_depth,
                             lock_valid=False,
+                            one_legged="ka",
                         )
             else:
                 # Neither liquid

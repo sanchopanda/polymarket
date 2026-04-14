@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import json
 import threading
 import time
 import uuid
@@ -54,6 +55,25 @@ class OracleArbBot:
         self._delta_threshold_pct: float = scfg.get("delta_threshold_pct", 0.05)
         self._max_entry_price: float = scfg.get("max_entry_price", 0.48)
         self._min_orderbook_usd: float = scfg["min_orderbook_usd"]
+
+        # Multi-config paper betting
+        # Each config: {"name": "A", "delta_pct": 0.05, "max_ask": 0.50}
+        raw_cfgs = config.get("paper_configs", [])
+        if raw_cfgs:
+            self._paper_configs: list[dict] = []
+            for pc in raw_cfgs:
+                self._paper_configs.append({
+                    "name": pc["name"],
+                    "delta_pct": pc["delta_pct"],
+                    "max_ask": pc["max_ask"],
+                })
+        else:
+            # Single config fallback from strategy section
+            self._paper_configs = [{
+                "name": "default",
+                "delta_pct": self._delta_threshold_pct,
+                "max_ask": self._max_entry_price,
+            }]
         self._depth_slippage_cents: float = scfg.get("depth_slippage_cents", 4.0)
         self._active_zone_min: float = scfg.get("active_zone_min", 0.10)
         self._active_zone_max: float = scfg.get("active_zone_max", 0.90)
@@ -82,11 +102,12 @@ class OracleArbBot:
         self._pm_real: bool = config["polymarket"].get("real", False)
         self._kalshi_paper: bool = config.get("kalshi", {}).get("paper", False)
 
-        # Crossing tracker: последняя сторона ставки per market
-        self._last_bet_side: dict[str, str | None] = {}
+        # Crossing tracker: per-config last_bet_side
+        # key = (config_name, market_id) → side
+        self._last_bet_side: dict[tuple[str, str], str | None] = {}
         self._depth_cooldown: dict[tuple[str, str], float] = {}
-        self._last_bet_time: dict[str, float] = {}   # market_id → timestamp последней ставки
-        self._bet_cooldown_s: float = 60.0           # кулдаун между ставками на один рынок
+        self._last_bet_time: dict[tuple[str, str], float] = {}  # (config, market_id) → ts
+        self._bet_cooldown_s: float = 60.0
         self._placed_lock = threading.Lock()
         self._load_crossings_from_db()
 
@@ -152,8 +173,10 @@ class OracleArbBot:
             self._real = None
 
         # Telegram
+        _pc_info = [(pc["name"], pc["delta_pct"], pc["max_ask"]) for pc in self._paper_configs]
+
         def _status_fn() -> str:
-            text = db.get_status_text()
+            text = db.get_status_text(paper_configs=_pc_info)
             if self._real:
                 try:
                     real_bal = self._real.sync_balance()
@@ -181,7 +204,8 @@ class OracleArbBot:
     def _load_crossings_from_db(self) -> None:
         """Восстанавливаем last_bet_side и momentum_markets_bet из открытых ставок."""
         for bet in self._db.get_open_bets():
-            self._last_bet_side[bet.market_id] = bet.side
+            cfg_name = getattr(bet, "paper_config", None) or "default"
+            self._last_bet_side[(cfg_name, bet.market_id)] = bet.side
             self._momentum_markets_bet.add(bet.market_id)
 
     # ── Main loop ─────────────────────────────────────────────────────────
@@ -191,45 +215,144 @@ class OracleArbBot:
         Также записывает pm_price_after для ставок ожидающих первого poll после входа."""
         self._after_pending: dict[str, tuple[str, str]] = {}  # bet_id → (token_id, side)
         self._after_pending_lock = threading.Lock()
+        _last_open_price_fetch = [0.0]  # mutable for closure; monotonic time
 
         def _loop():
             while True:
                 try:
                     now = datetime.utcnow()
+
+                    # Retry openPrice fetch every 5s while any PM market is missing it
+                    mono = time.monotonic()
+                    if mono - _last_open_price_fetch[0] >= 5:
+                        need = any(
+                            m.venue == "polymarket" and m.pm_open_price is None
+                            and m.pm_event_slug and now >= m.market_start
+                            for m in self._scanner.all_markets()
+                        )
+                        if need:
+                            _last_open_price_fetch[0] = mono
+                            try:
+                                self._fetch_pm_open_prices()
+                            except Exception:
+                                pass
+
+                    kalshi_feed = self._scanner.kalshi_feed
                     for market in self._scanner.all_markets():
-                        if market.venue != "polymarket":
+                        if market.venue not in ("polymarket", "kalshi"):
                             continue
                         if now < market.market_start or now >= market.expiry:
                             continue
-                        for side, token_id in [("yes", market.yes_token_id), ("no", market.no_token_id)]:
-                            if not token_id:
-                                continue
-                            try:
-                                book = self._clob.get_orderbook(token_id)
-                                if book and book.asks:
-                                    price = book.asks[0].price
-                                    if side == "yes":
-                                        market.yes_ask = price
-                                    else:
-                                        market.no_ask = price
-                                    # записываем after для ожидающих ставок
-                                    with self._after_pending_lock:
-                                        done = [bid for bid, (tid, s) in self._after_pending.items()
-                                                if tid == token_id and s == side]
-                                    for bid in done:
-                                        try:
-                                            self._db.update_price_after(bid, price)
-                                        except Exception:
-                                            pass
+
+                        yes_bid = None
+                        no_bid = None
+                        yes_asks_raw = None
+                        yes_bids_raw = None
+                        no_asks_raw = None
+                        no_bids_raw = None
+
+                        if market.venue == "polymarket":
+                            for side, token_id in [("yes", market.yes_token_id), ("no", market.no_token_id)]:
+                                if not token_id:
+                                    continue
+                                try:
+                                    book = self._clob.get_orderbook(token_id)
+                                    if book and book.asks:
+                                        price = book.asks[0].price
+                                        if side == "yes":
+                                            market.yes_ask = price
+                                            yes_asks_raw = [[str(l.price), str(l.size)] for l in book.asks]
+                                        else:
+                                            market.no_ask = price
+                                            no_asks_raw = [[str(l.price), str(l.size)] for l in book.asks]
+                                        # записываем after для ожидающих ставок
                                         with self._after_pending_lock:
-                                            self._after_pending.pop(bid, None)
+                                            done = [bid for bid, (tid, s) in self._after_pending.items()
+                                                    if tid == token_id and s == side]
+                                        for bid in done:
+                                            try:
+                                                self._db.update_price_after(bid, price)
+                                            except Exception:
+                                                pass
+                                            with self._after_pending_lock:
+                                                self._after_pending.pop(bid, None)
+                                    if book and book.bids:
+                                        if side == "yes":
+                                            yes_bid = book.bids[0].price
+                                            yes_bids_raw = [[str(l.price), str(l.size)] for l in book.bids]
+                                        else:
+                                            no_bid = book.bids[0].price
+                                            no_bids_raw = [[str(l.price), str(l.size)] for l in book.bids]
+                                except Exception:
+                                    pass
+
+                        elif market.venue == "kalshi" and kalshi_feed:
+                            try:
+                                ya, yb, na, nb, err = kalshi_feed.fetch_full_book(market.market_id)
+                                if not err:
+                                    if ya:
+                                        market.yes_ask = ya[0].price
+                                        yes_asks_raw = [[str(l.price), str(l.size)] for l in ya]
+                                    if yb:
+                                        yes_bid = yb[0].price
+                                        yes_bids_raw = [[str(l.price), str(l.size)] for l in yb]
+                                    if na:
+                                        market.no_ask = na[0].price
+                                        no_asks_raw = [[str(l.price), str(l.size)] for l in na]
+                                    if nb:
+                                        no_bid = nb[0].price
+                                        no_bids_raw = [[str(l.price), str(l.size)] for l in nb]
                             except Exception:
                                 pass
+
+                        # Record price tick for backtesting
+                        bp = self._price_feed.get_price(market.symbol)
+                        ste = (market.expiry - now).total_seconds()
+                        ref = market.pm_open_price
+                        delta = ((bp - ref) / ref * 100) if bp and ref else None
+                        ts_iso = now.isoformat()
+                        try:
+                            self._db.insert_price_tick(
+                                market_id=market.market_id,
+                                symbol=market.symbol,
+                                interval_minutes=market.interval_minutes,
+                                ts=ts_iso,
+                                seconds_to_expiry=round(ste, 2),
+                                binance_price=bp,
+                                pm_open_price=ref,
+                                pm_yes_ask=market.yes_ask,
+                                pm_no_ask=market.no_ask,
+                                pm_yes_bid=yes_bid,
+                                pm_no_bid=no_bid,
+                                delta_pct=round(delta, 4) if delta is not None else None,
+                            )
+                        except Exception:
+                            pass
+
+                        # Record full orderbook snapshot
+                        try:
+                            self._db.insert_orderbook_snapshot(
+                                market_id=market.market_id,
+                                symbol=market.symbol,
+                                interval_minutes=market.interval_minutes,
+                                ts=ts_iso,
+                                seconds_to_expiry=round(ste, 2),
+                                yes_asks=json.dumps(yes_asks_raw) if yes_asks_raw else None,
+                                yes_bids=json.dumps(yes_bids_raw) if yes_bids_raw else None,
+                                no_asks=json.dumps(no_asks_raw) if no_asks_raw else None,
+                                no_bids=json.dumps(no_bids_raw) if no_bids_raw else None,
+                            )
+                        except Exception:
+                            pass
+                    try:
+                        self._db.conn.commit()
+                    except Exception:
+                        pass
                 except Exception as exc:
                     print(f"[book_poll] error: {exc}")
-                time.sleep(3)
+                time.sleep(1)
         threading.Thread(target=_loop, daemon=True, name="book-poller").start()
-        print("[oracle] book poller started (3s interval)")
+        print("[oracle] book poller started (1s interval)")
 
     def run(self) -> None:
         print("[oracle] Starting OracleArbBot")
@@ -239,8 +362,7 @@ class OracleArbBot:
         self._price_feed.start()
         if self._binance_feed is not None:
             self._binance_feed.start()
-        if self._strategy_mode == "binance_momentum":
-            self._start_book_poller()
+        self._start_book_poller()
         while True:
             try:
                 self._scanner.scan_and_subscribe()
@@ -541,97 +663,94 @@ class OracleArbBot:
             return
 
         mid = market.market_id
+        _asks_cache: dict[tuple[str, str], list[tuple[float, float]]] = {}
 
-        # Получаем last_bet_side атомарно
-        with self._placed_lock:
-            last_side = self._last_bet_side.get(mid)
+        # Evaluate each paper config independently
+        for pcfg in self._paper_configs:
+            cfg_name = pcfg["name"]
+            cfg_key = (cfg_name, mid)
 
-        if self._strategy_mode == "cl_contradiction":
-            # current_price = CL цена (тик только что пришёл)
-            cl_prev = (
-                self._price_feed.get_prev_price(market.symbol)
-                if isinstance(self._price_feed, ChainlinkFeed)
-                else None
-            )
-            binance_price = (
-                self._binance_feed.get_price(market.symbol)
-                if self._binance_feed is not None
-                else self._price_feed.get_price(market.symbol)
-            )
-            signal = evaluate_cl_contradiction_signal(
-                market=market,
-                cl_price=current_price,
-                cl_prev_price=cl_prev,
-                binance_price=binance_price,
-                now=now,
-                last_bet_side=last_side,
-                min_cl_delta_pct=self._min_cl_delta_pct,
-            )
-        else:
-            signal = evaluate_oracle_signal(
-                market=market,
-                current_price=current_price,
-                now=now,
-                delta_threshold_pct=self._delta_threshold_pct,
-                max_entry_price=self._max_entry_price,
-                last_bet_side=last_side,
-            )
-
-        # Diagnostic: track delta distribution
-        self._track_delta(market, signal.delta_pct, market.no_ask)
-
-        if not signal.should_bet:
-            # Diagnostic: track negative delta rejections
-            if signal.delta_pct < -self._delta_threshold_pct:
-                self._log_no_rejection(market, signal, current_price)
-            return
-
-        # Кулдаун 60s между ставками на один рынок
-        with self._placed_lock:
-            last_bet_ts = self._last_bet_time.get(mid, 0.0)
-        if time.time() - last_bet_ts < self._bet_cooldown_s:
-            return
-
-        # Атомарно проверяем и обновляем last_bet_side (защита от дублей между тиками)
-        with self._placed_lock:
-            if self._last_bet_side.get(mid) == signal.side:
-                return
-            cooldown_key = (mid, signal.side)
-            now_ts = time.time()
-            if cooldown_key in self._depth_cooldown:
-                if now_ts - self._depth_cooldown[cooldown_key] < 5:
-                    return
-            self._last_bet_side[mid] = signal.side
-
-        # Логируем пересечение (один раз, после прохождения дедупа/кулдауна)
-        self._log_signal(market, signal, current_price, now, bet_placed=True)
-
-        # Проверка ликвидности (разная для PM и Kalshi)
-        available_usd = self._check_depth(market, signal.side)
-
-        if available_usd < self._stake_usd:
-            print(
-                f"[oracle] skip {market.symbol} [{market.venue}] {signal.side}: "
-                f"depth ${available_usd:.2f} < ${self._stake_usd} (max_price={self._paper_max_price})"
-            )
             with self._placed_lock:
-                self._last_bet_side[mid] = last_side
-                self._depth_cooldown[cooldown_key] = now_ts
-            return
+                last_side = self._last_bet_side.get(cfg_key)
 
-        crossing_seq = self._db.count_bets_for_market(mid) + 1
-        self._place_paper_bet(market, signal, current_price, now, crossing_seq, depth_usd=available_usd)
-        with self._placed_lock:
-            self._last_bet_time[mid] = time.time()
+            if self._strategy_mode == "cl_contradiction":
+                cl_prev = (
+                    self._price_feed.get_prev_price(market.symbol)
+                    if isinstance(self._price_feed, ChainlinkFeed)
+                    else None
+                )
+                binance_price = (
+                    self._binance_feed.get_price(market.symbol)
+                    if self._binance_feed is not None
+                    else self._price_feed.get_price(market.symbol)
+                )
+                signal = evaluate_cl_contradiction_signal(
+                    market=market,
+                    cl_price=current_price,
+                    cl_prev_price=cl_prev,
+                    binance_price=binance_price,
+                    now=now,
+                    last_bet_side=last_side,
+                    min_cl_delta_pct=self._min_cl_delta_pct,
+                )
+            else:
+                signal = evaluate_oracle_signal(
+                    market=market,
+                    current_price=current_price,
+                    now=now,
+                    delta_threshold_pct=pcfg["delta_pct"],
+                    max_entry_price=pcfg["max_ask"],
+                    last_bet_side=last_side,
+                )
 
-        # Real trading (PM only для теперь)
-        if market.venue == "polymarket" and self._real and self._pm_real:
-            self._real.try_place(market, signal, current_price, now,
-                                delta_pct=signal.delta_pct, cheap_delta=self._momentum_cheap_delta)
+            # Diagnostic: track delta distribution (once, for first config only)
+            if pcfg is self._paper_configs[0]:
+                self._track_delta(market, signal.delta_pct, market.no_ask)
 
-        is_arb = self._db.has_both_sides(mid)
-        if is_arb:
-            print(f"[oracle] ARB {market.symbol} {market.interval_minutes}m [{market.venue}] — ставки на обе стороны")
+            if not signal.should_bet:
+                continue
+
+            # Одна ставка на рынок на конфиг — если уже ставили, пропускаем
+            with self._placed_lock:
+                if self._last_bet_side.get(cfg_key) is not None:
+                    continue
+                self._last_bet_side[cfg_key] = signal.side
+
+            # Логируем (один раз — для первого конфига)
+            if pcfg is self._paper_configs[0]:
+                self._log_signal(market, signal, current_price, now, bet_placed=True)
+
+            # Real trading FIRST (PM only, trigger on first config only) — скорость важна
+            if pcfg is self._paper_configs[0]:
+                if market.venue == "polymarket" and self._real and self._pm_real:
+                    self._real.try_place(market, signal, current_price, now,
+                                        delta_pct=signal.delta_pct, cheap_delta=self._momentum_cheap_delta)
+
+            # Достаём стакан (один раз на рынок, кэшируем)
+            cache_key = (mid, signal.side)
+            if cache_key not in _asks_cache:
+                _asks_cache[cache_key] = self._fetch_asks(market, signal.side)
+            asks = _asks_cache[cache_key]
+
+            # Симулируем fill по стакану с лимитом конфига
+            fill_price, depth_usd = self._simulate_fill(asks, self._stake_usd, pcfg["max_ask"])
+
+            if fill_price is None:
+                if pcfg is self._paper_configs[0]:
+                    print(
+                        f"[oracle] skip {market.symbol} [{market.venue}] {signal.side}: "
+                        f"depth ${depth_usd:.2f} < ${self._stake_usd} (max_ask={pcfg['max_ask']})"
+                    )
+                with self._placed_lock:
+                    self._last_bet_side[cfg_key] = None  # разрешаем повторную попытку
+                continue
+
+            self._place_paper_bet(
+                market, signal, current_price, now,
+                crossing_seq=1, depth_usd=depth_usd,
+                paper_config=cfg_name, max_ask=pcfg["max_ask"],
+                fill_price=fill_price,
+            )
 
     def _depth_price_limit(self, best_ask: float) -> float:
         """Верхняя граница цены при проверке стакана."""
@@ -639,28 +758,18 @@ class OracleArbBot:
             return best_ask + self._depth_slippage_cents / 100
         return self._paper_max_price
 
-    def _check_depth(self, market: OracleMarket, side: str) -> float:
-        """Проверяет ликвидность стакана. Возвращает доступный USD до max_price.
-        Побочный эффект: обновляет market.yes_ask/no_ask из реального стакана.
-
-        В режиме cl_contradiction: лимит = best_ask + depth_slippage_cents (нет потолка).
-        В режиме crossing: лимит = paper_max_price (обычно 0.48).
-        """
-        available_usd = 0.0
-        real_best_ask = None
+    def _fetch_asks(self, market: OracleMarket, side: str) -> list[tuple[float, float]]:
+        """Достаёт ask-уровни стакана [(price, size), ...].
+        Побочный эффект: обновляет market.yes_ask/no_ask из реального стакана."""
+        asks: list[tuple[float, float]] = []
 
         if market.venue == "kalshi":
             kalshi_feed = self._scanner.kalshi_feed
             if kalshi_feed:
                 try:
-                    asks, err = kalshi_feed.fetch_side_asks(market.market_id, side)
-                    if asks:
-                        real_best_ask = asks[0].price
-                        price_limit = self._depth_price_limit(real_best_ask)
-                        for level in asks:
-                            if level.price > price_limit:
-                                break
-                            available_usd += level.price * level.size
+                    raw_asks, err = kalshi_feed.fetch_side_asks(market.market_id, side)
+                    if raw_asks:
+                        asks = [(a.price, a.size) for a in raw_asks]
                 except Exception as exc:
                     print(f"[oracle] Kalshi depth check failed {market.symbol}: {exc}")
         else:
@@ -669,23 +778,57 @@ class OracleArbBot:
                 try:
                     book = self._clob.get_orderbook(token_id)
                     if book and book.asks:
-                        real_best_ask = book.asks[0].price
-                        price_limit = self._depth_price_limit(real_best_ask)
-                        for level in book.asks:
-                            if level.price > price_limit:
-                                break
-                            available_usd += level.price * level.size
+                        asks = [(a.price, a.size) for a in book.asks]
                 except Exception as exc:
                     print(f"[oracle] CLOB depth check failed {market.symbol}: {exc}")
 
-        # Обновляем цену из реального стакана — не даём стейлым ценам триггерить сигналы
-        if real_best_ask is not None:
+        if asks:
+            real_best_ask = asks[0][0]
             if side == "yes":
                 market.yes_ask = real_best_ask
             else:
                 market.no_ask = real_best_ask
 
-        return available_usd
+        return asks
+
+    @staticmethod
+    def _simulate_fill(
+        asks: list[tuple[float, float]], stake_usd: float, max_price: float,
+    ) -> tuple[float | None, float]:
+        """Симулирует FOK fill: идёт по ask-уровням, тратит до stake_usd.
+        Возвращает (avg_fill_price, depth_usd). avg_fill_price=None если не хватило ликвидности."""
+        remaining = stake_usd
+        total_shares = 0.0
+        total_cost = 0.0
+        depth_usd = 0.0
+
+        for price, size in asks:
+            if price > max_price:
+                break
+            level_usd = price * size
+            depth_usd += level_usd
+            can_spend = min(remaining, level_usd)
+            shares = can_spend / price
+            total_cost += can_spend
+            total_shares += shares
+            remaining -= can_spend
+            if remaining < 0.001:
+                break
+
+        if remaining > 0.01:
+            return None, depth_usd  # не хватило ликвидности
+
+        avg_price = total_cost / total_shares if total_shares > 0 else None
+        return avg_price, depth_usd
+
+    def _check_depth(self, market: OracleMarket, side: str) -> float:
+        """Обратная совместимость для momentum mode."""
+        asks = self._fetch_asks(market, side)
+        price_limit = self._depth_price_limit(
+            asks[0][0] if asks else 0.0
+        )
+        _, depth_usd = self._simulate_fill(asks, self._stake_usd, price_limit)
+        return depth_usd
 
     def _place_paper_bet(
         self,
@@ -697,40 +840,35 @@ class OracleArbBot:
         depth_usd: float = 0.0,
         signal_ask: float = 0.0,
         signal_mode: str = "5s_bucket",
+        paper_config: str | None = None,
+        max_ask: float | None = None,
+        fill_price: float | None = None,
     ) -> None:
         raw_ask = market.yes_ask if signal.side == "yes" else market.no_ask
         if raw_ask <= 0:
             return
 
-        # Округляем ask вверх до 2 знаков
-        entry_price = float(
-            Decimal(str(raw_ask)).quantize(Decimal("0.01"), rounding=ROUND_UP)
-        )
+        # Use per-config max_ask if provided, else fallback to paper_max_price
+        effective_max = max_ask if max_ask is not None else self._paper_max_price
+
+        if fill_price is not None:
+            # Средневзвешенная цена из симуляции стакана
+            entry_price = round(fill_price, 4)
+        else:
+            # Fallback (momentum и пр.): округляем ask вверх до 2 знаков
+            entry_price = float(
+                Decimal(str(raw_ask)).quantize(Decimal("0.01"), rounding=ROUND_UP)
+            )
 
         if self._strategy_mode == "cl_contradiction":
             if not (self._active_zone_min <= entry_price <= self._active_zone_max):
-                print(
-                    f"[oracle] skip paper {market.symbol} {signal.side}: "
-                    f"цена {entry_price:.2f} вне зоны "
-                    f"[{self._active_zone_min:.2f}, {self._active_zone_max:.2f}]"
-                )
                 return
         elif self._strategy_mode == "binance_momentum":
             if not (self._active_zone_min <= entry_price <= self._active_zone_max):
-                print(
-                    f"[momentum] skip paper {market.symbol} {signal.side}: "
-                    f"цена {entry_price:.2f} вне зоны "
-                    f"[{self._active_zone_min:.2f}, {self._active_zone_max:.2f}]"
-                )
                 return
         else:
-            # crossing — капаем по paper_max_price
-            entry_price = min(entry_price, self._paper_max_price)
-            if entry_price <= 0 or entry_price > self._paper_max_price:
-                print(
-                    f"[oracle] skip paper {market.symbol} {signal.side}: "
-                    f"цена {entry_price:.2f} > max {self._paper_max_price}"
-                )
+            # crossing — cap at effective max
+            if entry_price <= 0 or entry_price > effective_max:
                 return
 
         if entry_price <= 0:
@@ -766,14 +904,15 @@ class OracleArbBot:
             depth_usd=round(depth_usd, 2),
             volume=round(market.volume, 2) if market.volume else None,
             strategy=self._strategy_mode,
+            paper_config=paper_config,
         )
 
         self._db.record_bet(bet, crossing_seq=crossing_seq, signal_ask=signal_ask,
-                            signal_mode=signal_mode)
+                            signal_mode=signal_mode, paper_config=paper_config)
         self._db.mark_signal_bet_placed(market.market_id, signal.side)
 
-        # Фиксируем цену через 10 секунд после ставки (только PM — у Kalshi нет midpoint API)
-        if market.venue == "polymarket":
+        # Фиксируем цену через 10 секунд (only first config to avoid parallel requests)
+        if market.venue == "polymarket" and (paper_config is None or paper_config == self._paper_configs[0]["name"]):
             token_id = market.yes_token_id if signal.side == "yes" else market.no_token_id
             if token_id:
                 threading.Thread(
@@ -784,6 +923,7 @@ class OracleArbBot:
 
         seq_tag = " [#1-NEW]" if crossing_seq == 1 else f" [#{crossing_seq}-REPEAT]"
         venue_tag = f" [{market.venue}]" if market.venue != "polymarket" else ""
+        cfg_tag = f" [{paper_config}]" if paper_config else ""
         self._db.audit("bet_placed", bet.id, {
             "venue": market.venue,
             "symbol": market.symbol,
@@ -799,12 +939,13 @@ class OracleArbBot:
         })
 
         print(
-            f"[oracle] PAPER BET{venue_tag}{seq_tag} {market.symbol} {market.interval_minutes}m "
+            f"[oracle] PAPER BET{cfg_tag}{venue_tag}{seq_tag} {market.symbol} {market.interval_minutes}m "
             f"{signal.side.upper()} @ {entry_price:.3f} "
             f"| Δ{signal.delta_pct:+.3f}% | ${self._stake_usd:.0f} | min={signal.market_minute}"
         )
 
-        if self._tg:
+        # Telegram only for first config to avoid spam
+        if self._tg and (paper_config is None or paper_config == self._paper_configs[0]["name"]):
             self._tg.send_bet(
                 market.symbol, signal.side, entry_price, signal.delta_pct, self._stake_usd,
                 label="paper", market_slug=market.pm_event_slug,
@@ -996,10 +1137,9 @@ class OracleArbBot:
             return
         slug = f"{bet.symbol.lower()}-updown-{bet.interval_minutes}m-{calendar.timegm(bet.market_start.timetuple())}"
         close_price = fetch_pm_close_price(slug)
-        self._real.resolve(bet, winning_side, close_price)
-        if self._tg:
+        pnl = self._real.resolve(bet, winning_side, close_price)
+        if pnl is not None and self._tg:
             won = winning_side == bet.side
-            pnl = bet.shares_filled - bet.stake_usd if won else -bet.stake_usd
             self._tg.send_resolve(bet.symbol, bet.side, won, pnl, label="real", venue="polymarket")
 
     def _make_slug(self, bet: OracleBet) -> Optional[str]:

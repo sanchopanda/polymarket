@@ -1,13 +1,14 @@
 trading:
   stake_per_pair_usd: 20.0
-  min_lock_edge: 0.06
-  completion_min_edge: 0.05
+  min_lock_edge: 0.06       # hourly (1h) default
+  min_lock_edge_15m: 0.06   # 15-minute markets
+  # completion_min_edge: removed — uses min_lock_edge / min_lock_edge_15m
   completion_skip_pm_if_price_above: 0.60
   completion_cancel_kalshi_rise: 0.10     # отменить рестинг Kalshi если live_ask - pm_fill >= этого
   completion_reenter_kalshi_rise: 0.08    # перевыставить когда live_ask - pm_fill <= этого (один раз, финально)
-  max_lock_edge: 0.45
-  stake_tier_half_above: 0.20
-  stake_tier_third_above: 0.30
+  max_lock_edge: 0.13
+  stake_tier_half_above: 99.0
+  stake_tier_third_above: 99.0
   max_open_pairs: 50
   max_entries_per_pair: 1
 
@@ -22,7 +23,7 @@ safety:
   min_balance_kalshi: 0.0
   cooldown_seconds: 10.0
   require_confirmation: false
-  dry_run: false
+  dry_run: true
   balance_divergence_threshold: 5.0
   min_partial_fill_pct: 50
   kalshi_slippage_cents: 0
@@ -30,12 +31,14 @@ safety:
 
 fast_arb:
   budget_usd: 60.0           # базовый бюджет (растёт с выигрышами)
-  max_realized_loss_usd: 60.0  # максимальные реализованные потери — стоп
-  max_target_gap:               # максимальный gap между PM openPrice и Kalshi reference ($)
+  max_realized_loss_usd: 200.0  # максимальные реализованные потери — стоп
+  max_target_gap:               # максимальный gap между PM openPrice и Kalshi reference ($) ~0.15%
     BTC: 50
-    ETH: 10
-    SOL: 0.50
-    XRP: 0.02
+    ETH: 3.30
+    SOL: 0.12
+    XRP: 0.002
+    DOGE: 0.00014
+    BNB: 0.90
   balance_refresh_interval_seconds: 30  # как часто фоновый поток обновляет балансы
   deposits:
     pm_start: 195.22

@@ -134,6 +134,35 @@ class OracleDB:
                 bet_id      TEXT,
                 details     TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS orderbook_snapshots (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_id           TEXT    NOT NULL,
+                symbol              TEXT    NOT NULL,
+                interval_minutes    INTEGER NOT NULL,
+                ts                  TEXT    NOT NULL,
+                seconds_to_expiry   REAL,
+                yes_asks            TEXT,
+                yes_bids            TEXT,
+                no_asks             TEXT,
+                no_bids             TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS price_ticks (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_id           TEXT    NOT NULL,
+                symbol              TEXT    NOT NULL,
+                interval_minutes    INTEGER NOT NULL,
+                ts                  TEXT    NOT NULL,
+                seconds_to_expiry   REAL,
+                binance_price       REAL,
+                pm_open_price       REAL,
+                pm_yes_ask          REAL,
+                pm_no_ask           REAL,
+                pm_yes_bid          REAL,
+                pm_no_bid           REAL,
+                delta_pct           REAL
+            );
         """)
         self.conn.commit()
         self._migrate_alter()
@@ -155,6 +184,7 @@ class OracleDB:
             "ALTER TABLE bets ADD COLUMN version TEXT",
             "ALTER TABLE bets ADD COLUMN signal_mode TEXT",
             "ALTER TABLE bets ADD COLUMN pm_price_after REAL",
+            "ALTER TABLE bets ADD COLUMN paper_config TEXT",
         ]:
             try:
                 self.conn.execute(sql)
@@ -327,7 +357,8 @@ class OracleDB:
         self.conn.commit()
 
     def record_bet(self, bet: OracleBet, crossing_seq: int = 1,
-                   signal_ask: float = 0.0, signal_mode: str = "5s_bucket") -> None:
+                   signal_ask: float = 0.0, signal_mode: str = "5s_bucket",
+                   paper_config: str | None = None) -> None:
         self.conn.execute(
             """
             INSERT INTO bets (
@@ -339,9 +370,9 @@ class OracleDB:
                 pm_close_price, status, resolved_at, winning_side, pnl,
                 crossing_seq, venue,
                 seconds_to_close, opposite_ask, depth_usd, volume,
-                strategy, signal_ask, version, signal_mode
+                strategy, signal_ask, version, signal_mode, paper_config
             ) VALUES (
-                ?,?,?,?,  ?,?,?,  ?,?,  ?,?,?,?,  ?,?,?,?,  ?,?,?,?,?,  ?,?,  ?,?,?,?,  ?,?,?,?
+                ?,?,?,?,  ?,?,?,  ?,?,  ?,?,?,?,  ?,?,?,?,  ?,?,?,?,?,  ?,?,  ?,?,?,?,  ?,?,?,?,?
             )
             """,
             (
@@ -355,7 +386,7 @@ class OracleDB:
                 bet.winning_side, bet.pnl,
                 crossing_seq, bet.venue,
                 bet.seconds_to_close, bet.opposite_ask, bet.depth_usd, bet.volume,
-                bet.strategy, signal_ask or None, "v0", signal_mode,
+                bet.strategy, signal_ask or None, "v0", signal_mode, paper_config,
             ),
         )
         self.conn.commit()
@@ -394,6 +425,55 @@ class OracleDB:
         self.conn.commit()
         self.conn.commit()
 
+    def insert_price_tick(
+        self,
+        market_id: str,
+        symbol: str,
+        interval_minutes: int,
+        ts: str,
+        seconds_to_expiry: float | None,
+        binance_price: float | None,
+        pm_open_price: float | None,
+        pm_yes_ask: float | None,
+        pm_no_ask: float | None,
+        pm_yes_bid: float | None = None,
+        pm_no_bid: float | None = None,
+        delta_pct: float | None = None,
+    ) -> None:
+        self.conn.execute(
+            """INSERT INTO price_ticks (
+                market_id, symbol, interval_minutes, ts,
+                seconds_to_expiry, binance_price, pm_open_price,
+                pm_yes_ask, pm_no_ask, pm_yes_bid, pm_no_bid, delta_pct
+            ) VALUES (?,?,?,?, ?,?,?, ?,?,?,?,?)""",
+            (
+                market_id, symbol, interval_minutes, ts,
+                seconds_to_expiry, binance_price, pm_open_price,
+                pm_yes_ask, pm_no_ask, pm_yes_bid, pm_no_bid, delta_pct,
+            ),
+        )
+
+    def insert_orderbook_snapshot(
+        self,
+        market_id: str,
+        symbol: str,
+        interval_minutes: int,
+        ts: str,
+        seconds_to_expiry: float | None,
+        yes_asks: str | None,
+        yes_bids: str | None,
+        no_asks: str | None,
+        no_bids: str | None,
+    ) -> None:
+        self.conn.execute(
+            """INSERT INTO orderbook_snapshots (
+                market_id, symbol, interval_minutes, ts,
+                seconds_to_expiry, yes_asks, yes_bids, no_asks, no_bids
+            ) VALUES (?,?,?,?, ?,?,?,?,?)""",
+            (market_id, symbol, interval_minutes, ts,
+             seconds_to_expiry, yes_asks, yes_bids, no_asks, no_bids),
+        )
+
     def audit(self, event_type: str, bet_id: Optional[str], details: dict) -> None:
         self.conn.execute(
             "INSERT INTO audit_log (timestamp, event_type, bet_id, details) VALUES (?,?,?,?)",
@@ -417,18 +497,17 @@ class OracleDB:
         ).fetchone()
         return row is not None
 
-    def count_bets_for_market(self, market_id: str) -> int:
-        row = self.conn.execute(
-            "SELECT COUNT(*) FROM bets WHERE market_id=?", (market_id,)
-        ).fetchone()
+    def count_bets_for_market(self, market_id: str, paper_config: str | None = None) -> int:
+        if paper_config:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM bets WHERE market_id=? AND paper_config=?",
+                (market_id, paper_config),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM bets WHERE market_id=?", (market_id,)
+            ).fetchone()
         return row[0]
-
-    def has_both_sides(self, market_id: str) -> bool:
-        """True если есть ставки и на YES, и на NO — арбитраж."""
-        row = self.conn.execute(
-            "SELECT COUNT(DISTINCT side) FROM bets WHERE market_id=?", (market_id,)
-        ).fetchone()
-        return row[0] >= 2
 
     def get_open_bets(self) -> list[OracleBet]:
         rows = self.conn.execute(
@@ -457,21 +536,113 @@ class OracleDB:
             "open": open_cnt,
         }
 
-    def get_status_text(self) -> str:
-        s = self.stats()
-        wins = self.conn.execute(
-            "SELECT COUNT(*) FROM bets WHERE status='resolved' AND winning_side=side"
+    def _venue_stats(self, venue: str) -> dict:
+        total = self.conn.execute(
+            "SELECT COUNT(*) FROM bets WHERE venue=?", (venue,)
         ).fetchone()[0]
-        win_rate = round(wins / s["resolved"] * 100) if s["resolved"] else 0
-        pnl_sign = "+" if s["realized_pnl"] >= 0 else ""
+        resolved = self.conn.execute(
+            "SELECT COUNT(*), SUM(pnl) FROM bets WHERE status='resolved' AND venue=?", (venue,)
+        ).fetchone()
+        wins = self.conn.execute(
+            "SELECT COUNT(*) FROM bets WHERE status='resolved' AND winning_side=side AND venue=?",
+            (venue,),
+        ).fetchone()[0]
+        open_cnt = self.conn.execute(
+            "SELECT COUNT(*) FROM bets WHERE status='open' AND venue=?", (venue,)
+        ).fetchone()[0]
+        resolved_cnt = resolved[0] or 0
+        return {
+            "total": total,
+            "resolved": resolved_cnt,
+            "wins": wins,
+            "win_rate": round(wins / resolved_cnt * 100) if resolved_cnt else 0,
+            "realized_pnl": round(resolved[1] or 0.0, 4),
+            "open": open_cnt,
+        }
+
+    def _config_stats(self, config_name: str, venue: str | None = None) -> dict:
+        if venue:
+            total = self.conn.execute(
+                "SELECT COUNT(*) FROM bets WHERE paper_config=? AND venue=?",
+                (config_name, venue),
+            ).fetchone()[0]
+            resolved = self.conn.execute(
+                "SELECT COUNT(*), SUM(pnl) FROM bets WHERE status='resolved' AND paper_config=? AND venue=?",
+                (config_name, venue),
+            ).fetchone()
+            wins = self.conn.execute(
+                "SELECT COUNT(*) FROM bets WHERE status='resolved' AND winning_side=side AND paper_config=? AND venue=?",
+                (config_name, venue),
+            ).fetchone()[0]
+            open_cnt = self.conn.execute(
+                "SELECT COUNT(*) FROM bets WHERE status='open' AND paper_config=? AND venue=?",
+                (config_name, venue),
+            ).fetchone()[0]
+        else:
+            total = self.conn.execute(
+                "SELECT COUNT(*) FROM bets WHERE paper_config=?", (config_name,)
+            ).fetchone()[0]
+            resolved = self.conn.execute(
+                "SELECT COUNT(*), SUM(pnl) FROM bets WHERE status='resolved' AND paper_config=?",
+                (config_name,),
+            ).fetchone()
+            wins = self.conn.execute(
+                "SELECT COUNT(*) FROM bets WHERE status='resolved' AND winning_side=side AND paper_config=?",
+                (config_name,),
+            ).fetchone()[0]
+            open_cnt = self.conn.execute(
+                "SELECT COUNT(*) FROM bets WHERE status='open' AND paper_config=?", (config_name,)
+            ).fetchone()[0]
+        resolved_cnt = resolved[0] or 0
+        return {
+            "total": total,
+            "resolved": resolved_cnt,
+            "wins": wins,
+            "win_rate": round(wins / resolved_cnt * 100) if resolved_cnt else 0,
+            "realized_pnl": round(resolved[1] or 0.0, 4),
+            "open": open_cnt,
+        }
+
+    def get_status_text(self, paper_configs: list[tuple[str, float, float]] | None = None) -> str:
         lines = [
             "<b>OracleArb — статус</b>",
-            "",
-            "<b>Paper</b>",
-            f"Ставок:      {s['total']} (открыто {s['open']})",
-            f"Резолвнуто:  {s['resolved']} (win {win_rate}%)",
-            f"PnL:         {pnl_sign}${s['realized_pnl']:.2f}",
         ]
+
+        if paper_configs:
+            for cfg_name, delta, max_ask in paper_configs:
+                cs = self._config_stats(cfg_name)
+                if cs["total"] == 0:
+                    continue
+                c_pnl_sign = "+" if cs["realized_pnl"] >= 0 else ""
+                lines += [
+                    "",
+                    f"<b>{cfg_name}</b> (Δ{delta}% ask≤${max_ask:.2f}) — {cs['total']} ставок ({cs['open']} открыто)",
+                    f"  {cs['resolved']}r win={cs['win_rate']}% PnL={c_pnl_sign}${cs['realized_pnl']:.2f}",
+                ]
+                # Per-venue breakdown under each config
+                for venue_name, venue_key in [("PM", "polymarket"), ("Kalshi", "kalshi")]:
+                    vs = self._config_stats(cfg_name, venue=venue_key)
+                    if vs["total"] == 0:
+                        continue
+                    v_pnl_sign = "+" if vs["realized_pnl"] >= 0 else ""
+                    lines.append(
+                        f"    {venue_name}: {vs['resolved']}/{vs['total']} win={vs['win_rate']}% PnL={v_pnl_sign}${vs['realized_pnl']:.2f}"
+                    )
+        else:
+            s = self.stats()
+            wins = self.conn.execute(
+                "SELECT COUNT(*) FROM bets WHERE status='resolved' AND winning_side=side"
+            ).fetchone()[0]
+            win_rate = round(wins / s["resolved"] * 100) if s["resolved"] else 0
+            pnl_sign = "+" if s["realized_pnl"] >= 0 else ""
+            lines += [
+                "",
+                f"<b>Paper (всего)</b>",
+                f"Ставок:      {s['total']} (открыто {s['open']})",
+                f"Резолвнуто:  {s['resolved']} (win {win_rate}%)",
+                f"PnL:         {pnl_sign}${s['realized_pnl']:.2f}",
+            ]
+
         rs = self.real_stats()
         if rs["total"] > 0 or rs["balance"] > 0:
             r_pnl_sign = "+" if rs["realized_pnl"] >= 0 else ""
@@ -672,6 +843,7 @@ class OracleDB:
             volume=row["volume"] if "volume" in keys else None,
             binance_price_at_close=row["binance_price_at_close"] if "binance_price_at_close" in keys else None,
             strategy=row["strategy"] if "strategy" in keys else "crossing",
+            paper_config=row["paper_config"] if "paper_config" in keys else None,
             status=row["status"],
             resolved_at=_dt(row["resolved_at"]),
             winning_side=row["winning_side"],

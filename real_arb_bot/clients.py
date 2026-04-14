@@ -118,6 +118,38 @@ class OrderResult:
     raw_response: dict
 
 
+# ERC-20 Transfer(from, to, value) event signature
+_TRANSFER_TOPIC = "0x" + Web3.keccak(text="Transfer(address,address,uint256)").hex()
+_USDC_ADDR_LOWER = USDC_E.lower()
+
+
+def _topic_hex(t) -> str:
+    """Normalize a topic (HexBytes or str) to '0x...' lowercase."""
+    if isinstance(t, bytes):
+        return "0x" + t.hex()
+    return t.lower()
+
+
+def _parse_usdc_payout(receipt, recipient: str) -> float:
+    """Парсит USDC Transfer events из receipt и суммирует входящие переводы на recipient."""
+    recipient_topic = "0x" + recipient.lower().replace("0x", "").zfill(64)
+    total = 0
+    for log in receipt.get("logs", []):
+        addr = (log.get("address") or "").lower()
+        topics = log.get("topics", [])
+        if addr != _USDC_ADDR_LOWER or len(topics) < 3:
+            continue
+        if _topic_hex(topics[0]) != _TRANSFER_TOPIC:
+            continue
+        if _topic_hex(topics[2]) == recipient_topic:
+            data = log.get("data", b"")
+            if isinstance(data, bytes):
+                total += int.from_bytes(data, "big")
+            else:
+                total += int(data, 16)
+    return round(total / 1e6, 6)
+
+
 @dataclass
 class RedeemResult:
     success: bool
@@ -371,12 +403,6 @@ class PolymarketTrader:
         for rpc in POLYGON_RPCS:
             try:
                 w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 15}))
-                usdc_contract = w3.eth.contract(
-                    address=Web3.to_checksum_address(USDC_E), abi=ERC20_BALANCE_ABI
-                )
-
-                balance_before = usdc_contract.functions.balanceOf(addr_cs).call() / 1e6
-
                 # Если предыдущая TX ещё в pending — ждём её, не шлём новую
                 if pending_tx_hash:
                     print(f"[pm-redeem] ждём pending TX {pending_tx_hash[:16]}...")
@@ -435,8 +461,7 @@ class PolymarketTrader:
                 total_ms = (time.time() - t0) * 1000
                 gas_cost = receipt.gasUsed * gas_price / 1e18
                 success = receipt.status == 1
-                balance_after = usdc_contract.functions.balanceOf(addr_cs).call() / 1e6
-                payout = round(balance_after - balance_before, 6)
+                payout = _parse_usdc_payout(receipt, addr_cs)
 
                 print(f"[pm-redeem] {'OK' if success else 'FAIL'} | {total_ms:.0f}ms | gas={receipt.gasUsed} ({gas_cost:.6f} POL) | payout=${payout:.2f}")
                 return RedeemResult(
@@ -460,9 +485,6 @@ class PolymarketTrader:
         for rpc in POLYGON_RPCS:
             try:
                 w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 15}))
-                usdc_contract = w3.eth.contract(
-                    address=Web3.to_checksum_address(USDC_E), abi=ERC20_BALANCE_ABI
-                )
                 ctf = w3.eth.contract(address=ctf_cs, abi=CTF_ERC1155_ABI)
 
                 # Query YES/NO token balances
@@ -475,8 +497,6 @@ class PolymarketTrader:
                     return RedeemResult(success=False, error="no tokens to redeem (yes=0, no=0)")
 
                 print(f"[pm-redeem-neg] YES={yes_bal / 1e6:.2f} NO={no_bal / 1e6:.2f}")
-
-                balance_before = usdc_contract.functions.balanceOf(addr_cs).call() / 1e6
 
                 # Ensure ERC1155 approval for NegRiskAdapter
                 approved = ctf.functions.isApprovedForAll(addr_cs, adapter_cs).call()
@@ -541,8 +561,7 @@ class PolymarketTrader:
                 total_ms = (time.time() - t0) * 1000
                 gas_cost = receipt.gasUsed * gas_price / 1e18
                 success = receipt.status == 1
-                balance_after = usdc_contract.functions.balanceOf(addr_cs).call() / 1e6
-                payout = round(balance_after - balance_before, 6)
+                payout = _parse_usdc_payout(receipt, addr_cs)
 
                 print(f"[pm-redeem-neg] {'OK' if success else 'FAIL'} | {total_ms:.0f}ms | gas={receipt.gasUsed} ({gas_cost:.6f} POL) | payout=${payout:.2f}")
                 return RedeemResult(

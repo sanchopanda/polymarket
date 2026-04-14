@@ -11,6 +11,18 @@ from src.api.clob import OrderBook, OrderLevel
 
 KALSHI_UPDOWN_RE = re.compile(r"^(?P<symbol>[A-Za-z]+)\s+price\s+up\s+in\s+next\s+(?P<minutes>\d+)\s+mins\?$", re.IGNORECASE)
 KALSHI_HOUR_RE = re.compile(r"^(?P<symbol>[A-Za-z]+)\s+price\s+up\s+this\s+hour\?$", re.IGNORECASE)
+_TARGET_PRICE_RE = re.compile(r"\$([0-9,]+\.?\d*)")
+
+
+def _parse_target_price(text: str) -> float | None:
+    """Extract dollar price from Kalshi yes_sub_title like 'Target Price: $71,987.73'."""
+    m = _TARGET_PRICE_RE.search(text)
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
 
 # Above/below strike-based hourly series (KXBTCD, KXETHD, …)
 # Each entry: (binance_symbol, floor_strike_increment, floor_strike_correction, ticker_decimals)
@@ -86,6 +98,37 @@ class KalshiFeed:
             return response.json().get("market"), None
         except httpx.HTTPError as exc:
             return None, f"kalshi market fetch failed: {exc}"
+
+    def fetch_full_book(self, ticker: str) -> tuple[
+        list["OrderLevel"], list["OrderLevel"],
+        list["OrderLevel"], list["OrderLevel"],
+        str | None,
+    ]:
+        """One HTTP call → (yes_asks, yes_bids, no_asks, no_bids, error)."""
+        try:
+            response = self.http.get(f"{self.base_url}/markets/{ticker}/orderbook")
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPError as exc:
+            return [], [], [], [], f"kalshi orderbook fetch failed: {exc}"
+
+        orderbook = payload.get("orderbook_fp") or payload.get("orderbook") or {}
+        yes_bids_raw = orderbook.get("yes_dollars") or orderbook.get("yes") or []
+        no_bids_raw = orderbook.get("no_dollars") or orderbook.get("no") or []
+        yes_bids = [l for l in (self._level_from_pair(i) for i in yes_bids_raw) if l]
+        no_bids = [l for l in (self._level_from_pair(i) for i in no_bids_raw) if l]
+
+        yes_asks = sorted(
+            [OrderLevel(price=max(0.0, 1.0 - b.price), size=b.size) for b in no_bids],
+            key=lambda x: x.price,
+        )
+        no_asks = sorted(
+            [OrderLevel(price=max(0.0, 1.0 - b.price), size=b.size) for b in yes_bids],
+            key=lambda x: x.price,
+        )
+        yes_bids.sort(key=lambda x: x.price, reverse=True)
+        no_bids.sort(key=lambda x: x.price, reverse=True)
+        return yes_asks, yes_bids, no_asks, no_bids, None
 
     def fetch_orderbook(self, ticker: str) -> tuple[OrderBook | None, str | None]:
         try:
@@ -315,6 +358,12 @@ class KalshiFeed:
         if yes_ask <= 0 or no_ask <= 0:
             return None
 
+        # Parse real reference price from yes_sub_title (e.g. "Target Price: $71,987.73")
+        # floor_strike is an internal Kalshi value with inconsistent scaling per symbol
+        ref_price = _parse_target_price(row.get("yes_sub_title") or "")
+        if ref_price is None:
+            ref_price = _to_float(row.get("floor_strike"), default=None)
+
         return NormalizedMarket(
             venue="kalshi",
             market_id=str(row.get("ticker") or ""),
@@ -334,6 +383,6 @@ class KalshiFeed:
             liquidity=max(_to_float(row.get("yes_ask_size_fp")), _to_float(row.get("no_ask_size_fp"))),
             interval_minutes=interval_minutes,
             rule_family="price_direction",
-            reference_price=_to_float(row.get("floor_strike"), default=None),
+            reference_price=ref_price,
             rules_text=str(row.get("rules_primary") or ""),
         )

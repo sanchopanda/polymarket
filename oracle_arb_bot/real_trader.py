@@ -176,28 +176,33 @@ class OracleRealTrader:
         requested_price = market.yes_ask if signal.side == "yes" else market.no_ask
 
         import time as _time
+        import math as _math
         from decimal import Decimal, ROUND_DOWN, ROUND_UP
-        try:
-            # Получаем реальную цену из стакана (REST), а не стейл WS
-            try:
-                book = self._pm._client.get_order_book(token_id)
-                asks = book.get("asks") or []
-                if asks:
-                    requested_price = float(asks[0]["price"])
-            except Exception as book_err:
-                print(f"[real] book fetch failed, using WS price: {book_err}")
+        _QUANT = Decimal("0.01")
+        _MIN_NOTIONAL = Decimal("1.00")  # PM minimum order amount
 
-            # Лимитный ордер: ставим по цене из стакана + до 3 центов слиппейджа
-            limit_price = float(Decimal(str(min(requested_price + 0.03, self._max_price)))
-                                .quantize(Decimal("0.01"), rounding=ROUND_UP))
+        try:
+            # Лимитная цена = max_price; FOK заполнится по лучшей доступной
+            limit_price = self._max_price
 
             if limit_price < 0.50 and abs(delta_pct) < cheap_delta:
                 print(f"[real] skip cheap {market.symbol} {signal.side}: "
                       f"price {limit_price:.3f} < 0.50, delta {abs(delta_pct):.4f}% < {cheap_delta}%")
                 return
 
-            size = float(Decimal(str(self._stake / limit_price))
-                         .quantize(Decimal("0.01"), rounding=ROUND_UP))
+            # PM CLOB: price, size, notional (price*size) — всё макс 2 знака.
+            # size должен быть кратен size_step чтобы price*size был ровно 2 знака.
+            price_dec = Decimal(str(limit_price)).quantize(_QUANT, rounding=ROUND_DOWN)
+            price_cents = int(price_dec * 100)
+            g = _math.gcd(price_cents, 100)
+            size_step = Decimal(100 // g) / Decimal(100)  # e.g. 1.00 for $0.49, 0.25 for $0.48
+
+            target = max(_MIN_NOTIONAL, Decimal(str(self._stake)))
+            raw_size = target / price_dec
+            size_dec = (raw_size / size_step).to_integral_value(rounding=ROUND_UP) * size_step
+
+            limit_price = float(price_dec)
+            size = float(size_dec)
             if size <= 0:
                 return
 
@@ -213,29 +218,35 @@ class OracleRealTrader:
             order_id = resp.get("orderID", "")
             status = resp.get("status", "")
 
-            # Проверяем реальный статус и цену через get_order
+            # Верификация: проверяем реальный статус через get_order
             real_fill_price = None
             real_size_matched = None
+            verify_ok = False  # удалось ли получить ответ от get_order
             if order_id:
-                _time.sleep(0.2)
-                try:
-                    info = self._pm._client.get_order(order_id)
-                    if not isinstance(info, dict):
-                        raise ValueError(f"get_order returned {type(info).__name__}: {info!r:.200}")
-                    status = info.get("status", status)
-                    if info.get("associate_trades"):
-                        trades = info["associate_trades"]
-                        total_cost = sum(float(t.get("price", 0)) * float(t.get("size", 0)) for t in trades)
-                        total_size = sum(float(t.get("size", 0)) for t in trades)
-                        if total_size > 0:
-                            real_fill_price = round(total_cost / total_size, 6)
-                            real_size_matched = round(total_size, 6)
-                    if real_fill_price is None and info.get("price"):
-                        real_fill_price = float(info["price"])
-                    if real_size_matched is None and info.get("size_matched"):
-                        real_size_matched = float(info["size_matched"])
-                except Exception as poll_err:
-                    print(f"[real] order poll error: {poll_err}")
+                for attempt_delay in (0.3, 1.0):
+                    _time.sleep(attempt_delay)
+                    try:
+                        info = self._pm._client.get_order(order_id)
+                        if not isinstance(info, dict):
+                            raise ValueError(f"get_order returned {type(info).__name__}: {info!r:.200}")
+                        verify_ok = True
+                        status = info.get("status", status)
+                        if info.get("associate_trades"):
+                            trades = info["associate_trades"]
+                            total_cost = sum(float(t.get("price", 0)) * float(t.get("size", 0)) for t in trades)
+                            total_size = sum(float(t.get("size", 0)) for t in trades)
+                            if total_size > 0:
+                                real_fill_price = round(total_cost / total_size, 6)
+                                real_size_matched = round(total_size, 6)
+                        if real_fill_price is None and info.get("price"):
+                            real_fill_price = float(info["price"])
+                        if real_size_matched is None and info.get("size_matched"):
+                            real_size_matched = float(info["size_matched"])
+                        # Если статус определён — не ждём дальше
+                        if status.upper() in ("MATCHED", "FILLED") or real_size_matched:
+                            break
+                    except Exception as poll_err:
+                        print(f"[real] order poll error (delay={attempt_delay}s): {poll_err}")
         except Exception as exc:
             reason = f"ошибка API: {exc}"
             print(f"[real] ордер ОШИБКА {market.symbol} {signal.side}: {exc}")
@@ -243,10 +254,23 @@ class OracleRealTrader:
                 self._tg.send_bet_failed(market.symbol, signal.side, reason)
             return
 
-        matched = status.upper() in ("MATCHED", "FILLED")
+        # Определяем, заполнен ли ордер (по статусу ИЛИ по size_matched > 0)
+        filled_by_status = status.upper() in ("MATCHED", "FILLED")
+        filled_by_size = real_size_matched is not None and real_size_matched > 0
+        matched = filled_by_status or filled_by_size
+
         if not matched:
-            reason = f"FOK не исполнен (status={status}, limit={limit_price:.3f})"
-            print(f"[real] ордер НЕ ИСПОЛНЕН {market.symbol} {signal.side}: {reason}")
+            if verify_ok and not filled_by_size:
+                # Точно подтверждено: ордер не прошёл → разрешаем ретрай
+                with self._attempted_lock:
+                    self._attempted.discard(key)
+                print(f"[real] ордер НЕ ИСПОЛНЕН {market.symbol} {signal.side}: "
+                      f"status={status}, size_matched={real_size_matched} — ретрай разрешён")
+            else:
+                # Не удалось проверить — не рискуем дублем
+                print(f"[real] ордер НЕ ИСПОЛНЕН {market.symbol} {signal.side}: "
+                      f"status={status} — верификация не удалась, ретрай заблокирован")
+            reason = f"FOK не исполнен (status={status}, limit={limit_price:.2f})"
             if self._tg:
                 self._tg.send_bet_failed(market.symbol, signal.side, reason)
             return
@@ -313,30 +337,37 @@ class OracleRealTrader:
 
     # ── Resolve ───────────────────────────────────────────────────────────
 
-    def resolve(self, bet: RealBet, winning_side: str, pm_close_price: Optional[float]) -> None:
+    def resolve(self, bet: RealBet, winning_side: str, pm_close_price: Optional[float]) -> Optional[float]:
         won = winning_side == bet.side
 
         if won:
-            # Пытаемся redeem (может быть уже auto-settled или redeemed вручную)
+            # Redeem обязателен для зачисления депозита
+            actual_payout = None
             try:
                 result = self._pm.redeem(bet.market_id)
                 if result.success and result.payout_usdc > 0:
+                    actual_payout = result.payout_usdc
                     print(
-                        f"[real][redeem] {bet.symbol} OK | payout=${result.payout_usdc:.4f} "
+                        f"[real][redeem] {bet.symbol} OK | payout=${actual_payout:.4f} "
                         f"| gas={result.gas_used} ({result.gas_cost_pol:.6f} POL)"
                     )
                 elif result.pending:
-                    print(f"[real][redeem] {bet.symbol} TX pending — резолв продолжаем")
+                    print(f"[real][redeem] {bet.symbol} TX pending — ждём следующий цикл")
+                    return None  # не резолвим, попробуем в следующем цикле
                 else:
+                    # payout=0 может означать auto-settle (средства уже на балансе)
                     print(f"[real][redeem] {bet.symbol} payout=0 (уже auto-settled/redeemed)")
+                    actual_payout = bet.shares_filled  # fallback: теоретический payout
                 self._refresh_clob_balance()
             except Exception as e:
-                print(f"[real][redeem] {bet.symbol} ошибка: {e} — продолжаем резолв")
+                print(f"[real][redeem] {bet.symbol} ошибка: {e} — резолв отложен")
+                return None  # не резолвим, попробуем в следующем цикле
 
-            # Каждая выигрышная шера = $1 USDC, не зависим от redeem().payout_usdc
-            payout = bet.shares_filled
-            self._db.add_real_deposit(payout)
-            pnl = payout - bet.stake_usd
+            if actual_payout is None:
+                return None
+
+            self._db.add_real_deposit(actual_payout)
+            pnl = actual_payout - bet.stake_usd
         else:
             pnl = -bet.stake_usd  # уже вычтено при ставке
 
@@ -347,7 +378,8 @@ class OracleRealTrader:
             "winning_side": winning_side,
             "won": won,
             "pnl": round(pnl, 4),
-            "payout": bet.shares_filled if won else 0.0,
+            "payout": round(actual_payout, 6) if won else 0.0,
+            "theoretical_payout": bet.shares_filled if won else 0.0,
         })
 
         bal, _ = self._db.get_real_deposit()
@@ -357,3 +389,4 @@ class OracleRealTrader:
             f"| {tag} | pnl=${pnl:+.2f} | депозит ${bal:.2f}"
         )
         self._refresh_clob_balance()
+        return round(pnl, 6)

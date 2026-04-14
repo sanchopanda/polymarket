@@ -181,6 +181,9 @@ class RealArbDB:
             ("entry_binance_distance_pct", "REAL"),
             # Which leg filled first when position opened one-legged
             ("initially_one_legged", "TEXT"),
+            # Usable book depth at max_edge
+            ("max_edge_yes_usable", "REAL"),
+            ("max_edge_no_usable", "REAL"),
         ]:
             try:
                 self.conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {definition}")
@@ -312,6 +315,8 @@ class RealArbDB:
         opportunity: CrossVenueOpportunity,
         pm_price_to_beat: float | None = None,
         entry_binance_distance_pct: float | None = None,
+        yes_leg=None,
+        no_leg=None,
     ) -> CrossPosition:
         pos_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
@@ -321,10 +326,13 @@ class RealArbDB:
                 id, pair_key, symbol, title, expiry, venue_yes, market_yes, venue_no, market_no,
                 polymarket_title, kalshi_title, match_score, expiry_delta_seconds,
                 polymarket_reference_price, kalshi_reference_price, polymarket_rules, kalshi_rules,
-                shares, yes_ask, no_ask, ask_sum, total_cost, expected_profit,
+                shares, yes_ask, no_ask,
+                yes_available_shares, yes_usable_shares, yes_best_ask,
+                no_available_shares, no_usable_shares, no_best_ask,
+                ask_sum, total_cost, expected_profit,
                 opened_at, status, execution_status, is_paper, pm_price_to_beat,
                 entry_binance_distance_pct
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 pos_id,
@@ -347,6 +355,12 @@ class RealArbDB:
                 opportunity.shares,
                 opportunity.yes_ask,
                 opportunity.no_ask,
+                getattr(yes_leg, "available_shares", None),
+                getattr(yes_leg, "usable_shares", None),
+                getattr(yes_leg, "best_ask", None),
+                getattr(no_leg, "available_shares", None),
+                getattr(no_leg, "usable_shares", None),
+                getattr(no_leg, "best_ask", None),
                 opportunity.ask_sum,
                 opportunity.total_cost,
                 opportunity.expected_profit,
@@ -363,7 +377,7 @@ class RealArbDB:
             (pair_key, yes_venue, no_venue),
         ).fetchone() is not None
 
-    def open_paper_one_legged_position(self, opportunity, side: str, leg) -> None:
+    def open_paper_one_legged_position(self, opportunity, side: str, leg) -> str:
         """Открывает одноногую paper позицию (только YES или только NO)."""
         import uuid as _uuid
         pos_id = str(_uuid.uuid4())
@@ -404,6 +418,7 @@ class RealArbDB:
             ),
         )
         self.conn.commit()
+        return pos_id
 
     def complete_paper_one_legged(
         self, position_id: str, missing_side: str, price: float, shares: float

@@ -67,6 +67,8 @@ class _EdgeMonitorState:
     pm_no_token_id: str | None = None
     kalshi_market_id: str | None = None
     interval_minutes: int | None = None
+    # Throttle for REST book fetch on max_edge update
+    last_book_fetch_ts: float = 0.0
 
 
 class FastArbWatchRunner:
@@ -109,7 +111,7 @@ class FastArbWatchRunner:
         self.pairs_by_kalshi_ticker: dict[str, set[str]] = {}
         self._kalshi_ws: KalshiWebSocketClient | None = None
         self._signal_lock = threading.Lock()
-        self._paper_lock = threading.Lock()  # отдельный лок для бумажных позиций
+        self._paper_lock = threading.RLock()  # реентрантный лок для бумажных позиций
         self._last_skip_log: dict[str, float] = {}
         self._SKIP_LOG_INTERVAL = 30.0
         self._last_completion_attempt: dict[str, float] = {}
@@ -127,6 +129,8 @@ class FastArbWatchRunner:
         self._one_leg_pm_final: set[str] = set()
         # pair_key → pending Timer (paper mode: 0.5s delay before orderbook check)
         self._pending_timers: dict[str, threading.Timer] = {}
+        # PM market IDs с открытыми позициями (in-memory guard от дупликатов)
+        self._open_pm_markets: set[str] = self._load_open_pm_markets()
 
         # Edge divergence monitor (replaces Chainlink danger zone)
         edge_cfg = fast_cfg.get("edge_monitor", {})
@@ -161,6 +165,19 @@ class FastArbWatchRunner:
         # Подменяем функцию статуса в Telegram-нотификаторе
         if engine.notifier:
             engine.notifier._get_status = self._get_status_text
+
+    # ── Per-interval edge thresholds ─────────────────────────────────
+
+    def _min_edge_for(self, interval_minutes: int | None = None) -> float:
+        """Return min_lock_edge for the given market interval.
+        Falls back to global min_lock_edge if no per-interval override exists."""
+        trading = self.engine.trading
+        if interval_minutes is not None and interval_minutes != 60:
+            # e.g. trading.min_lock_edge_15m for 15-minute markets
+            key = f"min_lock_edge_{interval_minutes}m"
+            if key in trading:
+                return float(trading[key])
+        return float(trading["min_lock_edge"])
 
     # ── Основной цикл ──────────────────────────────────────────────────
 
@@ -326,6 +343,8 @@ class FastArbWatchRunner:
                 continue
             if self._edge_above_max_allowed(opp.yes_ask, opp.no_ask):
                 continue
+            if opp.polymarket_market_id in self._open_pm_markets:
+                continue
             with self._signal_lock:
                 open_for_pair = self._count_open_positions_for_pair(opp.pair_key)
                 if open_for_pair >= int(self.engine.trading.get("max_entries_per_pair", 1)):
@@ -342,7 +361,7 @@ class FastArbWatchRunner:
                     continue
                 if not self._prices_within_bounds(executed.yes_ask, executed.no_ask):
                     continue
-                if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
+                if executed.edge_per_share < self._min_edge_for(opp.interval_minutes):
                     continue
                 if self._kalshi_drifted(opp, yes_leg, no_leg):
                     continue
@@ -473,12 +492,10 @@ class FastArbWatchRunner:
             else (kalshi_live.best_no_ask if kalshi_live else matched.kalshi.no_ask)
         )
         rough_edge = 1.0 - (rough_yes + rough_no)
-        if rough_edge < self.engine.trading["min_lock_edge"]:
+        if rough_edge < self._min_edge_for(opp.interval_minutes):
             return
         if rough_edge > self.engine.trading["max_lock_edge"]:
-            rough_polarized = (rough_yes > 0.5) != (rough_no > 0.5)
-            if not rough_polarized:
-                return
+            return
 
         # 4. Проверка min/max цены ноги (в памяти)
         if not self._prices_within_bounds(rough_yes, rough_no):
@@ -526,6 +543,8 @@ class FastArbWatchRunner:
 
         # Paper mode: симулируем задержку исполнения реальной ставки (0.5s)
         if self.dry_run:
+            if opp.polymarket_market_id in self._open_pm_markets:
+                return
             watch_key = self._watch_key(opp)
             if watch_key not in self._pending_timers:
                 t = threading.Timer(1.5, self._delayed_paper_check, args=[watch_key])
@@ -549,7 +568,7 @@ class FastArbWatchRunner:
                     f"              NO:  {self.engine._format_leg_summary(no_leg)}",
                 )
                 return
-            if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
+            if executed.edge_per_share < self._min_edge_for(opp.interval_minutes):
                 self._skip_log(
                     pair_key,
                     f"[fast-arb][SKIP] {opp.symbol} | edge_disappeared ({executed.edge_per_share:.4f})",
@@ -630,7 +649,7 @@ class FastArbWatchRunner:
             return
 
         if self.dry_run:
-            self._open_paper_from_opp(opp, _k_tgt, _p_tgt, _tgt_str)
+            self._open_paper_from_opp(opp, _k_tgt, _p_tgt, _tgt_str, yes_leg=yes_leg, no_leg=no_leg)
             return
 
         # Прописываем правильные token_id для PM ног
@@ -726,13 +745,13 @@ class FastArbWatchRunner:
 
         max_entries = int(self.engine.trading.get("max_entries_per_pair", 1))
         with self._paper_lock:
-            if self._count_open_paper_for_pair(opp.pair_key) >= max_entries:
+            if opp.polymarket_market_id in self._open_pm_markets:
                 return
 
             executed, yes_leg, no_leg = self._apply_execution_pricing_parallel(opp, matched)
 
             if executed is not None:
-                if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
+                if executed.edge_per_share < self._min_edge_for(opp.interval_minutes):
                     return
                 if self._kalshi_drifted(opp, yes_leg, no_leg):
                     return
@@ -752,14 +771,22 @@ class FastArbWatchRunner:
         _k_tgt: float | None,
         _p_tgt: float | None,
         _tgt_str: str = "",
+        yes_leg=None,
+        no_leg=None,
     ) -> None:
         """Открывает бумажную позицию и уведомляет в Telegram."""
-        _, _entry_binance_dist = self._get_binance_data(opp.symbol, opp.kalshi_reference_price)
-        opened_paper = self.engine.db.open_paper_position(
-            opp,
-            pm_price_to_beat=_p_tgt,
-            entry_binance_distance_pct=_entry_binance_dist,
-        )
+        with self._paper_lock:
+            if opp.polymarket_market_id in self._open_pm_markets:
+                return
+            self._open_pm_markets.add(opp.polymarket_market_id)
+            _, _entry_binance_dist = self._get_binance_data(opp.symbol, opp.kalshi_reference_price)
+            opened_paper = self.engine.db.open_paper_position(
+                opp,
+                pm_price_to_beat=_p_tgt,
+                entry_binance_distance_pct=_entry_binance_dist,
+                yes_leg=yes_leg,
+                no_leg=no_leg,
+            )
         print(
             f"[fast-arb][PAPER] {opp.symbol} | {opp.buy_yes_venue}:YES@{opp.yes_ask:.4f} "
             f"+ {opp.buy_no_venue}:NO@{opp.no_ask:.4f} | edge={opp.edge_per_share:.4f}{_tgt_str}"
@@ -805,7 +832,7 @@ class FastArbWatchRunner:
         executed, yes_leg, no_leg = self._apply_execution_pricing_parallel(opp, matched)
 
         if executed is not None:
-            if executed.edge_per_share < self.engine.trading["min_lock_edge"]:
+            if executed.edge_per_share < self._min_edge_for(opp.interval_minutes):
                 return
             if self._kalshi_drifted(opp, yes_leg, no_leg):
                 return
@@ -816,15 +843,14 @@ class FastArbWatchRunner:
             if executed.expected_profit <= 0:
                 return
             with self._paper_lock:
-                if self._count_open_paper_for_pair(opp.pair_key) >= max_entries:
+                if opp.polymarket_market_id in self._open_pm_markets:
                     return
                 _k_tgt = executed.kalshi_reference_price
                 _p_tgt = self._fetch_pm_open_price(executed.pm_event_slug) if executed.pm_event_slug else None
                 self._open_paper_from_opp(executed, _k_tgt, _p_tgt)
         else:
             with self._paper_lock:
-                max_entries = int(self.engine.trading.get("max_entries_per_pair", 1))
-                if self._count_open_paper_for_pair(opp.pair_key) >= max_entries:
+                if opp.polymarket_market_id in self._open_pm_markets:
                     return
                 self._maybe_open_paper_one_legged(opp, yes_leg, no_leg)
 
@@ -835,6 +861,10 @@ class FastArbWatchRunner:
         no_leg: ExecutionLegInfo | None,
     ) -> None:
         """Если только одна нога ликвидна — открываем одноногую paper позицию."""
+        if opp.edge_per_share < self._min_edge_for(opp.interval_minutes):
+            return
+        if self._edge_above_max_allowed(opp.yes_ask, opp.no_ask):
+            return
         shares = math.floor(opp.shares)
         if shares <= 0:
             return
@@ -842,17 +872,56 @@ class FastArbWatchRunner:
         yes_ok = yes_leg is not None and yes_leg.filled_shares + 1e-6 >= shares and yes_leg.avg_price >= min_price
         no_ok = no_leg is not None and no_leg.filled_shares + 1e-6 >= shares and no_leg.avg_price >= min_price
         if yes_ok and not no_ok:
-            self.engine.db.open_paper_one_legged_position(opp, "yes", yes_leg)
+            pos_id = self.engine.db.open_paper_one_legged_position(opp, "yes", yes_leg)
+            self._open_pm_markets.add(opp.polymarket_market_id)
             print(
                 f"[fast-arb][PAPER][ONE-LEG] {opp.symbol} | "
                 f"{opp.buy_yes_venue}:YES@{yes_leg.avg_price:.4f} | no-leg unavailable"
             )
+            self._notify_one_legged_open(pos_id, opp, "yes", yes_leg)
         elif no_ok and not yes_ok:
-            self.engine.db.open_paper_one_legged_position(opp, "no", no_leg)
+            pos_id = self.engine.db.open_paper_one_legged_position(opp, "no", no_leg)
+            self._open_pm_markets.add(opp.polymarket_market_id)
             print(
                 f"[fast-arb][PAPER][ONE-LEG] {opp.symbol} | "
                 f"{opp.buy_no_venue}:NO@{no_leg.avg_price:.4f} | yes-leg unavailable"
             )
+            self._notify_one_legged_open(pos_id, opp, "no", no_leg)
+
+    def _notify_one_legged_open(
+        self,
+        pos_id: str,
+        opp: CrossVenueOpportunity,
+        side: str,
+        leg,
+    ) -> None:
+        """Отправляет Telegram-уведомление для одноногой paper позиции и сохраняет msg_id."""
+        if not self.engine.notifier:
+            return
+        venue = opp.buy_yes_venue if side == "yes" else opp.buy_no_venue
+        edge = 1.0 - (opp.yes_ask + opp.no_ask)
+        msg_id = self.engine.notifier.notify_open(
+            symbol=opp.symbol,
+            yes_venue=opp.buy_yes_venue,
+            no_venue=opp.buy_no_venue,
+            yes_ask=opp.yes_ask,
+            no_ask=opp.no_ask,
+            ask_sum=opp.ask_sum,
+            edge=edge,
+            cost=leg.filled_shares * leg.avg_price,
+            expected_profit=-(leg.filled_shares * leg.avg_price),
+            execution_status=f"paper_one_legged_{side}",
+            is_paper=True,
+            interval_minutes=opp.interval_minutes,
+            pm_slug=opp.pm_event_slug,
+            kalshi_ticker=opp.kalshi_market_id,
+        )
+        if msg_id:
+            self.engine.db.conn.execute(
+                "UPDATE positions SET telegram_msg_id=? WHERE id=?",
+                (msg_id, pos_id),
+            )
+            self.engine.db.conn.commit()
 
     def _monitor_paper_one_legged(self) -> None:
         """Проверяет открытые одноногие paper позиции и симулирует докупку
@@ -868,10 +937,11 @@ class FastArbWatchRunner:
         if not rows:
             return
 
-        min_edge = float(self.engine.trading["min_lock_edge"])
         for row in rows:
             pos_id = row["id"]
             exec_status = row["execution_status"]
+            interval = 15 if "15M" in row["pair_key"] else 60
+            min_edge = self._min_edge_for(interval)
             if exec_status == "paper_one_legged_yes":
                 filled_price = float(row["yes_avg_price"] or 0)
                 shares = float(row["yes_filled_shares"] or 0)
@@ -1026,9 +1096,16 @@ class FastArbWatchRunner:
             if current_edge > state.max_edge:
                 state.max_edge = current_edge
                 max_edge_at = datetime.now(timezone.utc).isoformat()
+                # REST-fetch orderbook for usable_shares (throttled to 1 per 5s)
+                yes_usable, no_usable = self._fetch_usable_shares_for_max_edge(
+                    state, pos, current_yes_ask, current_no_ask,
+                )
                 self.engine.db.conn.execute(
-                    "UPDATE positions SET max_edge=?, max_edge_at=? WHERE id=?",
-                    (round(state.max_edge, 6), max_edge_at, pos.id),
+                    "UPDATE positions SET max_edge=?, max_edge_at=?, "
+                    "max_edge_yes_usable=COALESCE(?, max_edge_yes_usable), "
+                    "max_edge_no_usable=COALESCE(?, max_edge_no_usable) "
+                    "WHERE id=?",
+                    (round(state.max_edge, 6), max_edge_at, yes_usable, no_usable, pos.id),
                 )
                 self.engine.db.conn.commit()
 
@@ -1089,6 +1166,56 @@ class FastArbWatchRunner:
             # --- Signal disabled: data collection only, no exit action ---
             # (edge exit signal was harmful overall — fires on normal positions too)
             # Will re-enable with a better discriminator after analysing edge_ticks data.
+
+    _MAX_EDGE_BOOK_FETCH_INTERVAL = 5.0  # throttle REST book fetch to max once per 5s per position
+
+    def _fetch_usable_shares_for_max_edge(
+        self,
+        state: _EdgeMonitorState,
+        pos,
+        current_yes_ask: float,
+        current_no_ask: float,
+    ) -> tuple[float | None, float | None]:
+        """REST-fetch orderbooks and compute usable_shares at current edge.
+        Throttled to once per 5s per position. Returns (yes_usable, no_usable)."""
+        now_ts = time.time()
+        if now_ts - state.last_book_fetch_ts < self._MAX_EDGE_BOOK_FETCH_INTERVAL:
+            return None, None
+        state.last_book_fetch_ts = now_ts
+
+        min_edge = self._min_edge_for(state.interval_minutes)
+
+        yes_usable = None
+        no_usable = None
+
+        try:
+            # YES leg book
+            if pos.venue_yes == "polymarket" and state.pm_yes_token_id:
+                book = self.engine.pm_clob.get_orderbook(state.pm_yes_token_id)
+                if book and book.asks:
+                    max_price = 1.0 - current_no_ask - min_edge
+                    yes_usable = sum(l.size for l in book.asks if l.price <= max_price)
+            elif pos.venue_yes == "kalshi" and state.kalshi_market_id:
+                asks, _ = self.engine.kalshi_feed.fetch_side_asks(state.kalshi_market_id, "yes")
+                if asks:
+                    max_price = 1.0 - current_no_ask - min_edge
+                    yes_usable = sum(l.size for l in asks if l.price <= max_price)
+
+            # NO leg book
+            if pos.venue_no == "polymarket" and state.pm_no_token_id:
+                book = self.engine.pm_clob.get_orderbook(state.pm_no_token_id)
+                if book and book.asks:
+                    max_price = 1.0 - current_yes_ask - min_edge
+                    no_usable = sum(l.size for l in book.asks if l.price <= max_price)
+            elif pos.venue_no == "kalshi" and state.kalshi_market_id:
+                asks, _ = self.engine.kalshi_feed.fetch_side_asks(state.kalshi_market_id, "no")
+                if asks:
+                    max_price = 1.0 - current_yes_ask - min_edge
+                    no_usable = sum(l.size for l in asks if l.price <= max_price)
+        except Exception as e:
+            print(f"[edge-monitor] book fetch error for {pos.id[:8]}: {e}")
+
+        return yes_usable, no_usable
 
     _BINANCE_SYMBOL_MAP: dict[str, str] = {
         "BTC": "BTCUSDT",
@@ -1474,12 +1601,8 @@ class FastArbWatchRunner:
         no_market = matched.polymarket if opp.buy_no_venue == "polymarket" else matched.kalshi
 
         tiered_stake = self.engine._stake_for_edge(opp.edge_per_share)
-        raw_shares = min(tiered_stake / opp.ask_sum, opp.shares)
-        shares = math.floor(raw_shares)
-        if shares <= 0:
-            return None, None, None
 
-        min_edge = float(self.engine.config.get("trading", {}).get("min_lock_edge", 0.04))
+        min_edge = self._min_edge_for(opp.interval_minutes)
         max_yes_price = 1.0 - opp.no_ask - min_edge
         max_no_price = 1.0 - opp.yes_ask - min_edge
         yes_asks, no_asks = self._fetch_execution_asks_parallel(
@@ -1487,6 +1610,19 @@ class FastArbWatchRunner:
             yes_market=yes_market,
             no_market=no_market,
         )
+        if not yes_asks or not no_asks:
+            return None, None, None
+
+        # Считаем shares по REST best asks (не по WS)
+        rest_yes_best = yes_asks[0].price if yes_asks else opp.yes_ask
+        rest_no_best = no_asks[0].price if no_asks else opp.no_ask
+        rest_ask_sum = rest_yes_best + rest_no_best
+        if rest_ask_sum <= 0:
+            return None, None, None
+        shares = math.floor(tiered_stake / rest_ask_sum)
+        if shares <= 0:
+            return None, None, None
+
         yes_leg = self._build_execution_leg_from_asks(
             venue=opp.buy_yes_venue,
             market_id=yes_market.market_id,
@@ -1781,7 +1917,7 @@ class FastArbWatchRunner:
 
         exec_status = row["execution_status"]
         pos_id = row["id"]
-        min_edge = float(self.engine.trading.get("completion_min_edge", self.engine.trading["min_lock_edge"]))
+        min_edge = self._min_edge_for(opp.interval_minutes)
         skip_pm_above = float(self.engine.trading.get("completion_skip_pm_if_price_above", 0.0) or 0.0)
 
         # Определяем какая нога уже есть и по какой цене
@@ -2153,6 +2289,18 @@ class FastArbWatchRunner:
             )
         self.engine.db.conn.commit()
 
+    def _load_open_pm_markets(self) -> set[str]:
+        """Загружаем PM market IDs открытых позиций из DB при старте."""
+        rows = self.engine.db.conn.execute(
+            "SELECT market_yes, market_no, venue_yes FROM positions WHERE status='open'"
+        ).fetchall()
+        result = set()
+        for r in rows:
+            pm = r[0] if r[2] == "polymarket" else r[1]
+            if pm:
+                result.add(str(pm))
+        return result
+
     def _count_open_positions_for_pair(self, pair_key: str) -> int:
         """Считает только реальные (is_paper=0) открытые позиции для пары."""
         row = self.engine.db.conn.execute(
@@ -2168,6 +2316,7 @@ class FastArbWatchRunner:
             (pair_key,),
         ).fetchone()
         return int(row[0] or 0) if row else 0
+
 
     def _has_open_one_legged_pair(self, pair_key: str) -> bool:
         row = self.engine.db.conn.execute(
@@ -2203,10 +2352,7 @@ class FastArbWatchRunner:
 
     def _edge_above_max_allowed(self, yes_price: float, no_price: float) -> bool:
         edge = 1.0 - (yes_price + no_price)
-        if edge <= self.engine.trading["max_lock_edge"]:
-            return False
-        polarized = (yes_price > 0.5) != (no_price > 0.5)
-        return not polarized
+        return edge > self.engine.trading["max_lock_edge"]
 
     def _kalshi_drifted(
         self,
@@ -2409,8 +2555,6 @@ class FastArbWatchRunner:
         """
         cancel_rise = float(self.engine.trading.get("completion_cancel_kalshi_rise", 0.10))
         reenter_rise = float(self.engine.trading.get("completion_reenter_kalshi_rise", 0.08))
-        min_edge = float(self.engine.trading.get("completion_min_edge", self.engine.trading["min_lock_edge"]))
-
         rows = self.engine.db.conn.execute(
             "SELECT id, pair_key, symbol, shares, venue_yes, venue_no, market_yes, market_no, "
             "kalshi_order_id, polymarket_fill_price "
@@ -2422,6 +2566,9 @@ class FastArbWatchRunner:
             pos_id = str(row["id"])
             if pos_id in self._one_leg_pm_final:
                 continue
+
+            interval = 15 if "15M" in str(row["pair_key"] or "") else 60
+            min_edge = self._min_edge_for(interval)
 
             order_id = str(row["kalshi_order_id"] or "")
             pm_fill = float(row["polymarket_fill_price"] or 0.0)
@@ -2768,9 +2915,38 @@ class FastArbWatchRunner:
                 print(f"[reconciliation] Snapshot error: {e}")
 
     def _print_status(self) -> None:
+        # Считаем resolved ДО resolve, чтобы обновить baseline при новых резолвах
+        try:
+            _pre_resolved = self.engine.db.conn.execute(
+                "SELECT COUNT(*) FROM positions WHERE status='resolved' AND is_paper=0"
+            ).fetchone()[0]
+        except Exception:
+            _pre_resolved = -1
+
         self._resolve_one_legged_positions()
         if self.engine.pm_trader is not None and self.engine.kalshi_trader is not None:
             self.engine.resolve()
+
+        # Обновляем in-memory set открытых PM маркетов после резолва
+        with self._paper_lock:
+            self._open_pm_markets = self._load_open_pm_markets()
+
+        # Если появились новые resolved — обновляем baseline снапшот,
+        # чтобы reconciliation считал от момента когда деньги уже пришли/ушли
+        try:
+            _post_resolved = self.engine.db.conn.execute(
+                "SELECT COUNT(*) FROM positions WHERE status='resolved' AND is_paper=0"
+            ).fetchone()[0]
+            if _post_resolved > _pre_resolved >= 0:
+                bal = self._cached_balances
+                _pm = bal.get("polymarket")
+                _k = bal.get("kalshi")
+                if _pm is not None and _k is not None:
+                    self.engine.db.save_balance_snapshot(_pm, _k, source="post_resolve")
+                    print(f"[reconciliation] Baseline updated after {_post_resolved - _pre_resolved} resolve(s)")
+        except Exception:
+            pass
+
         self.engine.print_status()
         open_cost = 0.0
         realized_pnl = 0.0

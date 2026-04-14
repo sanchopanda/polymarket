@@ -58,10 +58,10 @@ def build_opportunities(
 
 
         legs = [
-            ("polymarket", "kalshi", pm.yes_ask, kalshi.no_ask, min(pm.yes_depth, kalshi.no_depth)),
-            ("kalshi", "polymarket", kalshi.yes_ask, pm.no_ask, min(kalshi.yes_depth, pm.no_depth)),
+            ("polymarket", "kalshi", pm.yes_ask, kalshi.no_ask),
+            ("kalshi", "polymarket", kalshi.yes_ask, pm.no_ask),
         ]
-        for yes_venue, no_venue, yes_ask, no_ask, max_shares in legs:
+        for yes_venue, no_venue, yes_ask, no_ask in legs:
             ask_sum = yes_ask + no_ask
             edge_per_share = 1.0 - ask_sum
             if edge_per_share < min_lock_edge:
@@ -70,7 +70,7 @@ def build_opportunities(
                 continue
             if ask_sum <= 0:
                 continue
-            shares = min(stake_per_pair_usd / ask_sum, max_shares)
+            shares = stake_per_pair_usd / ask_sum
             if shares <= 0:
                 continue
             capital_used = ask_sum * shares

@@ -5,18 +5,23 @@ runtime:
 
 trading:
   stake_usd: 5.0          # paper bet size
-  max_price: 0.48         # максимальная цена входа для paper (после округления вверх)
+  max_price: 0.70         # максимальная цена входа для paper (максимальная из конфигов)
+
+paper_configs:
+  - name: "A"
+    delta_pct: 0.05
+    max_ask: 0.50
 
 real_trading:
-  enabled: false             # реальные ставки выключены
+  enabled: true              # реальные ставки включены (config A, Polymarket only)
   stake_usd: 1.0           # $1 за ставку
-  initial_deposit: 6.0     # начальный депозит = минимальная дельта
-  floor_pct: 0.20          # дельта = 20% от пика (но не меньше initial_deposit)
+  initial_deposit: 5.0     # минимальный флор
+  floor_pct: 0.70          # флор = 70% от пика (но не меньше initial_deposit)
   max_price: 0.49          # максимальная цена входа для реала
 
 market_filter:
   interval_minutes: [5, 15]
-  symbols: ["BTC", "ETH", "SOL", "XRP"]
+  symbols: ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"]
   min_days_to_expiry: 0
   max_days_to_expiry: 0.1
   min_volume: 0
@@ -24,23 +29,22 @@ market_filter:
   fee_type: "crypto_fees"
 
 strategy:
-  mode: "binance_momentum"   # "crossing" | "cl_contradiction" | "binance_momentum"
-  momentum_delta_pct: 0.05   # базовый минимальный скачок Binance за 5 секунд
-  momentum_min_minute: 1     # не ставить на первой минуте рынка
-  momentum_adaptive: true    # адаптивный порог по числу сигналов за последние 10 мин
-  momentum_adaptive_window: 600  # окно подсчёта сигналов (секунды)
-  # правила: [макс_кол-во_сигналов, порог_дельты] — первое совпадение
-  momentum_adaptive_rules: [[2, 0.05], [5, 0.08], [999, 0.12]]
-  momentum_cheap_delta_pct: 0.0   # отключено — нет отдельного порога для низких цен
-  momentum_continuous: true       # ловить сигнал как только дельта набралась (1..5s), не ждать конца бакета
-  min_orderbook_usd: 5.0     # минимальная ликвидность в стакане для входа
+  mode: "crossing"           # "crossing" | "cl_contradiction" | "binance_momentum"
+  delta_threshold_pct: 0.02  # Binance > 0.02% от страйка → сигнал
+  max_entry_price: 0.60      # покупаем только если PM ask < $0.60
+  min_orderbook_usd: 10.0    # минимальная ликвидность в стакане для входа (2x stake)
   depth_slippage_cents: 4.0  # смотрим стакан до best_ask + 4c
-  # параметры для других стратегий (не используются в momentum)
-  delta_threshold_pct: 0.05
-  max_entry_price: 0.48
-  active_zone_min: 0.20
-  active_zone_max: 0.70
+  active_zone_min: 0.01
+  active_zone_max: 0.50
   min_cl_delta_pct: 0.03
+  # momentum params (не используются в crossing, оставлены для переключения)
+  momentum_delta_pct: 0.05
+  momentum_min_minute: 1
+  momentum_adaptive: true
+  momentum_adaptive_window: 600
+  momentum_adaptive_rules: [[2, 0.05], [5, 0.08], [999, 0.12]]
+  momentum_cheap_delta_pct: 0.0
+  momentum_continuous: true
 
 chainlink:
   rpc_urls:
@@ -54,7 +58,7 @@ chainlink:
   poll_interval_seconds: 30   # fallback only; WS handles real-time
 
 binance:
-  symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+  symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "BNBUSDT"]
 
 polymarket:
   paper: true               # бумажные ставки на Polymarket
@@ -66,7 +70,7 @@ polymarket:
   request_delay_ms: 100
 
 kalshi:
-  paper: false              # бумажные ставки на Kalshi (выключено)
+  paper: true               # бумажные ставки на Kalshi
   real: false               # реальные ставки на Kalshi (не реализовано)
   base_url: "https://api.elections.kalshi.com/trade-api/v2"
   page_size: 200
@@ -77,6 +81,8 @@ kalshi:
     - "KXETH15M"
     - "KXSOL15M"
     - "KXXRP15M"
+    - "KXDOGE15M"
+    - "KXBNB15M"
 
 db:
   path: "data/oracle_arb_bot.db"
