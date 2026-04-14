@@ -238,10 +238,20 @@ class OracleRealTrader:
                             if total_size > 0:
                                 real_fill_price = round(total_cost / total_size, 6)
                                 real_size_matched = round(total_size, 6)
-                        if real_fill_price is None and info.get("price"):
-                            real_fill_price = float(info["price"])
+                            print(f"[real] associate_trades: {len(trades)} trades, "
+                                  f"avg_price={real_fill_price}, total_size={real_size_matched}")
+                        # average_price from API (more reliable than order price)
+                        if real_fill_price is None and info.get("average_price"):
+                            real_fill_price = float(info["average_price"])
+                        # size_matched without trades detail
                         if real_size_matched is None and info.get("size_matched"):
-                            real_size_matched = float(info["size_matched"])
+                            sm = float(info["size_matched"])
+                            if sm > 0:
+                                real_size_matched = round(sm, 6)
+                        # Log raw order info for debugging fill price
+                        print(f"[real] get_order: status={status}, price={info.get('price')}, "
+                              f"avg_price={info.get('average_price')}, size_matched={info.get('size_matched')}, "
+                              f"trades={len(info.get('associate_trades') or [])}")
                         # Если статус определён — не ждём дальше
                         if status.upper() in ("MATCHED", "FILLED") or real_size_matched:
                             break
