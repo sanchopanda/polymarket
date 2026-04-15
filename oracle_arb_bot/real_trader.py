@@ -54,17 +54,13 @@ class OracleRealTrader:
         self._price_10s_fn = price_10s_fn
         self._max_price = max_price
         self._pm = PolymarketTrader()
-        # Деdup: не повторяем попытку для одной market+side в рамках сессии
+        # Деdup: не повторяем попытку для одной market+side пока не подтвердим статус
         self._attempted: set[tuple[str, str]] = set()
         self._attempted_lock = threading.Lock()
         self._refresh_clob_balance()
         db.init_real_deposit(initial_deposit)
         bal, peak = db.get_real_deposit()
-        floor = self._calc_floor(peak)
-        print(
-            f"[real] депозит ${bal:.2f} | peak ${peak:.2f} | floor ${floor:.2f} | "
-            f"доступно ${max(0.0, bal - floor):.2f}"
-        )
+        print(f"[real] депозит ${bal:.2f} | peak ${peak:.2f} | доступно ${bal:.2f}")
 
     # ── Checks ────────────────────────────────────────────────────────────
 
@@ -76,15 +72,12 @@ class OracleRealTrader:
         return max(0.0, peak - delta)
 
     def can_bet(self) -> bool:
-        bal, peak = self._db.get_real_deposit()
-        floor = self._calc_floor(peak)
-        return bal >= self._stake and (bal - self._stake) >= floor
+        bal, _peak = self._db.get_real_deposit()
+        return bal >= self._stake
 
     def deposit_info(self) -> str:
         bal, peak = self._db.get_real_deposit()
-        floor = self._calc_floor(peak)
-        avail = max(0.0, bal - floor)
-        return f"депозит ${bal:.2f} (peak ${peak:.2f} | floor ${floor:.2f} | доступно ${avail:.2f})"
+        return f"депозит ${bal:.2f} (peak ${peak:.2f} | доступно ${bal:.2f})"
 
     def sync_balance(self) -> Optional[float]:
         """Запрашивает реальный CLOB баланс для логирования (не перезаписывает виртуальный депозит).
@@ -95,10 +88,9 @@ class OracleRealTrader:
             )
             real_bal = float(resp.get("balance", 0)) / 1e6
             db_bal, peak = self._db.get_real_deposit()
-            floor = self._calc_floor(peak)
             print(
                 f"[real] CLOB ${real_bal:.2f} | депозит ${db_bal:.2f} | peak ${peak:.2f} | "
-                f"floor ${floor:.2f} | доступно ${max(0.0, db_bal - floor):.2f}"
+                f"доступно ${db_bal:.2f}"
             )
             return real_bal
         except Exception as e:
@@ -157,9 +149,8 @@ class OracleRealTrader:
             return
 
         if not self.can_bet():
-            bal, peak = self._db.get_real_deposit()
-            floor = self._calc_floor(peak)
-            reason = f"депозит ${bal:.2f} floor ${floor:.2f}"
+            bal, _peak = self._db.get_real_deposit()
+            reason = f"депозит ${bal:.2f} < stake ${self._stake:.2f}"
             print(f"[real] skip {market.symbol} {signal.side}: {reason}")
             if self._tg:
                 self._tg.send_bet_failed(market.symbol, signal.side, reason)
@@ -185,10 +176,7 @@ class OracleRealTrader:
             # Лимитная цена = max_price; FOK заполнится по лучшей доступной
             limit_price = self._max_price
 
-            if limit_price < 0.50 and abs(delta_pct) < cheap_delta:
-                print(f"[real] skip cheap {market.symbol} {signal.side}: "
-                      f"price {limit_price:.3f} < 0.50, delta {abs(delta_pct):.4f}% < {cheap_delta}%")
-                return
+            # cheap_delta filter removed — crossing strategy works at delta 0.05-0.10%
 
             # PM CLOB: price, size, notional (price*size) — всё макс 2 знака.
             # size должен быть кратен size_step чтобы price*size был ровно 2 знака.
@@ -218,18 +206,20 @@ class OracleRealTrader:
             order_id = resp.get("orderID", "")
             status = resp.get("status", "")
 
-            # Верификация: проверяем реальный статус через get_order
+            # Верификация: два вызова get_order с паузой 2с.
+            # Ретрай разрешаем только если ОБА подтвердили что ордера нет.
             real_fill_price = None
             real_size_matched = None
-            verify_ok = False  # удалось ли получить ответ от get_order
+            confirmations_empty = 0  # сколько раз подтвердили "не исполнен"
             if order_id:
-                for attempt_delay in (0.3, 1.0):
+                for attempt_delay in (0.5, 2.0):
                     _time.sleep(attempt_delay)
                     try:
                         info = self._pm._client.get_order(order_id)
                         if not isinstance(info, dict):
-                            raise ValueError(f"get_order returned {type(info).__name__}: {info!r:.200}")
-                        verify_ok = True
+                            # API вернул строку — ордер ещё не в системе, ждём
+                            print(f"[real] get_order returned str: {str(info)[:100]}, retrying...")
+                            continue
                         status = info.get("status", status)
                         if info.get("associate_trades"):
                             trades = info["associate_trades"]
@@ -240,21 +230,19 @@ class OracleRealTrader:
                                 real_size_matched = round(total_size, 6)
                             print(f"[real] associate_trades: {len(trades)} trades, "
                                   f"avg_price={real_fill_price}, total_size={real_size_matched}")
-                        # average_price from API (more reliable than order price)
                         if real_fill_price is None and info.get("average_price"):
                             real_fill_price = float(info["average_price"])
-                        # size_matched without trades detail
                         if real_size_matched is None and info.get("size_matched"):
                             sm = float(info["size_matched"])
                             if sm > 0:
                                 real_size_matched = round(sm, 6)
-                        # Log raw order info for debugging fill price
                         print(f"[real] get_order: status={status}, price={info.get('price')}, "
                               f"avg_price={info.get('average_price')}, size_matched={info.get('size_matched')}, "
                               f"trades={len(info.get('associate_trades') or [])}")
-                        # Если статус определён — не ждём дальше
                         if status.upper() in ("MATCHED", "FILLED") or real_size_matched:
                             break
+                        else:
+                            confirmations_empty += 1
                     except Exception as poll_err:
                         print(f"[real] order poll error (delay={attempt_delay}s): {poll_err}")
         except Exception as exc:
@@ -270,16 +258,15 @@ class OracleRealTrader:
         matched = filled_by_status or filled_by_size
 
         if not matched:
-            if verify_ok and not filled_by_size:
-                # Точно подтверждено: ордер не прошёл → разрешаем ретрай
+            if confirmations_empty >= 2:
+                # Оба вызова get_order подтвердили: ордер не прошёл → ретрай
                 with self._attempted_lock:
                     self._attempted.discard(key)
                 print(f"[real] ордер НЕ ИСПОЛНЕН {market.symbol} {signal.side}: "
-                      f"status={status}, size_matched={real_size_matched} — ретрай разрешён")
+                      f"status={status} — 2x подтверждено, ретрай разрешён")
             else:
-                # Не удалось проверить — не рискуем дублем
                 print(f"[real] ордер НЕ ИСПОЛНЕН {market.symbol} {signal.side}: "
-                      f"status={status} — верификация не удалась, ретрай заблокирован")
+                      f"status={status} — подтверждений {confirmations_empty}/2, ретрай заблокирован")
             reason = f"FOK не исполнен (status={status}, limit={limit_price:.2f})"
             if self._tg:
                 self._tg.send_bet_failed(market.symbol, signal.side, reason)

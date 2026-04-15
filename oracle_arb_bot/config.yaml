@@ -11,13 +11,42 @@ paper_configs:
   - name: "A"
     delta_pct: 0.05
     max_ask: 0.50
+    venue: "polymarket"
+  - name: "V1"
+    delta_pct: 0.05
+    max_ask: 0.50
+    venue: "polymarket"
+    min_secs_from_start: { "5": 90, "15": 0 }
+    max_secs_from_start: 180
+  - name: "M2"
+    delta_pct: 0.02
+    max_ask: 0.50
+    venue: "polymarket"
+    require_binance_move: true
+  - name: "M3"
+    delta_pct: 0.03
+    max_ask: 0.50
+    venue: "polymarket"
+    require_binance_move: true
+  - name: "M4"
+    delta_pct: 0.04
+    max_ask: 0.50
+    venue: "polymarket"
+    require_binance_move: true
+  - name: "M5"
+    delta_pct: 0.05
+    max_ask: 0.50
+    venue: "polymarket"
+    require_binance_move: true
 
 real_trading:
-  enabled: true              # реальные ставки включены (config A, Polymarket only)
-  stake_usd: 1.0           # $1 за ставку
-  initial_deposit: 5.0     # минимальный флор
-  floor_pct: 0.70          # флор = 70% от пика (но не меньше initial_deposit)
-  max_price: 0.49          # максимальная цена входа для реала
+  enabled: true
+  stake_usd: 1.0
+  initial_deposit: 10.0
+  floor_pct: 0.50
+  max_price: 0.49
+  min_secs_from_start: { "5": 90, "15": 0 }
+  max_secs_from_start: 180
 
 market_filter:
   interval_minutes: [5, 15]
@@ -70,7 +99,7 @@ polymarket:
   request_delay_ms: 100
 
 kalshi:
-  paper: true               # бумажные ставки на Kalshi
+  paper: false              # бумажные ставки на Kalshi
   real: false               # реальные ставки на Kalshi (не реализовано)
   base_url: "https://api.elections.kalshi.com/trade-api/v2"
   page_size: 200

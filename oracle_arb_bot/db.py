@@ -148,6 +148,23 @@ class OracleDB:
                 no_bids             TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS signal_ticks (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_id           TEXT    NOT NULL,
+                symbol              TEXT    NOT NULL,
+                venue               TEXT    NOT NULL,
+                interval_minutes    INTEGER NOT NULL,
+                ts                  TEXT    NOT NULL,
+                seconds_to_expiry   REAL,
+                market_minute       INTEGER,
+                side                TEXT    NOT NULL,
+                delta_pct           REAL    NOT NULL,
+                pm_open_price       REAL,
+                binance_price       REAL,
+                ask_price           REAL,
+                seq                 INTEGER NOT NULL DEFAULT 1
+            );
+
             CREATE TABLE IF NOT EXISTS price_ticks (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,
                 market_id           TEXT    NOT NULL,
@@ -185,6 +202,7 @@ class OracleDB:
             "ALTER TABLE bets ADD COLUMN signal_mode TEXT",
             "ALTER TABLE bets ADD COLUMN pm_price_after REAL",
             "ALTER TABLE bets ADD COLUMN paper_config TEXT",
+            "ALTER TABLE bets ADD COLUMN pre_signal_ticks TEXT",
         ]:
             try:
                 self.conn.execute(sql)
@@ -358,7 +376,8 @@ class OracleDB:
 
     def record_bet(self, bet: OracleBet, crossing_seq: int = 1,
                    signal_ask: float = 0.0, signal_mode: str = "5s_bucket",
-                   paper_config: str | None = None) -> None:
+                   paper_config: str | None = None,
+                   pre_signal_ticks: str | None = None) -> None:
         self.conn.execute(
             """
             INSERT INTO bets (
@@ -370,9 +389,10 @@ class OracleDB:
                 pm_close_price, status, resolved_at, winning_side, pnl,
                 crossing_seq, venue,
                 seconds_to_close, opposite_ask, depth_usd, volume,
-                strategy, signal_ask, version, signal_mode, paper_config
+                strategy, signal_ask, version, signal_mode, paper_config,
+                pre_signal_ticks
             ) VALUES (
-                ?,?,?,?,  ?,?,?,  ?,?,  ?,?,?,?,  ?,?,?,?,  ?,?,?,?,?,  ?,?,  ?,?,?,?,  ?,?,?,?,?
+                ?,?,?,?,  ?,?,?,  ?,?,  ?,?,?,?,  ?,?,?,?,  ?,?,?,?,?,  ?,?,  ?,?,?,?,  ?,?,?,?,?,  ?
             )
             """,
             (
@@ -387,6 +407,7 @@ class OracleDB:
                 crossing_seq, bet.venue,
                 bet.seconds_to_close, bet.opposite_ask, bet.depth_usd, bet.volume,
                 bet.strategy, signal_ask or None, "v0", signal_mode, paper_config,
+                pre_signal_ticks,
             ),
         )
         self.conn.commit()
@@ -425,6 +446,36 @@ class OracleDB:
         self.conn.commit()
         self.conn.commit()
 
+    def insert_signal_tick(
+        self,
+        market_id: str,
+        symbol: str,
+        venue: str,
+        interval_minutes: int,
+        ts: str,
+        seconds_to_expiry: float | None,
+        market_minute: int,
+        side: str,
+        delta_pct: float,
+        pm_open_price: float | None,
+        binance_price: float | None,
+        ask_price: float | None,
+        seq: int = 1,
+    ) -> None:
+        self.conn.execute(
+            """INSERT INTO signal_ticks (
+                market_id, symbol, venue, interval_minutes, ts,
+                seconds_to_expiry, market_minute, side,
+                delta_pct, pm_open_price, binance_price, ask_price, seq
+            ) VALUES (?,?,?,?,?, ?,?,?, ?,?,?,?,?)""",
+            (
+                market_id, symbol, venue, interval_minutes, ts,
+                seconds_to_expiry, market_minute, side,
+                delta_pct, pm_open_price, binance_price, ask_price, seq,
+            ),
+        )
+        self.conn.commit()
+
     def insert_price_tick(
         self,
         market_id: str,
@@ -452,6 +503,14 @@ class OracleDB:
                 pm_yes_ask, pm_no_ask, pm_yes_bid, pm_no_bid, delta_pct,
             ),
         )
+
+    def get_market_deltas(self, market_id: str) -> list[float]:
+        """Return all recorded delta_pct values for a market (for std calculation)."""
+        rows = self.conn.execute(
+            "SELECT delta_pct FROM price_ticks WHERE market_id = ? AND delta_pct IS NOT NULL ORDER BY ts",
+            (market_id,),
+        ).fetchall()
+        return [r[0] for r in rows]
 
     def insert_orderbook_snapshot(
         self,
@@ -611,8 +670,6 @@ class OracleDB:
         if paper_configs:
             for cfg_name, delta, max_ask in paper_configs:
                 cs = self._config_stats(cfg_name)
-                if cs["total"] == 0:
-                    continue
                 c_pnl_sign = "+" if cs["realized_pnl"] >= 0 else ""
                 lines += [
                     "",
@@ -685,6 +742,11 @@ class OracleDB:
         """Синхронизирует баланс с реальным значением, обновляет peak если нужно."""
         _, peak = self.get_real_deposit()
         self._update_real_deposit(balance, max(peak, balance))
+
+    def reset_real_peak(self) -> None:
+        """Сбрасывает peak = balance (перезапуск отсчёта floor)."""
+        bal, _ = self.get_real_deposit()
+        self._update_real_deposit(bal, bal)
 
     def deduct_real_deposit(self, amount: float) -> None:
         bal, peak = self.get_real_deposit()

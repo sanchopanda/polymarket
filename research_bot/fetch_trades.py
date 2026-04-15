@@ -78,19 +78,23 @@ def fetch_market_trades(condition_id: str, market_start_ts: int, market_end_ts: 
     offset = 0
 
     while True:
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 r = http.get(TRADES_URL, params={
                     "market": condition_id,
                     "limit": 500,
                     "offset": offset,
                 }, timeout=15)
+                if r.status_code == 429:
+                    delay = min(2 ** attempt, 30)
+                    time.sleep(delay)
+                    continue
                 r.raise_for_status()
                 batch = r.json()
                 break
             except Exception:
-                if attempt < 2:
-                    time.sleep(1.0)
+                if attempt < 4:
+                    time.sleep(min(2 ** attempt, 10))
                 else:
                     return sorted(trades)
 

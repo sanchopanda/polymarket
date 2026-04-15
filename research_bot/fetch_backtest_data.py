@@ -186,7 +186,13 @@ def step_binance(conn, http: httpx.Client, market_ids: list[str], force: bool) -
 def step_trades(conn, http: httpx.Client, market_ids: list[str], force: bool) -> None:
     """
     Шаг 3: скачать PM сделки для рынков из market_ids.
+    Использует 20 потоков для параллельной загрузки.
     """
+    import concurrent.futures
+    import threading
+
+    WORKERS = 20
+
     if not market_ids:
         print("[trades] нет рынков — пропуск")
         return
@@ -206,45 +212,103 @@ def step_trades(conn, http: httpx.Client, market_ids: list[str], force: bool) ->
 
     print(f"[trades] рынков с condition_id: {len(markets)}")
 
-    def has_trades_for(mid: str) -> bool:
-        return conn.execute(
-            "SELECT 1 FROM pm_trades WHERE market_id = ? LIMIT 1", (mid,)
-        ).fetchone() is not None
+    existing_mids: set[str] = set()
+    if not force:
+        existing_mids = {r[0] for r in conn.execute(
+            "SELECT DISTINCT market_id FROM pm_trades"
+        ).fetchall()}
+        print(f"[trades] уже есть трейды для {len(existing_mids)} рынков")
 
-    saved = skipped = errors = 0
-    for i, row in enumerate(markets):
+    # Подготовим задания (фильтруем уже скачанные)
+    tasks: list[tuple[str, str, int, int]] = []
+    skipped = 0
+    parse_errors = 0
+    for row in markets:
         mid, cid, ms_str, me_str = row
-
-        if not force and has_trades_for(mid):
+        if not force and mid in existing_mids:
             skipped += 1
             continue
-
         try:
             ms = int(datetime.strptime(ms_str, "%Y-%m-%d %H:%M:%S")
                      .replace(tzinfo=timezone.utc).timestamp())
             me = int(datetime.strptime(me_str, "%Y-%m-%d %H:%M:%S")
                      .replace(tzinfo=timezone.utc).timestamp())
         except Exception:
-            errors += 1
+            parse_errors += 1
             continue
+        tasks.append((mid, cid, ms, me))
 
-        trades = fetch_market_trades(cid, ms, me, http)
+    print(f"[trades] к загрузке: {len(tasks)} | skip={skipped} | parse_err={parse_errors}")
+    if not tasks:
+        return
 
+    # Каждый воркер — свой httpx.Client (не thread-safe)
+    _local = threading.local()
+
+    def _get_http() -> httpx.Client:
+        if not hasattr(_local, "http"):
+            _local.http = httpx.Client(timeout=15.0)
+        return _local.http
+
+    def _fetch_one(item: tuple[str, str, int, int]):
+        mid, cid, ms, me = item
+        try:
+            trades = fetch_market_trades(cid, ms, me, _get_http())
+            return (mid, trades, None)
+        except Exception as e:
+            return (mid, None, e)
+
+    saved = errors = 0
+    t0 = time.time()
+    total = len(tasks)
+    batch_rows: list[tuple] = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        for i, result in enumerate(pool.map(_fetch_one, tasks)):
+            mid, trades, err = result
+
+            if err is not None:
+                errors += 1
+                continue
+
+            if trades:
+                batch_rows.extend(
+                    (mid, ts, outcome, price) for ts, outcome, price in trades
+                )
+            saved += 1
+
+            # Пишем в DB пачками по 200 рынков
+            if saved % 200 == 0 and batch_rows:
+                if force:
+                    mids_batch = {r[0] for r in batch_rows}
+                    for m in mids_batch:
+                        conn.execute("DELETE FROM pm_trades WHERE market_id = ?", (m,))
+                conn.executemany(
+                    "INSERT INTO pm_trades (market_id, ts, outcome, price) VALUES (?,?,?,?)",
+                    batch_rows,
+                )
+                conn.commit()
+                batch_rows.clear()
+
+            if (saved + errors) % 200 == 0 or i == total - 1:
+                elapsed = time.time() - t0
+                done = saved + errors
+                rate = done / elapsed if elapsed > 0 else 0
+                remaining = (total - done) / rate / 60 if rate > 0 else 0
+                print(f"  [{done}/{total}] saved={saved} err={errors} "
+                      f"({rate:.1f}/s, ~{remaining:.0f}m left)", flush=True)
+
+    # Дозаписываем остаток
+    if batch_rows:
         if force:
-            conn.execute("DELETE FROM pm_trades WHERE market_id = ?", (mid,))
-
-        if trades:
-            conn.executemany(
-                "INSERT INTO pm_trades (market_id, ts, outcome, price) VALUES (?,?,?,?)",
-                [(mid, ts, outcome, price) for ts, outcome, price in trades],
-            )
-            conn.commit()
-
-        saved += 1
-        time.sleep(0.02)
-
-        if (i + 1) % 100 == 0:
-            print(f"  [{i+1}/{len(markets)}] saved={saved} skipped={skipped} err={errors}")
+            mids_batch = {r[0] for r in batch_rows}
+            for m in mids_batch:
+                conn.execute("DELETE FROM pm_trades WHERE market_id = ?", (m,))
+        conn.executemany(
+            "INSERT INTO pm_trades (market_id, ts, outcome, price) VALUES (?,?,?,?)",
+            batch_rows,
+        )
+        conn.commit()
 
     print(f"[trades] готово: saved={saved} skipped={skipped} errors={errors}")
 

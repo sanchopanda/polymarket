@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import calendar
 import json
+import statistics
 import threading
 import time
 import uuid
@@ -66,6 +67,11 @@ class OracleArbBot:
                     "name": pc["name"],
                     "delta_pct": pc["delta_pct"],
                     "max_ask": pc["max_ask"],
+                    "venue": pc.get("venue"),  # None = all venues
+                    "min_secs_from_start": pc.get("min_secs_from_start"),  # {interval_str: secs}
+                    "max_secs_from_start": pc.get("max_secs_from_start"),  # secs (int)
+                    "max_delta_std": pc.get("max_delta_std"),  # float, e.g. 0.015
+                    "require_binance_move": pc.get("require_binance_move", False),
                 })
         else:
             # Single config fallback from strategy section
@@ -97,6 +103,10 @@ class OracleArbBot:
         self._1s_close: dict[str, float] = {}  # symbol → последняя цена в текущей секунде
         self._1s_history: dict[str, dict[int, float]] = {}  # symbol → {sec_ts: close} последние 6с
 
+        # PM ask 1s history for backtests (sample-and-hold from book poller)
+        # market_id → {sec_ts: (yes_ask, no_ask)}
+        self._pm_1s_history: dict[str, dict[int, tuple[float | None, float | None]]] = {}
+
         # Per-venue paper/real flags
         self._pm_paper: bool = config["polymarket"].get("paper", True)
         self._pm_real: bool = config["polymarket"].get("real", False)
@@ -111,9 +121,21 @@ class OracleArbBot:
         self._placed_lock = threading.Lock()
         self._load_crossings_from_db()
 
+        # Previous tick tracker for require_binance_move filter
+        # market_id → (binance_price, yes_ask, no_ask)
+        self._prev_market_tick: dict[str, tuple[float, float | None, float | None]] = {}
+
+        # 0.5s sliding price window for avg-based filter (require_binance_move configs)
+        # market_id → list of (ts, binance_price, yes_ask, no_ask), last 10s
+        self._price_window: dict[str, list[tuple[float, float, float | None, float | None]]] = {}
+
         # Diagnostic: track min/max delta per market to understand signal distribution
         self._delta_tracker: dict[str, dict] = {}  # market_id → {min, max, neg_count, total}
         self._delta_tracker_last_print: float = 0.0
+
+        # Signal tick tracker: record when delta CROSSES threshold (not while above)
+        # market_id → (was_above: bool, last_side: str|None, seq: int)
+        self._signal_tick_state: dict[str, tuple[bool, str | None, int]] = {}
 
         # CLOB для проверки PM ликвидности
         self._clob = ClobClient(base_url=config["polymarket"]["clob_base_url"])
@@ -153,6 +175,11 @@ class OracleArbBot:
 
         # Real trading (создаём до Telegram чтобы передать get_balance_info)
         rcfg = config.get("real_trading", {})
+        self._real_time_filter = {
+            "min_secs_from_start": rcfg.get("min_secs_from_start"),
+            "max_secs_from_start": rcfg.get("max_secs_from_start"),
+        }
+        self._real_require_binance_move: bool = rcfg.get("require_binance_move", False)
         self._real = None
         if rcfg.get("enabled"):
             real_max = (
@@ -329,6 +356,56 @@ class OracleArbBot:
                         except Exception:
                             pass
 
+                        # Update prev tick for require_binance_move filter
+                        # (matches backtest which used consecutive price_ticks)
+                        if bp is not None:
+                            self._prev_market_tick[market.market_id] = (
+                                bp, market.yes_ask, market.no_ask,
+                            )
+
+                        # PM ask 1s history (sample-and-hold for backtests)
+                        sec_ts = int(time.time())
+                        pm_hist = self._pm_1s_history.setdefault(market.market_id, {})
+                        pm_hist[sec_ts] = (market.yes_ask, market.no_ask)
+                        for old_ts in [t for t in pm_hist if t < sec_ts - 6]:
+                            del pm_hist[old_ts]
+
+                        # Record signal ticks: transition into signal state
+                        # Signal = delta >= threshold AND ask < 0.50
+                        if delta is not None and ref:
+                            sig_side = "yes" if delta > 0 else "no"
+                            sig_ask = market.yes_ask if sig_side == "yes" else market.no_ask
+                            in_signal = abs(delta) >= self._delta_threshold_pct and sig_ask < 0.50
+                            was_in, prev_side, prev_seq = self._signal_tick_state.get(
+                                market.market_id, (False, None, 0)
+                            )
+                            # Record on entering signal (was out → now in) or side change
+                            if in_signal and (not was_in or sig_side != prev_side):
+                                seq = prev_seq + 1
+                                self._signal_tick_state[market.market_id] = (True, sig_side, seq)
+                                elapsed = market.interval_minutes * 60 - ste
+                                try:
+                                    self._db.insert_signal_tick(
+                                        market_id=market.market_id,
+                                        symbol=market.symbol,
+                                        venue=market.venue,
+                                        interval_minutes=market.interval_minutes,
+                                        ts=ts_iso,
+                                        seconds_to_expiry=round(ste, 2),
+                                        market_minute=int(elapsed / 60),
+                                        side=sig_side,
+                                        delta_pct=round(delta, 4),
+                                        pm_open_price=ref,
+                                        binance_price=bp,
+                                        ask_price=sig_ask,
+                                        seq=seq,
+                                    )
+                                except Exception:
+                                    pass
+                            elif not in_signal and was_in:
+                                # Exited signal state — update flag, keep seq
+                                self._signal_tick_state[market.market_id] = (False, prev_side, prev_seq)
+
                         # Record full orderbook snapshot
                         try:
                             self._db.insert_orderbook_snapshot(
@@ -354,6 +431,30 @@ class OracleArbBot:
         threading.Thread(target=_loop, daemon=True, name="book-poller").start()
         print("[oracle] book poller started (1s interval)")
 
+    def _start_price_window_sampler(self) -> None:
+        """0.5s sampler for require_binance_move avg filter.
+        Reads in-memory values (no HTTP). Keeps last 10s per market."""
+        def _loop():
+            while True:
+                now = time.monotonic()
+                wall = time.time()
+                cutoff = wall - 10.0
+                for market in self._scanner.all_markets():
+                    if market.venue != "polymarket":
+                        continue
+                    bp = self._price_feed.get_price(market.symbol)
+                    if bp is None:
+                        continue
+                    mid = market.market_id
+                    window = self._price_window.setdefault(mid, [])
+                    window.append((wall, bp, market.yes_ask, market.no_ask))
+                    # Drop entries older than 10s
+                    while window and window[0][0] < cutoff:
+                        window.pop(0)
+                time.sleep(0.5)
+        threading.Thread(target=_loop, daemon=True, name="price-window").start()
+        print("[oracle] price window sampler started (0.5s)")
+
     def run(self) -> None:
         print("[oracle] Starting OracleArbBot")
         print(f"[oracle] strategy_mode={self._strategy_mode}")
@@ -363,6 +464,7 @@ class OracleArbBot:
         if self._binance_feed is not None:
             self._binance_feed.start()
         self._start_book_poller()
+        self._start_price_window_sampler()
         while True:
             try:
                 self._scanner.scan_and_subscribe()
@@ -637,8 +739,13 @@ class OracleArbBot:
             self._last_bet_time[mid] = time.time()
 
         if market.venue == "polymarket" and self._real and self._pm_real:
-            self._real.try_place(market, signal, price, now,
-                                delta_pct=delta_pct, cheap_delta=self._momentum_cheap_delta)
+            threading.Thread(
+                target=self._real.try_place,
+                args=(market, signal, price, now),
+                kwargs=dict(delta_pct=delta_pct, cheap_delta=self._momentum_cheap_delta),
+                daemon=True,
+                name=f"real-{market.symbol}-{signal.side}",
+            ).start()
 
     # ── PM WS callback ────────────────────────────────────────────────────
 
@@ -663,10 +770,19 @@ class OracleArbBot:
             return
 
         mid = market.market_id
+
+        # Previous tick from book poller (updated every ~4-6s, matches backtest)
+        prev_tick = self._prev_market_tick.get(mid)
+
         _asks_cache: dict[tuple[str, str], list[tuple[float, float]]] = {}
 
         # Evaluate each paper config independently
         for pcfg in self._paper_configs:
+            # Venue filter: skip if config is restricted to a different venue
+            cfg_venue = pcfg.get("venue")
+            if cfg_venue and cfg_venue != market.venue:
+                continue
+
             cfg_name = pcfg["name"]
             cfg_key = (cfg_name, mid)
 
@@ -710,6 +826,56 @@ class OracleArbBot:
             if not signal.should_bet:
                 continue
 
+            # Time-from-start filter (V1/V2-style configs)
+            max_secs = pcfg.get("max_secs_from_start")
+            min_secs_map = pcfg.get("min_secs_from_start")
+            if max_secs is not None or min_secs_map is not None:
+                elapsed = (now - market.market_start).total_seconds()
+                im_key = str(market.interval_minutes)
+                min_secs = 0
+                if min_secs_map and im_key in min_secs_map:
+                    min_secs = min_secs_map[im_key]
+                if max_secs is not None and elapsed > max_secs:
+                    continue
+                if elapsed < min_secs:
+                    continue
+
+            # Delta volatility filter (V2-style configs)
+            max_delta_std = pcfg.get("max_delta_std")
+            if max_delta_std is not None:
+                try:
+                    deltas = self._db.get_market_deltas(mid)
+                    if len(deltas) >= 3:
+                        std = statistics.pstdev(deltas)
+                        if std > max_delta_std:
+                            continue
+                except Exception:
+                    pass  # no data yet → allow bet
+
+            # Binance-move filter: avg over last 5s must confirm direction
+            if pcfg.get("require_binance_move"):
+                window = self._price_window.get(mid, [])
+                now_wall = time.time()
+                recent = [(bp, ya, na) for ts, bp, ya, na in window if ts >= now_wall - 5.0]
+                if len(recent) >= 3:
+                    avg_bp = sum(bp for bp, _, _ in recent) / len(recent)
+                    if signal.side == "yes":
+                        ya_vals = [ya for _, ya, _ in recent if ya is not None]
+                        avg_ya = sum(ya_vals) / len(ya_vals) if ya_vals else None
+                        # Binance avg was lower → rose to signal; PM ask not below avg
+                        if avg_bp >= current_price:
+                            continue
+                        if avg_ya is not None and market.yes_ask is not None and market.yes_ask < avg_ya:
+                            continue
+                    else:
+                        na_vals = [na for _, _, na in recent if na is not None]
+                        avg_na = sum(na_vals) / len(na_vals) if na_vals else None
+                        # Binance avg was higher → fell to signal; PM ask not below avg
+                        if avg_bp <= current_price:
+                            continue
+                        if avg_na is not None and market.no_ask is not None and market.no_ask < avg_na:
+                            continue
+
             # Одна ставка на рынок на конфиг — если уже ставили, пропускаем
             with self._placed_lock:
                 if self._last_bet_side.get(cfg_key) is not None:
@@ -723,8 +889,49 @@ class OracleArbBot:
             # Real trading FIRST (PM only, trigger on first config only) — скорость важна
             if pcfg is self._paper_configs[0]:
                 if market.venue == "polymarket" and self._real and self._pm_real:
-                    self._real.try_place(market, signal, current_price, now,
-                                        delta_pct=signal.delta_pct, cheap_delta=self._momentum_cheap_delta)
+                    real_ok = True
+                    # Time filter for real trading
+                    r_max = self._real_time_filter.get("max_secs_from_start")
+                    r_min_map = self._real_time_filter.get("min_secs_from_start")
+                    if r_max is not None or r_min_map is not None:
+                        elapsed = (now - market.market_start).total_seconds()
+                        im_key = str(market.interval_minutes)
+                        r_min = 0
+                        if r_min_map and im_key in r_min_map:
+                            r_min = r_min_map[im_key]
+                        if r_max is not None and elapsed > r_max:
+                            real_ok = False
+                        if elapsed < r_min:
+                            real_ok = False
+                    # Binance-move filter for real trading (avg-based)
+                    if real_ok and self._real_require_binance_move:
+                        window = self._price_window.get(mid, [])
+                        now_wall = time.time()
+                        recent = [(bp, ya, na) for ts, bp, ya, na in window if ts >= now_wall - 5.0]
+                        if len(recent) >= 3:
+                            avg_bp = sum(bp for bp, _, _ in recent) / len(recent)
+                            if signal.side == "yes":
+                                ya_vals = [ya for _, ya, _ in recent if ya is not None]
+                                avg_ya = sum(ya_vals) / len(ya_vals) if ya_vals else None
+                                if avg_bp >= current_price:
+                                    real_ok = False
+                                elif avg_ya is not None and market.yes_ask is not None and market.yes_ask < avg_ya:
+                                    real_ok = False
+                            else:
+                                na_vals = [na for _, _, na in recent if na is not None]
+                                avg_na = sum(na_vals) / len(na_vals) if na_vals else None
+                                if avg_bp <= current_price:
+                                    real_ok = False
+                                elif avg_na is not None and market.no_ask is not None and market.no_ask < avg_na:
+                                    real_ok = False
+                    if real_ok:
+                        threading.Thread(
+                            target=self._real.try_place,
+                            args=(market, signal, current_price, now),
+                            kwargs=dict(delta_pct=signal.delta_pct, cheap_delta=self._momentum_cheap_delta),
+                            daemon=True,
+                            name=f"real-{market.symbol}-{signal.side}",
+                        ).start()
 
             # Достаём стакан (один раз на рынок, кэшируем)
             cache_key = (mid, signal.side)
@@ -745,11 +952,19 @@ class OracleArbBot:
                     self._last_bet_side[cfg_key] = None  # разрешаем повторную попытку
                 continue
 
+            # Snapshot 10s price window for future backtests
+            window = self._price_window.get(mid, [])
+            pst = json.dumps([
+                {"ts": round(ts, 2), "bp": bp, "ya": ya, "na": na}
+                for ts, bp, ya, na in window
+            ]) if window else None
+
             self._place_paper_bet(
                 market, signal, current_price, now,
                 crossing_seq=1, depth_usd=depth_usd,
                 paper_config=cfg_name, max_ask=pcfg["max_ask"],
                 fill_price=fill_price,
+                pre_signal_ticks=pst,
             )
 
     def _depth_price_limit(self, best_ask: float) -> float:
@@ -843,6 +1058,7 @@ class OracleArbBot:
         paper_config: str | None = None,
         max_ask: float | None = None,
         fill_price: float | None = None,
+        pre_signal_ticks: str | None = None,
     ) -> None:
         raw_ask = market.yes_ask if signal.side == "yes" else market.no_ask
         if raw_ask <= 0:
@@ -871,7 +1087,7 @@ class OracleArbBot:
             if entry_price <= 0 or entry_price > effective_max:
                 return
 
-        if entry_price <= 0:
+        if entry_price <= 0 or entry_price < 0.15:
             return
 
         shares = self._stake_usd / entry_price
@@ -908,7 +1124,8 @@ class OracleArbBot:
         )
 
         self._db.record_bet(bet, crossing_seq=crossing_seq, signal_ask=signal_ask,
-                            signal_mode=signal_mode, paper_config=paper_config)
+                            signal_mode=signal_mode, paper_config=paper_config,
+                            pre_signal_ticks=pre_signal_ticks)
         self._db.mark_signal_bet_placed(market.market_id, signal.side)
 
         # Фиксируем цену через 10 секунд (only first config to avoid parallel requests)
