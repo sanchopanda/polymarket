@@ -351,6 +351,12 @@ class PolymarketTrader:
             print(f"[pm-cancel] FAILED | order={order_id[:16]}... | {e}")
             return False
 
+    def fetch_order(self, order_id: str) -> dict:
+        if not order_id:
+            return {}
+        info = self._client.get_order(order_id)
+        return info if isinstance(info, dict) else {}
+
     def _extract_order_fields(
         self,
         resp: dict | object,
