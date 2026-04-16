@@ -1,0 +1,50 @@
+strategy:
+  paper_enabled: true
+  real_enabled: true
+  paper_stake_usd: 5.0
+  real_stake_usd: 1.0
+  initial_real_deposit_usd: 15.0
+  real_order_wait_seconds: 0.5
+  cancel_before_expiry_seconds: 15
+  paper_fill_max_slippage: 0.02
+  five_minute:
+    bottom_price: 0.30
+    entry_price: 0.65
+    activation_delay_seconds: 0
+  fifteen_minute:
+    bottom_price: 0.30
+    entry_price: 0.65
+    activation_delay_seconds: 30
+
+market_filter:
+  symbols: ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"]
+  interval_minutes: [5, 15]
+  fee_type: "crypto_fees"
+  min_days_to_expiry: 0
+  max_days_to_expiry: 0.02
+  min_volume: 500
+  min_liquidity: 500
+
+runtime:
+  universe_refresh_seconds: 60
+  status_interval_seconds: 15
+
+db:
+  path: "data/recovery_bot.db"
+
+polymarket:
+  paper: true
+  real: false
+  gamma_base_url: "https://gamma-api.polymarket.com"
+  clob_base_url: "https://clob.polymarket.com"
+  clob_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+  page_size: 500
+  request_delay_ms: 100
+
+kalshi:
+  paper: false
+  real: false
+
+telegram:
+  token_env: "TELEGRAM_TOKEN"
+  chat_id_file: "data/.telegram_chat_id"
