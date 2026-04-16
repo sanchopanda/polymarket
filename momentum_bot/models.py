@@ -19,6 +19,7 @@ class SpikeSignal:
     symbol: str
     side: str               # "yes" or "no"
     leader_price: float
+    leader_baseline_price: float | None
     follower_price: float
     spike_magnitude: float  # cents
     price_gap: float        # leader_price - follower_price

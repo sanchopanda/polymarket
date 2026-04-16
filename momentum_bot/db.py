@@ -92,11 +92,58 @@ class MomentumDB:
         ).fetchall()
         return [self._row_to_position(r) for r in rows]
 
+    def get_primary_open_positions(self) -> list[MomentumPosition]:
+        rows = self._conn.execute(
+            """
+            WITH ranked AS (
+                SELECT
+                    *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY pair_key
+                        ORDER BY opened_at ASC, id ASC
+                    ) AS rn
+                FROM positions
+            )
+            SELECT *
+            FROM ranked
+            WHERE rn = 1 AND status = 'open'
+            ORDER BY opened_at DESC
+            """
+        ).fetchall()
+        return [self._row_to_position(r) for r in rows]
+
     def get_all_positions(self) -> list[MomentumPosition]:
         rows = self._conn.execute(
             "SELECT * FROM positions ORDER BY opened_at DESC"
         ).fetchall()
         return [self._row_to_position(r) for r in rows]
+
+    def count_positions_for_pair(self, pair_key: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS c FROM positions WHERE pair_key=?",
+            (pair_key,),
+        ).fetchone()
+        return int(row["c"]) if row is not None else 0
+
+    def is_primary_position(self, position_id: str) -> bool:
+        row = self._conn.execute(
+            """
+            WITH ranked AS (
+                SELECT
+                    id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY pair_key
+                        ORDER BY opened_at ASC, id ASC
+                    ) AS rn
+                FROM positions
+            )
+            SELECT rn
+            FROM ranked
+            WHERE id=?
+            """,
+            (position_id,),
+        ).fetchone()
+        return row is not None and int(row["rn"]) == 1
 
     def has_open_position(self, pair_key: str, side: str, bet_venue: str) -> bool:
         row = self._conn.execute(
@@ -138,29 +185,46 @@ class MomentumDB:
 
     def stats(self) -> dict:
         open_positions = self.get_open_positions()
-        locked = sum(p.total_cost for p in open_positions)
-        row = self._conn.execute(
-            "SELECT COALESCE(SUM(pnl), 0) as realized_pnl FROM positions WHERE status='resolved'"
-        ).fetchone()
-        realized_pnl = float(row["realized_pnl"])
         total_count = self._conn.execute("SELECT COUNT(*) as c FROM positions").fetchone()["c"]
-        resolved_count = self._conn.execute(
-            "SELECT COUNT(*) as c FROM positions WHERE status='resolved'"
-        ).fetchone()["c"]
-        won_count = self._conn.execute(
-            "SELECT COUNT(*) as c FROM positions WHERE status='resolved' AND pnl > 0"
-        ).fetchone()["c"]
-        lost_count = self._conn.execute(
-            "SELECT COUNT(*) as c FROM positions WHERE status='resolved' AND pnl <= 0"
-        ).fetchone()["c"]
+
+        row = self._conn.execute(
+            """
+            WITH ranked AS (
+                SELECT
+                    *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY pair_key
+                        ORDER BY opened_at ASC, id ASC
+                    ) AS rn
+                FROM positions
+            )
+            SELECT
+                COALESCE(SUM(CASE WHEN status='resolved' THEN pnl ELSE 0 END), 0) AS realized_pnl,
+                SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) AS open_count,
+                SUM(CASE WHEN status='resolved' THEN 1 ELSE 0 END) AS resolved_count,
+                SUM(CASE WHEN status='resolved' AND pnl > 0 THEN 1 ELSE 0 END) AS won_count,
+                SUM(CASE WHEN status='resolved' AND pnl <= 0 THEN 1 ELSE 0 END) AS lost_count,
+                COUNT(*) AS primary_total_count
+            FROM ranked
+            WHERE rn = 1
+            """
+        ).fetchone()
+
+        realized_pnl = float(row["realized_pnl"] or 0.0)
+        open_count = int(row["open_count"] or 0)
+        resolved_count = int(row["resolved_count"] or 0)
+        won_count = int(row["won_count"] or 0)
+        lost_count = int(row["lost_count"] or 0)
+        primary_total_count = int(row["primary_total_count"] or 0)
         return {
             "realized_pnl": realized_pnl,
-            "locked": locked,
-            "open_count": len(open_positions),
+            "open_count": open_count,
             "total_count": total_count,
+            "primary_total_count": primary_total_count,
             "resolved_count": resolved_count,
             "won_count": won_count,
             "lost_count": lost_count,
+            "analytics_open_count": len(open_positions),
         }
 
     def _row_to_position(self, row: sqlite3.Row) -> MomentumPosition:

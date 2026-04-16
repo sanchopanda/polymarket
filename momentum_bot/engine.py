@@ -7,6 +7,7 @@ from cross_arb_bot.kalshi_feed import KalshiFeed
 from cross_arb_bot.matcher import kalshi_taker_fee, match_markets, polymarket_crypto_taker_fee
 from cross_arb_bot.models import MatchedMarketPair, NormalizedMarket
 from cross_arb_bot.polymarket_feed import PolymarketFeed
+from src.api.clob import ClobClient
 
 from momentum_bot.db import MomentumDB
 from momentum_bot.models import MomentumPosition, SpikeSignal
@@ -39,6 +40,7 @@ class MomentumEngine:
             market_filter=self.market_filter,
             series_tickers=config["kalshi"].get("series_tickers", []),
         )
+        self.pm_clob = ClobClient(base_url=config["polymarket"].get("clob_base_url", "https://clob.polymarket.com"))
         self.last_discovery_stats: dict[str, int | str | None] = {
             "pm_markets": 0,
             "kalshi_markets": 0,
@@ -117,21 +119,16 @@ class MomentumEngine:
         strat = self.strategy
         matched = signal.matched_pair
 
-        # 0. Только последняя треть рынка (последние 5 минут из 15)
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        if now.minute % 15 < 9:
-            return False
-
-        # 1. Spike not too large (near-resolution markets)
+        # 0. Spike not too large (near-resolution markets)
         max_spike = strat.get("max_spike_cents", 9999)
         if signal.spike_magnitude > max_spike:
             return False
 
-        # 2. Leader price must be above threshold
+        # 1. Leader price must be above threshold
         if signal.leader_price < strat.get("min_leader_price", 0.0):
             return False
 
-        # 3. Follower price not too high (near-resolution, tiny upside)
+        # 2. Follower price not too high (near-resolution, tiny upside)
         max_entry = strat.get("max_entry_price", 1.0)
         if signal.follower_price > max_entry:
             return False
@@ -145,28 +142,12 @@ class MomentumEngine:
         if signal.follower_price <= 0:
             return False
 
-        # 4. No duplicate open position
-        if self.db.has_open_position(signal.pair_key, signal.side, signal.follower_venue):
-            return False
-
-        # 5. No opposite side open on same pair (any venue) — guaranteed loss
-        if self.db.has_open_opposite_side(signal.pair_key, signal.side):
-            return False
-
         # 5. Cooldown check
         last_trade = self.db.last_trade_time(signal.pair_key, signal.side)
         if last_trade is not None:
             elapsed = time.time() - last_trade
             if elapsed < strat["cooldown_seconds"]:
                 return False
-
-        # 6. Max open positions
-        if len(self.db.get_open_positions()) >= strat["max_open_positions"]:
-            return False
-
-        # 7. Sufficient balance
-        if self.free_balance() < strat["stake_per_trade_usd"]:
-            return False
 
         return True
 
@@ -202,6 +183,8 @@ class MomentumEngine:
     def notify_open(self, position: MomentumPosition, signal: SpikeSignal, signal_type: str) -> None:
         if not self.notifier:
             return
+        if self.db.count_positions_for_pair(position.pair_key) != 1:
+            return
         self.notifier.notify_open(
             symbol=position.symbol,
             side=position.side,
@@ -209,6 +192,7 @@ class MomentumEngine:
             leader_venue=signal.leader_venue,
             follower_venue=signal.follower_venue,
             leader_price=signal.leader_price,
+            leader_baseline_price=signal.leader_baseline_price,
             follower_price=position.entry_price,
             gap_cents=(signal.leader_price - position.entry_price) * 100.0,
             spike_cents=signal.spike_magnitude,
@@ -241,7 +225,7 @@ class MomentumEngine:
                 f"[Momentum][RESOLVE] {position.symbol} {position.side.upper()} @ {position.bet_venue}"
                 f" | outcome={result} | pnl=${pnl:+.2f}"
             )
-            if self.notifier:
+            if self.notifier and self.db.is_primary_position(position.id):
                 self.notifier.notify_resolve(
                     position.symbol,
                     position.side,
@@ -277,23 +261,16 @@ class MomentumEngine:
             return result
         return None
 
-    def free_balance(self) -> float:
-        stats = self.db.stats()
-        return (
-            self.strategy["starting_balance"]
-            + stats["realized_pnl"]
-            - stats["locked"]
-        )
-
     def print_status(self) -> None:
         print(self.get_status_text())
-        open_positions = self.db.get_open_positions()
+        open_positions = self.db.get_primary_open_positions()
         if open_positions:
             print("[Momentum][Open Positions]")
             for p in open_positions:
+                gap_cents = (p.leader_price_at_entry - p.entry_price) * 100.0
                 print(
                     f"  {p.symbol} {p.side.upper()} @ {p.bet_venue}"
-                    f" | leader={p.leader_venue} spike={p.spike_magnitude:.1f}¢"
+                    f" | leader={p.leader_venue} gap={gap_cents:.1f}¢ spike={p.spike_magnitude:.1f}¢"
                     f" | entry={p.entry_price:.4f} shares={p.shares:.2f}"
                     f" | cost=${p.total_cost:.2f}"
                     f" | expiry={p.expiry.strftime('%H:%M')}"
@@ -301,20 +278,24 @@ class MomentumEngine:
 
     def get_status_text(self) -> str:
         stats = self.db.stats()
-        balance = self.free_balance()
+        resolved = stats["resolved_count"]
+        wr = (stats["won_count"] / resolved * 100.0) if resolved else 0.0
         lines = [
-            f"[Momentum][Status] balance=${balance:.2f}"
+            f"[Momentum][Status] wr={wr:.1f}%"
             f" | realized_pnl=${stats['realized_pnl']:+.2f}"
             f" | open={stats['open_count']}"
             f" | resolved={stats['resolved_count']}"
             f" | won={stats['won_count']} lost={stats['lost_count']}"
+            f" | first_markets={stats['primary_total_count']}"
+            f" | all_positions={stats['total_count']}"
         ]
-        open_positions = self.db.get_open_positions()
+        open_positions = self.db.get_primary_open_positions()
         if open_positions:
             for p in open_positions:
+                gap_cents = (p.leader_price_at_entry - p.entry_price) * 100.0
                 lines.append(
                     f"{p.symbol} {p.side.upper()} @ {p.bet_venue}"
-                    f" | leader={p.leader_venue} spike={p.spike_magnitude:.1f}¢"
+                    f" | leader={p.leader_venue} gap={gap_cents:.1f}¢ spike={p.spike_magnitude:.1f}¢"
                     f" | entry={p.entry_price:.4f} shares={p.shares:.2f}"
                     f" | cost=${p.total_cost:.2f}"
                     f" | expiry={p.expiry.strftime('%H:%M')}"

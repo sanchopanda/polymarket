@@ -108,6 +108,7 @@ class MomentumTelegramNotifier:
         leader_venue: str,
         follower_venue: str,
         leader_price: float,
+        leader_baseline_price: float | None,
         follower_price: float,
         gap_cents: float,
         spike_cents: float,
@@ -115,6 +116,11 @@ class MomentumTelegramNotifier:
     ) -> None:
         detail = (
             f"spike={spike_cents:.1f}¢"
+            + (
+                f" ({leader_baseline_price:.3f} -> {leader_price:.3f})"
+                if leader_baseline_price is not None
+                else ""
+            )
             if signal_type == "spike"
             else f"gap={gap_cents:.1f}¢"
         )
@@ -122,7 +128,7 @@ class MomentumTelegramNotifier:
             f"📥 <b>OPEN: {symbol} {side.upper()}</b>\n"
             f"leader={leader_venue} {leader_price:.3f}\n"
             f"follower={follower_venue} {follower_price:.3f}\n"
-            f"{detail} | gap={gap_cents:.1f}¢\n"
+            f"{detail}\n"
             f"cost=${total_cost:.2f}"
         )
 

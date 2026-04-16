@@ -1,14 +1,14 @@
 strategy:
+  allowed_leader_venues: ["kalshi"]   # ограничить сигналы только случаями, где лидер Kalshi
   spike_threshold_cents: 7      # min price rise in cents within window
   max_spike_cents: 30           # ignore spikes > this (market near resolution)
   max_entry_price: 0.80         # don't enter if follower price already this high
   spike_window_seconds: 15      # rolling window for spike detection
-  min_leader_price: 0.70        # цена лидера должна быть выше этого
+  min_leader_price: 0.55        # цена лидера должна быть выше этого
   max_price_gap_cents: 20       # если разрыв > этого — структурное расхождение, не входим
   gap_signal_min_cents: 5       # обязательный минимальный гэп для любого входа
-  signal_confirm_delay_seconds: 1.0   # повторная проверка follower через 1с после сигнала
-  max_follower_move_after_signal_cents: 3.0  # follower не должен уйти выше signal price больше чем на 3c
-  cooldown_seconds: 120         # cooldown per pair+side
+  min_edge_after_fill_cents: 4.0  # после учёта PM стакана хотим оставить минимум 4c edge до лидера
+  cooldown_seconds: 5           # разрешаем повторные ставки на тот же pair+side чаще для сбора данных
   stake_per_trade_usd: 5.0
   max_open_positions: 10
   starting_balance: 50.0
@@ -18,8 +18,8 @@ market_filter:
   fee_type: "crypto_fees"
   min_days_to_expiry: 0
   max_days_to_expiry: 0.083
-  min_volume: 1000
-  min_liquidity: 1000
+  min_volume: 500
+  min_liquidity: 500
   expiry_tolerance_seconds: 120
 
 runtime:

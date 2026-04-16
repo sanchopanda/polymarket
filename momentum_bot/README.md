@@ -45,4 +45,8 @@ python3 -m momentum_bot resolve
 
 ## Переменные окружения
 
-Для paper-режима не нужны.
+Для paper-режима не нужны, но для Telegram-уведомлений используется:
+
+```env
+FAST_ARB_BOT_TOKEN=...
+```

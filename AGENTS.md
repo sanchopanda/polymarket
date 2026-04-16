@@ -186,7 +186,6 @@
 - `python3 test_real_15m.py` — watcher: находит 15m крипто-рынок на Polymarket, ставит $2, собирает аналитику (WS цены, orderbook, fill, комиссии, resolution, redeem)
 - `python3 test_real_kalshi.py` — аналогичный watcher для Kalshi
 - `python3 check_balance.py` — проверка баланса Polymarket кошелька
-
 ## Конфиги и переменные окружения
 
 Переменные `.env`:

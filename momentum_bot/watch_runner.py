@@ -54,6 +54,8 @@ class MomentumWatchRunner:
         self._current_kalshi_tickers: list[str] = []
         self._refresh_in_progress = False
         self._pending_entries: dict[tuple[str, str, str], PendingEntry] = {}
+        # (pair_key, side) -> {"fill_cents": int, "gap_cents": int, "signal_type": str}
+        self._last_open_signature: dict[tuple[str, str], dict[str, int | str]] = {}
 
     def run(self) -> None:
         runtime = self.engine.config["runtime"]
@@ -99,7 +101,6 @@ class MomentumWatchRunner:
                     ws_active = False
 
                 now = time.time()
-                self._process_pending_entries(now)
                 if (now - last_status) >= status_interval:
                     self.engine.resolve()
                     self.engine.print_status()
@@ -332,14 +333,24 @@ class MomentumWatchRunner:
         ]
 
         gap_min = self.engine.strategy.get("gap_signal_min_cents", 9999)
-        confirm_delay = float(self.engine.strategy.get("signal_confirm_delay_seconds", 1.0))
+        allowed_leaders = {
+            str(v).lower() for v in self.engine.strategy.get(
+                "allowed_leader_venues",
+                ["polymarket", "kalshi"],
+            )
+        }
 
         for leader_venue, leader_id, follower_venue, side in combos:
+            if leader_venue.lower() not in allowed_leaders:
+                continue
             if not leader_id:
                 continue
 
             spike = self.spike_detector.detect_spike(leader_venue, leader_id, side)
             leader_price = self.spike_detector.current_price(leader_venue, leader_id, side)
+            leader_baseline = self.spike_detector.baseline_price(
+                leader_venue, leader_id, side, self.spike_detector.window_seconds
+            )
             if leader_price is None:
                 continue
 
@@ -361,6 +372,7 @@ class MomentumWatchRunner:
                 symbol=pm.symbol,
                 side=side,
                 leader_price=leader_price,
+                leader_baseline_price=leader_baseline,
                 follower_price=follower_price,
                 spike_magnitude=spike_val,
                 price_gap=leader_price - follower_price,
@@ -368,39 +380,11 @@ class MomentumWatchRunner:
                 matched_pair=matched,
             )
 
-            with self._signal_lock:
-                pending_key = (pair_key, side, follower_venue)
-                if pending_key in self._pending_entries:
-                    continue
-                if not self.engine.evaluate_signal(signal):
-                    continue
-                self._pending_entries[pending_key] = PendingEntry(
-                    signal=signal,
-                    signal_type=signal_type,
-                    due_at=time.time() + confirm_delay,
-                )
-
-    def _process_pending_entries(self, now: float) -> None:
-        max_move_cents = float(self.engine.strategy.get("max_follower_move_after_signal_cents", 3.0))
-        with self._signal_lock:
-            ready_entries = [
-                (key, entry)
-                for key, entry in self._pending_entries.items()
-                if entry.due_at <= now
-            ]
-            for key, _ in ready_entries:
-                self._pending_entries.pop(key, None)
-
-        for _, entry in ready_entries:
-            signal = entry.signal
-            follower_price = self._get_follower_price(
-                signal.follower_venue,
-                signal.matched_pair,
-                signal.side,
-            )
-            if follower_price is None or follower_price <= 0:
+            if not self.engine.evaluate_signal(signal):
                 continue
-            if follower_price - signal.follower_price > (max_move_cents / 100.0):
+
+            fill_price = self._get_pm_fill_price(signal)
+            if fill_price is None:
                 continue
 
             confirmed_signal = SpikeSignal(
@@ -410,30 +394,106 @@ class MomentumWatchRunner:
                 symbol=signal.symbol,
                 side=signal.side,
                 leader_price=signal.leader_price,
-                follower_price=follower_price,
+                leader_baseline_price=signal.leader_baseline_price,
+                follower_price=fill_price,
                 spike_magnitude=signal.spike_magnitude,
-                price_gap=signal.leader_price - follower_price,
+                price_gap=signal.leader_price - fill_price,
                 detected_at=signal.detected_at,
                 matched_pair=signal.matched_pair,
             )
-            if not self.engine.evaluate_signal(confirmed_signal):
+            if not self._should_open_repeat(confirmed_signal, signal_type):
                 continue
-
             pos = self.engine.open_paper_position(confirmed_signal)
             if pos:
                 gap_cents = confirmed_signal.price_gap * 100.0
+                self._remember_open_signature(confirmed_signal, signal_type)
                 print(
-                    f"[Momentum][OPEN][{entry.signal_type.upper()}] {signal.symbol} {signal.side.upper()}"
+                    f"[Momentum][OPEN][{signal_type.upper()}] {signal.symbol} {signal.side.upper()}"
                     f" | leader={signal.leader_venue} price={signal.leader_price:.4f}"
                     + (
                         f" spike={signal.spike_magnitude:.1f}¢"
-                        if entry.signal_type == "spike"
+                        if signal_type == "spike"
                         else f" gap={gap_cents:.1f}¢"
                     )
-                    + f" | follower={signal.follower_venue} entry={follower_price:.4f}"
+                    + f" | follower={signal.follower_venue} entry={fill_price:.4f}"
                     f" | cost=${pos.total_cost:.2f}"
                 )
-                self.engine.notify_open(pos, confirmed_signal, entry.signal_type)
+                self.engine.notify_open(pos, confirmed_signal, signal_type)
+
+    def _should_open_repeat(self, signal: SpikeSignal, signal_type: str) -> bool:
+        key = (signal.pair_key, signal.side)
+        prev = self._last_open_signature.get(key)
+        if prev is None:
+            return True
+
+        fill_cents = int(round(signal.follower_price * 100))
+        gap_cents = int(round(signal.price_gap * 100))
+        prev_fill = int(prev["fill_cents"])
+        prev_gap = int(prev["gap_cents"])
+        prev_type = str(prev["signal_type"])
+
+        if signal_type != prev_type:
+            return True
+        if abs(fill_cents - prev_fill) >= 1:
+            return True
+        if abs(gap_cents - prev_gap) >= 2:
+            return True
+        return False
+
+    def _remember_open_signature(self, signal: SpikeSignal, signal_type: str) -> None:
+        key = (signal.pair_key, signal.side)
+        self._last_open_signature[key] = {
+            "fill_cents": int(round(signal.follower_price * 100)),
+            "gap_cents": int(round(signal.price_gap * 100)),
+            "signal_type": signal_type,
+        }
+
+    @staticmethod
+    def _simulate_fill(
+        asks: list[tuple[float, float]],
+        stake_usd: float,
+        max_price: float,
+    ) -> float | None:
+        remaining = stake_usd
+        total_shares = 0.0
+        total_cost = 0.0
+
+        for price, size in asks:
+            if price > max_price:
+                break
+            level_usd = price * size
+            can_spend = min(remaining, level_usd)
+            total_cost += can_spend
+            total_shares += can_spend / price
+            remaining -= can_spend
+            if remaining < 0.001:
+                break
+
+        if remaining > 0.01 or total_shares <= 0:
+            return None
+        return total_cost / total_shares
+
+    def _get_pm_fill_price(self, signal: SpikeSignal) -> float | None:
+        if signal.follower_venue != "polymarket":
+            return None
+
+        pm = signal.matched_pair.polymarket
+        token_id = pm.yes_token_id if signal.side == "yes" else pm.no_token_id
+        if not token_id:
+            return None
+
+        book = self.engine.pm_clob.get_orderbook(token_id)
+        if not book or not book.asks:
+            return None
+
+        asks = [(level.price, level.size) for level in book.asks]
+        strat = self.engine.strategy
+        min_edge = float(strat.get("min_edge_after_fill_cents", 4.0)) / 100.0
+        max_entry = float(strat.get("max_entry_price", 1.0))
+        max_price = min(max_entry, signal.leader_price - min_edge)
+        if max_price <= 0:
+            return None
+        return self._simulate_fill(asks, float(strat["stake_per_trade_usd"]), max_price)
 
     def _get_follower_price(self, follower_venue: str, matched: MatchedMarketPair, side: str) -> float | None:
         pm = matched.polymarket
