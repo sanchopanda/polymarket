@@ -2,7 +2,8 @@ strategy:
   paper_enabled: true
   real_enabled: true
   paper_stake_usd: 5.0
-  real_stake_usd: 1.0
+  real_stake_usd: 1.0          # минимальная ставка (floor)
+  stake_scale_n: 35            # ставка = balance / N (пропорциональное масштабирование)
   initial_real_deposit_usd: 15.0
   real_order_wait_seconds: 0.5
   cancel_before_expiry_seconds: 15

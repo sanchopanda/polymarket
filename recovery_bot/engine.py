@@ -187,7 +187,7 @@ class RecoveryEngine:
             if not token_id:
                 print(f"[recovery] skip real {market.symbol} {market.interval_minutes}m {side_upper}: token_id missing")
                 return
-            requested_shares = self._compute_order_size(cfg.real_stake_usd, cfg.top_price)
+            requested_shares = self._compute_order_size(self._scaled_stake_usd(), cfg.top_price)
             if requested_shares <= 0:
                 return
             reserved_cost = requested_shares * cfg.entry_price
@@ -715,6 +715,12 @@ class RecoveryEngine:
     def real_balance(self) -> float:
         balance, _ = self.db.get_real_deposit()
         return balance
+
+    def _scaled_stake_usd(self) -> float:
+        """balance / N, но не ниже real_stake_usd (минимум $1)."""
+        n = float(self.strategy.get("stake_scale_n", 35))
+        floor = float(self.strategy.get("real_stake_usd", 1.0))
+        return max(floor, self.real_balance() / n)
 
     def can_place_real_bet(self) -> bool:
         if not self.strategy.get("real_enabled", False):
