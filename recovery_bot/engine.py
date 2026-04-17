@@ -498,7 +498,7 @@ class RecoveryEngine:
                 )
             else:
                 # paper или проигравшая real позиция — redeem не нужен
-                pnl = position.filled_shares - position.total_cost if winning_side == position.side else -position.total_cost
+                pnl = position.filled_shares * 0.98 - position.total_cost if winning_side == position.side else -position.total_cost
                 self.db.resolve_position(position.id, winning_side=winning_side, pnl=pnl)
                 print(
                     f"[recovery] RESOLVE {position.symbol} {position.interval_minutes}m"
