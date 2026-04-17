@@ -62,17 +62,22 @@ def step_markets(
     saved = skipped_dupe = skipped_filter = skipped_range = 0
     market_ids_in_range: list[str] = []
 
-    for raw in _iter_closed_pages(http):
+    for raw in _iter_closed_pages(
+        http,
+        end_date_min=date_from.strftime("%Y-%m-%d"),
+        end_date_max=(date_to + timedelta(days=1)).strftime("%Y-%m-%d"),
+        ascending=True,
+    ):
         end_date = _parse_end_date(raw.get("endDate"))
         if end_date is None:
             skipped_filter += 1
             continue
 
-        # Пагинируем от новых к старым → как только вышли за нижнюю границу — стоп
-        if end_date < date_from:
-            break
-
+        # ascending: старые → новые. Сервер уже фильтрует end_date_min/max,
+        # дополнительно подстраховка: выход за верх → стоп, за низ → skip.
         if end_date > date_to:
+            break
+        if end_date < date_from:
             skipped_range += 1
             continue
 
@@ -114,7 +119,6 @@ def step_markets(
             skipped_filter += 1
             continue
 
-        from datetime import timedelta
         market_start = end_date - timedelta(minutes=interval)
 
         conn.execute(

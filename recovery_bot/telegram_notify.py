@@ -85,13 +85,20 @@ class RecoveryTelegramNotifier:
         except Exception as exc:
             print(f"[recovery_tg] status failed: {exc}")
 
-    def send(self, text: str) -> None:
+    def send(self, text: str, reply_to_message_id: int | None = None) -> int | None:
         if not self._bot or not self._chat_id:
-            return
+            return None
         try:
-            self._bot.send_message(self._chat_id, text, reply_markup=_kb())
+            msg = self._bot.send_message(
+                self._chat_id,
+                text,
+                reply_markup=_kb(),
+                reply_to_message_id=reply_to_message_id,
+            )
+            return getattr(msg, "message_id", None)
         except Exception as exc:
             print(f"[recovery_tg] send failed: {exc}")
+            return None
 
     def notify_open(
         self,
@@ -100,19 +107,22 @@ class RecoveryTelegramNotifier:
         interval_minutes: int,
         mode: str,
         strategy_name: str,
+        side: str,
         touch_price: float,
         trigger_price: float,
         entry_price: float,
         filled_shares: float,
         total_cost: float,
-    ) -> None:
+        market_url: str | None = None,
+    ) -> int | None:
         tag = "📝 PAPER" if mode == "paper" else "🔴 REAL"
-        self.send(
-            f"{tag} <b>OPEN {symbol} {interval_minutes}m NO</b>\n"
+        link = f'\n<a href="{market_url}">market</a>' if market_url else ""
+        return self.send(
+            f"{tag} <b>OPEN {symbol} {interval_minutes}m {side.upper()}</b>\n"
             f"strategy={strategy_name}\n"
             f"touch={touch_price:.3f} -> trigger={trigger_price:.3f}\n"
             f"entry={entry_price:.3f} | shares={filled_shares:.2f}\n"
-            f"cost=${total_cost:.2f}"
+            f"cost=${total_cost:.2f}{link}"
         )
 
     def notify_resolve(
@@ -121,14 +131,17 @@ class RecoveryTelegramNotifier:
         symbol: str,
         interval_minutes: int,
         mode: str,
+        side: str,
         pnl: float,
         winning_side: str,
+        reply_to_message_id: int | None = None,
     ) -> None:
         emoji = "💰" if pnl >= 0 else "❌"
         tag = "📝 PAPER" if mode == "paper" else "🔴 REAL"
         self.send(
-            f"{emoji} {tag} <b>RESOLVE {symbol} {interval_minutes}m NO</b>\n"
+            f"{emoji} {tag} <b>RESOLVE {symbol} {interval_minutes}m {side.upper()}</b>\n"
             f"winner={winning_side}\n"
-            f"PnL: <b>${pnl:+.2f}</b>"
+            f"PnL: <b>${pnl:+.2f}</b>",
+            reply_to_message_id=reply_to_message_id,
         )
 

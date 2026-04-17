@@ -296,8 +296,9 @@ class OracleScanner:
             asks = item.get("asks") or []
             if asks:
                 try:
-                    best_ask = float(asks[0]["price"])
-                except (TypeError, ValueError, KeyError, IndexError):
+                    # Polymarket WS отдаёт asks по убыванию цены — best ask = последний
+                    best_ask = min(float(a["price"]) for a in asks)
+                except (TypeError, ValueError, KeyError):
                     pass
         elif event_type == "last_trade_price":
             return  # цена последней сделки — не цена спроса, игнорируем
@@ -313,7 +314,7 @@ class OracleScanner:
                 asks = item.get("asks") or []
                 if asks:
                     try:
-                        best_ask = float(asks[0]["price"])
+                        best_ask = min(float(a["price"]) for a in asks)
                     except Exception:
                         pass
 

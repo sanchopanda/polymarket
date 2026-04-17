@@ -8,12 +8,14 @@ strategy:
   cancel_before_expiry_seconds: 15
   paper_fill_max_slippage: 0.02
   five_minute:
-    bottom_price: 0.30
+    bottom_price: 0.40
     entry_price: 0.65
+    top_price: 0.68
     activation_delay_seconds: 0
   fifteen_minute:
-    bottom_price: 0.30
+    bottom_price: 0.40
     entry_price: 0.65
+    top_price: 0.68
     activation_delay_seconds: 30
 
 market_filter:
@@ -22,8 +24,8 @@ market_filter:
   fee_type: "crypto_fees"
   min_days_to_expiry: 0
   max_days_to_expiry: 0.02
-  min_volume: 500
-  min_liquidity: 500
+  min_volume: 0
+  min_liquidity: 0
 
 runtime:
   universe_refresh_seconds: 60

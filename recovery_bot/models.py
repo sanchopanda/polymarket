@@ -11,6 +11,7 @@ class RecoveryConfig:
     interval_minutes: int
     bottom_price: float
     entry_price: float
+    top_price: float
     activation_delay_seconds: int
     paper_stake_usd: float
     real_stake_usd: float
@@ -45,6 +46,8 @@ class RecoveryPosition:
     resolved_at: Optional[datetime] = None
     winning_side: Optional[str] = None
     pnl: Optional[float] = None
+    pending_redeem_tx: Optional[str] = None
+    tg_open_message_id: Optional[int] = None
 
 
 @dataclass
@@ -53,6 +56,7 @@ class TrackedRecovery:
     config_name: str
     symbol: str
     interval_minutes: int
+    side: str = "no"
     touch_ts: Optional[datetime] = None
     touch_price: Optional[float] = None
     armed_ts: Optional[datetime] = None

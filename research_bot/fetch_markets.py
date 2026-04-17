@@ -88,19 +88,33 @@ def _parse_outcomes(raw: dict) -> tuple[list, list]:
     return parse_field(raw.get("outcomes")), parse_field(raw.get("outcomePrices"))
 
 
-def _iter_closed_pages(http: httpx.Client) -> Generator[dict, None, None]:
-    """Yields raw market dicts from Gamma API, newest first."""
+def _iter_closed_pages(
+    http: httpx.Client,
+    end_date_min: str | None = None,
+    end_date_max: str | None = None,
+    ascending: bool = False,
+) -> Generator[dict, None, None]:
+    """Yields raw market dicts from Gamma API.
+
+    end_date_min/end_date_max — server-side filter (ISO date 'YYYY-MM-DD').
+    ascending=True → walk oldest→newest, полезно когда общий каталог
+    превышает 250k offset-лимит Gamma.
+    """
     offset = 0
     while True:
-        params = {
+        params: dict = {
             "closed": "true",
             "resolved": "true",
             "order": "endDate",
-            "ascending": "false",
+            "ascending": "true" if ascending else "false",
             "limit": PAGE_SIZE,
             "offset": offset,
             "feeType": "crypto_fees",
         }
+        if end_date_min:
+            params["end_date_min"] = end_date_min
+        if end_date_max:
+            params["end_date_max"] = end_date_max
         try:
             resp = http.get(f"{GAMMA_URL}/markets", params=params, timeout=30.0)
             resp.raise_for_status()

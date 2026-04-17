@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from recovery_bot.models import RecoveryPosition
 
@@ -56,9 +56,18 @@ class RecoveryDB:
                 note TEXT,
                 resolved_at TEXT,
                 winning_side TEXT,
-                pnl REAL
+                pnl REAL,
+                pending_redeem_tx TEXT
             )
             """
+        )
+        self._conn.execute(
+            "ALTER TABLE positions ADD COLUMN pending_redeem_tx TEXT"
+            if self._column_missing("positions", "pending_redeem_tx") else "SELECT 1"
+        )
+        self._conn.execute(
+            "ALTER TABLE positions ADD COLUMN tg_open_message_id INTEGER"
+            if self._column_missing("positions", "tg_open_message_id") else "SELECT 1"
         )
         self._conn.execute(
             """
@@ -72,10 +81,14 @@ class RecoveryDB:
         )
         self._conn.commit()
 
-    def has_market_record(self, market_id: str, strategy_name: str, mode: str) -> bool:
+    def _column_missing(self, table: str, column: str) -> bool:
+        rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return column not in {row["name"] for row in rows}
+
+    def has_market_record(self, market_id: str, strategy_name: str, mode: str, side: str = "no") -> bool:
         row = self._conn.execute(
-            "SELECT 1 FROM positions WHERE market_id=? AND strategy_name=? AND mode=? LIMIT 1",
-            (market_id, strategy_name, mode),
+            "SELECT 1 FROM positions WHERE market_id=? AND strategy_name=? AND mode=? AND side=? LIMIT 1",
+            (market_id, strategy_name, mode, side),
         ).fetchone()
         return row is not None
 
@@ -207,6 +220,29 @@ class RecoveryDB:
         )
         self._conn.commit()
 
+    def try_mark_position_open(
+        self,
+        position_id: str,
+        *,
+        entry_price: float,
+        filled_shares: float,
+        total_cost: float,
+        fee: float,
+        note: str | None = None,
+    ) -> bool:
+        """Атомарный перевод working→open. Возвращает True если строка была
+        обновлена (мы выиграли гонку) — использует condition `status='working'`."""
+        cur = self._conn.execute(
+            """
+            UPDATE positions
+            SET status='open', entry_price=?, filled_shares=?, total_cost=?, fee=?, note=?
+            WHERE id=? AND status='working'
+            """,
+            (entry_price, filled_shares, total_cost, fee, note, position_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
     def mark_position_unfilled(self, position_id: str, note: str | None = None) -> None:
         self._conn.execute(
             "UPDATE positions SET status='unfilled', note=? WHERE id=?",
@@ -214,35 +250,84 @@ class RecoveryDB:
         )
         self._conn.commit()
 
-    def stats(self) -> dict[str, float | int]:
+    def set_pending_redeem_tx(self, position_id: str, tx_hash: str) -> None:
+        self._conn.execute(
+            "UPDATE positions SET pending_redeem_tx=? WHERE id=?",
+            (tx_hash, position_id),
+        )
+        self._conn.commit()
+
+    def set_open_message_id(self, position_id: str, message_id: int) -> None:
+        self._conn.execute(
+            "UPDATE positions SET tg_open_message_id=? WHERE id=?",
+            (int(message_id), position_id),
+        )
+        self._conn.commit()
+
+    def get_paper_entry_price(
+        self, market_id: str, strategy_name: str, side: str
+    ) -> float | None:
+        """Entry price парной paper-позиции (если есть). Нужен как fallback
+        для real, когда Polymarket API не отдал реальные fill'ы."""
         row = self._conn.execute(
-            """
-            SELECT
-                SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) AS open_count,
-                SUM(CASE WHEN status='working' THEN 1 ELSE 0 END) AS working_count,
-                SUM(CASE WHEN status='resolved' THEN 1 ELSE 0 END) AS resolved_count,
-                SUM(CASE WHEN status='resolved' AND pnl > 0 THEN 1 ELSE 0 END) AS won_count,
-                SUM(CASE WHEN status='resolved' AND pnl <= 0 THEN 1 ELSE 0 END) AS lost_count,
-                SUM(CASE WHEN status='unfilled' THEN 1 ELSE 0 END) AS unfilled_count,
-                SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS error_count,
-                COALESCE(SUM(CASE WHEN status='resolved' THEN pnl ELSE 0 END), 0) AS realized_pnl
-            FROM positions
-            """
+            "SELECT entry_price FROM positions "
+            "WHERE mode='paper' AND market_id=? AND strategy_name=? AND side=? "
+            "LIMIT 1",
+            (market_id, strategy_name, side),
         ).fetchone()
-        return {
-            "open_count": int(row["open_count"] or 0),
-            "working_count": int(row["working_count"] or 0),
-            "resolved_count": int(row["resolved_count"] or 0),
-            "won_count": int(row["won_count"] or 0),
-            "lost_count": int(row["lost_count"] or 0),
-            "unfilled_count": int(row["unfilled_count"] or 0),
-            "error_count": int(row["error_count"] or 0),
-            "realized_pnl": float(row["realized_pnl"] or 0.0),
-        }
+        if row is None:
+            return None
+        try:
+            return float(row["entry_price"])
+        except (TypeError, ValueError):
+            return None
+
+    def get_real_working_or_open(
+        self, market_id: str, strategy_name: str, side: str
+    ) -> "RecoveryPosition | None":
+        row = self._conn.execute(
+            "SELECT * FROM positions "
+            "WHERE mode='real' AND market_id=? AND strategy_name=? AND side=? "
+            "AND status IN ('working','open') LIMIT 1",
+            (market_id, strategy_name, side),
+        ).fetchone()
+        return self._row_to_position(row) if row else None
+
+    def patch_real_fill(
+        self,
+        position_id: str,
+        *,
+        entry_price: float,
+        total_cost: float,
+        fee: float,
+        note: str | None = None,
+    ) -> bool:
+        """Патчит entry/cost/fee для уже open real-позиции (фолбэк из paper).
+        Обновляет только если status='open'."""
+        cur = self._conn.execute(
+            "UPDATE positions SET entry_price=?, total_cost=?, fee=?, note=? "
+            "WHERE id=? AND status='open' AND mode='real'",
+            (entry_price, total_cost, fee, note, position_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def stats(self) -> dict[str, float | int]:
+        return self._stats_where("", ())
 
     def stats_by_mode(self, mode: str) -> dict[str, float | int]:
+        return self._stats_where("WHERE mode=?", (mode,))
+
+    def stats_by_mode_recent(self, mode: str, *, hours: int) -> dict[str, float | int]:
+        since = datetime.utcnow() - timedelta(hours=hours)
+        return self._stats_where(
+            "WHERE mode=? AND opened_at>=?",
+            (mode, since.isoformat()),
+        )
+
+    def _stats_where(self, where_sql: str, params: tuple) -> dict[str, float | int]:
         row = self._conn.execute(
-            """
+            f"""
             SELECT
                 SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) AS open_count,
                 SUM(CASE WHEN status='working' THEN 1 ELSE 0 END) AS working_count,
@@ -251,11 +336,12 @@ class RecoveryDB:
                 SUM(CASE WHEN status='resolved' AND pnl <= 0 THEN 1 ELSE 0 END) AS lost_count,
                 SUM(CASE WHEN status='unfilled' THEN 1 ELSE 0 END) AS unfilled_count,
                 SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS error_count,
-                COALESCE(SUM(CASE WHEN status='resolved' THEN pnl ELSE 0 END), 0) AS realized_pnl
+                COALESCE(SUM(CASE WHEN status='resolved' THEN pnl ELSE 0 END), 0) AS realized_pnl,
+                AVG(CASE WHEN status IN ('open','resolved') THEN entry_price END) AS avg_entry_price
             FROM positions
-            WHERE mode=?
+            {where_sql}
             """,
-            (mode,),
+            params,
         ).fetchone()
         return {
             "open_count": int(row["open_count"] or 0),
@@ -266,6 +352,7 @@ class RecoveryDB:
             "unfilled_count": int(row["unfilled_count"] or 0),
             "error_count": int(row["error_count"] or 0),
             "realized_pnl": float(row["realized_pnl"] or 0.0),
+            "avg_entry_price": float(row["avg_entry_price"] or 0.0),
         }
 
     def init_real_deposit(self, amount: float) -> None:
@@ -335,4 +422,6 @@ class RecoveryDB:
             resolved_at=_dt(row["resolved_at"]),
             winning_side=row["winning_side"],
             pnl=float(row["pnl"]) if row["pnl"] is not None else None,
+            pending_redeem_tx=row["pending_redeem_tx"],
+            tg_open_message_id=int(row["tg_open_message_id"]) if row["tg_open_message_id"] is not None else None,
         )

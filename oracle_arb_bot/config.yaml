@@ -20,7 +20,7 @@ paper_configs:
     max_secs_from_start: 180
 
 real_trading:
-  enabled: true
+  enabled: false
   stake_usd: 1.0
   initial_deposit: 10.0
   floor_pct: 0.50
@@ -71,7 +71,7 @@ binance:
 
 polymarket:
   paper: true               # бумажные ставки на Polymarket
-  real: true                # реальные ставки на Polymarket
+  real: false               # реальные ставки на Polymarket (отключено — один кошелёк делит с recovery_bot)
   gamma_base_url: "https://gamma-api.polymarket.com"
   clob_base_url: "https://clob.polymarket.com"
   clob_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
