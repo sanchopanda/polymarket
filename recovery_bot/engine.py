@@ -203,6 +203,15 @@ class RecoveryEngine:
     def stop(self) -> None:
         self.scanner.stop()
 
+    @staticmethod
+    def _reset_signal_cycle(state: TrackedRecovery) -> None:
+        state.touch_ts = None
+        state.touch_price = None
+        state.armed_ts = None
+        state.orders_placed = False
+        state.done = False
+        state.note = None
+
     def on_pm_price(self, market: OracleMarket, side: str, best_ask: float) -> None:
         if market.venue != "polymarket" or side not in ("yes", "no"):
             return
@@ -224,6 +233,8 @@ class RecoveryEngine:
             armed_ts = None
             touch_price = None
             signal_to_log: tuple[datetime, float] | None = None
+            reset_after_signal = False
+            reset_after_invalid = False
             with self._lock:
                 state = self._states.get(state_key)
                 if state is None:
@@ -249,9 +260,12 @@ class RecoveryEngine:
                 # Signal detection — upward crossing entry_price после touch.
                 # Работает ВСЕГДА (armed/done неважно), чтобы ловить все сигналы включая
                 # повторные и реверс на противоположной стороне для аналитики.
+                # После каждого сигнала цикл touch->signal сбрасывается: следующий сигнал
+                # должен иметь собственный новый touch.
                 now_above = best_ask >= cfg.entry_price
                 if now_above and not state.last_ask_above_entry:
                     signal_to_log = (now, float(best_ask))
+                    reset_after_signal = True
                 state.last_ask_above_entry = now_above
                 if state.done:
                     continue
@@ -261,7 +275,6 @@ class RecoveryEngine:
                     if elapsed < cfg.activation_delay_seconds:
                         continue
                     if best_ask > cfg.top_price:
-                        state.done = True
                         if best_ask >= 0.9:
                             state.note = "resolved_spike"
                             print(
@@ -274,6 +287,7 @@ class RecoveryEngine:
                                 f"[recovery] overshot {market.symbol} {market.interval_minutes}m {side.upper()}"
                                 f" [{cfg.name}] | ask={best_ask:.3f} > {cfg.top_price:.2f}"
                             )
+                        reset_after_invalid = True
                         continue
                     if best_ask >= cfg.entry_price:
                         time_blocks_order = False
@@ -291,11 +305,9 @@ class RecoveryEngine:
                                 f" [{cfg.name}] | ask={best_ask:.3f} (trigger>={cfg.entry_price:.2f})"
                             )
                             if market_key in self._placed_markets:
-                                state.done = True
-                                state.note = "other_side_placed"
                                 print(
-                                    f"[recovery] skip {market.symbol} {market.interval_minutes}m {side.upper()}"
-                                    f" [{cfg.name}] — ордер уже размещён на другой стороне"
+                                    f"[recovery] signal-only {market.symbol} {market.interval_minutes}m"
+                                    f" {side.upper()} [{cfg.name}] — повторный цикл без нового ордера"
                                 )
                             elif not state.orders_placed:
                                 state.orders_placed = True
@@ -304,6 +316,10 @@ class RecoveryEngine:
                                 touch_ts = state.touch_ts
                                 armed_ts = state.armed_ts
                                 touch_price = float(state.touch_price or best_ask)
+                if reset_after_signal:
+                    self._reset_signal_cycle(state)
+                elif reset_after_invalid:
+                    self._reset_signal_cycle(state)
             if signal_to_log is not None:
                 ref_ts, _ = signal_to_log
                 self._start_price_probe(
