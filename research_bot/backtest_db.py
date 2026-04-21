@@ -4,7 +4,7 @@ research_bot/backtest_db.py
 Единая SQLite база для данных бэктеста.
 Используется ботом (live запись), скриптами загрузки и бэктестом (чтение).
 
-DB path: research_bot/data/backtest.db
+DB path: data/backtest.db
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-DB_PATH = Path("research_bot/data/backtest.db")
+DB_PATH = Path("data/backtest.db")
 
 
 def get_connection(path: Optional[Path] = None) -> sqlite3.Connection:

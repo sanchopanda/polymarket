@@ -25,7 +25,7 @@ from pathlib import Path
 
 import yaml
 
-DB = "research_bot/data/backtest.db"
+DB = "data/backtest.db"
 CONFIG_PATH = "recovery_bot/config.yaml"
 
 
@@ -71,6 +71,11 @@ def backtest(
     entry_price: float,
     top_price: float,
     activation_delay_seconds: int,
+    fee: float = 0.02,
+    side_filter: str | None = None,
+    min_touch_delay: float | None = None,
+    max_touch_delay: float | None = None,
+    min_ticks_in_zone: int = 1,
 ) -> None:
     conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
@@ -101,6 +106,8 @@ def backtest(
         day = mkt["market_end"][:10]
 
         for outcome_label, side in [("Down", "no"), ("Up", "yes")]:
+            if side_filter and side != side_filter:
+                continue
             rows = conn.execute(
                 "SELECT ts, price FROM pm_trades "
                 "WHERE market_id=? AND outcome=? AND ts < ? ORDER BY ts",
@@ -128,19 +135,33 @@ def backtest(
                 continue
 
             fill_price = None
-            for _, p in after_delay:
+            fill_ts = None
+            ticks_in_zone = 0
+            for ts, p in after_delay:
                 if p > top_price:
                     break
                 if entry_price <= p <= top_price:
-                    fill_price = entry_price
-                    break
+                    ticks_in_zone += 1
+                    if ticks_in_zone >= min_ticks_in_zone:
+                        fill_price = entry_price
+                        fill_ts = ts
+                        break
+                else:
+                    ticks_in_zone = 0
             if fill_price is None:
+                continue
+
+            # Фильтр по времени touch→fill
+            touch_delay = fill_ts - touch_ts
+            if min_touch_delay is not None and touch_delay < min_touch_delay:
+                continue
+            if max_touch_delay is not None and touch_delay > max_touch_delay:
                 continue
 
             # Fill
             won  = (winning_side == side)
             shares = stake / fill_price
-            pnl  = shares - stake if won else -stake
+            pnl  = shares * (1 - fee) - stake if won else -stake
 
             total["filled"] += 1
             total["pnl"]    += pnl
@@ -242,8 +263,14 @@ def _compare_bottoms(
     entry_price: float,
     top_price: float,
     activation_delay_seconds: int,
+    fee: float = 0.02,
+    bottoms: list[float] | None = None,
+    side_filter: str | None = None,
+    min_touch_delay: float | None = None,
+    max_touch_delay: float | None = None,
 ) -> None:
-    bottoms = [0.30, 0.35, 0.40, 0.45, 0.50]
+    if bottoms is None:
+        bottoms = [0.30, 0.35, 0.40, 0.45, 0.50]
     conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
     markets = conn.execute(
@@ -275,6 +302,8 @@ def _compare_bottoms(
             cutoff_ts = market_end_unix - cutoff
             winning_side = mkt["winning_side"]
             for outcome_label, side in [("Down", "no"), ("Up", "yes")]:
+                if side_filter and side != side_filter:
+                    continue
                 rows = conn.execute(
                     "SELECT ts, price FROM pm_trades "
                     "WHERE market_id=? AND outcome=? AND ts < ? ORDER BY ts",
@@ -291,16 +320,23 @@ def _compare_bottoms(
                 if not after_delay:
                     continue
                 fill_price = None
-                for _, p in after_delay:
+                fill_ts = None
+                for ts, p in after_delay:
                     if p > top_price:
                         break
                     if entry_price <= p <= top_price:
                         fill_price = entry_price
+                        fill_ts = ts
                         break
                 if fill_price is None:
                     continue
+                touch_delay = fill_ts - touch[0]
+                if min_touch_delay is not None and touch_delay < min_touch_delay:
+                    continue
+                if max_touch_delay is not None and touch_delay > max_touch_delay:
+                    continue
                 won = (winning_side == side)
-                pnl = stake / fill_price - stake if won else -stake
+                pnl = (stake / fill_price) * (1 - fee) - stake if won else -stake
                 total["filled"] += 1
                 total["pnl"] += pnl
                 if won:
@@ -325,6 +361,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stake",    type=float, default=1.0)
     parser.add_argument("--cutoff",   type=int,   default=30)
+    parser.add_argument("--fee",      type=float, default=0.02,
+                        help="Комиссия на выигрыш (default 0.02 = 2%%)")
+    parser.add_argument("--bottoms",  type=float, nargs="+", default=None,
+                        help="Список bottom для сравнения (напр. 0.30 0.35 0.48)")
     parser.add_argument("--bottom",   type=float, default=None,
                         help="Фиксированное дно (если не задано — сравниваем несколько)")
     parser.add_argument("--entry-price", type=float, default=None,
@@ -335,6 +375,14 @@ def main() -> None:
                         help="Только этот интервал (5 или 15)")
     parser.add_argument("--detail",   action="store_true",
                         help="Полный детальный вывод по неделям и символам")
+    parser.add_argument("--side",           type=str,   default=None, choices=["no", "yes"],
+                        help="Фильтр по стороне: no или yes")
+    parser.add_argument("--min-touch-delay", type=float, default=None,
+                        help="Мин. время от touch до fill (сек)")
+    parser.add_argument("--max-touch-delay", type=float, default=None,
+                        help="Макс. время от touch до fill (сек)")
+    parser.add_argument("--min-ticks-in-zone", type=int, default=1,
+                        help="Мин. последовательных тиков в [entry, top] перед входом (default 1)")
     opts = parser.parse_args()
 
     intervals = [opts.interval] if opts.interval else [5, 15]
@@ -351,6 +399,11 @@ def main() -> None:
                 entry_price=opts.entry_price if opts.entry_price is not None else cfg["entry_price"],
                 top_price=opts.top_price if opts.top_price is not None else cfg["top_price"],
                 activation_delay_seconds=cfg["activation_delay_seconds"],
+                fee=opts.fee,
+                side_filter=opts.side,
+                min_touch_delay=opts.min_touch_delay,
+                max_touch_delay=opts.max_touch_delay,
+                min_ticks_in_zone=opts.min_ticks_in_zone,
             )
     elif opts.bottom is None:
         for interval in intervals:
@@ -362,6 +415,11 @@ def main() -> None:
                 entry_price=opts.entry_price if opts.entry_price is not None else cfg["entry_price"],
                 top_price=opts.top_price if opts.top_price is not None else cfg["top_price"],
                 activation_delay_seconds=cfg["activation_delay_seconds"],
+                fee=opts.fee,
+                bottoms=opts.bottoms,
+                side_filter=opts.side,
+                min_touch_delay=opts.min_touch_delay,
+                max_touch_delay=opts.max_touch_delay,
             )
     else:
         for interval in intervals:
@@ -374,6 +432,11 @@ def main() -> None:
                 entry_price=opts.entry_price if opts.entry_price is not None else cfg["entry_price"],
                 top_price=opts.top_price if opts.top_price is not None else cfg["top_price"],
                 activation_delay_seconds=cfg["activation_delay_seconds"],
+                fee=opts.fee,
+                side_filter=opts.side,
+                min_touch_delay=opts.min_touch_delay,
+                max_touch_delay=opts.max_touch_delay,
+                min_ticks_in_zone=opts.min_ticks_in_zone,
             )
 
 

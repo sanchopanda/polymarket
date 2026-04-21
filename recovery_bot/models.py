@@ -15,6 +15,9 @@ class RecoveryConfig:
     activation_delay_seconds: int
     paper_stake_usd: float
     real_stake_usd: float
+    paper_only: bool = False
+    real_only: bool = False
+    max_seconds_to_expiry: int | None = None
 
 
 @dataclass
@@ -61,5 +64,6 @@ class TrackedRecovery:
     touch_price: Optional[float] = None
     armed_ts: Optional[datetime] = None
     orders_placed: bool = False
+    last_ask_above_entry: bool = False
     done: bool = False
     note: Optional[str] = None

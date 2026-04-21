@@ -1,0 +1,19 @@
+runtime:
+  # Интервал между полными тиками. NWS forecast обновляется ~каждый час,
+  # так что чаще 10 минут — излишне. Но для intraday полезно видеть дрейф цен.
+  interval_seconds: 600
+
+cities:
+  # null = все US-станции из stations.py. Список = фильтр.
+  # На старте ограничиваемся US (NWS coverage).
+  allow: null
+
+db:
+  path: "data/weather_bot.db"
+
+nws:
+  user_agent: "polymarket-weather-bot/0.1 (claude3@icons8.com)"
+
+edge:
+  # Порог для «signal» в логах. Торговля пока не включена.
+  min_abs_edge: 0.10
