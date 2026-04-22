@@ -41,6 +41,7 @@ strategy:
   min_seconds_to_expiry_by_symbol:  # per-symbol минимум времени до экспирации (ETH: rem<120s WR=47% $-4.29)
     ETH: 120
     BTC: 30   # 2026-04-20: бот зашёл NO за 5с до экспирации на позднем флаше — ставим нижний порог
+  skip_seconds_to_expiry_zones_by_symbol: {}  # [lo, hi) зоны со слабым WR — пока не активно, мало данных
   # ran_away фильтр убран 2026-04-19: симуляция показала что лимит 0.68 сам отсеивает
   # «улетевшие» сделки (ордер просто висит и либо дождётся возврата, либо отменится
   # через real_order_cancel_after_seconds). Подъём порога давал фантомный edge.
@@ -53,7 +54,7 @@ strategy:
     - "real_v2"
 
 market_filter:
-  symbols: ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"]
+  symbols: ["BTC", "ETH"]
   interval_minutes: [5, 15]
   fee_type: "crypto_fees"
   min_days_to_expiry: 0

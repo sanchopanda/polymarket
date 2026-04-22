@@ -130,6 +130,12 @@ def fetch_clob_trades(client) -> list:
 def main():
     do_redeem = "--redeem" in sys.argv
     auto = "--yes" in sys.argv
+    days_limit: float | None = None
+    for i, arg in enumerate(sys.argv):
+        if arg == "--days" and i + 1 < len(sys.argv):
+            days_limit = float(sys.argv[i + 1])
+        elif arg.startswith("--days="):
+            days_limit = float(arg.split("=", 1)[1])
 
     pm = PolymarketTrader()
     client = pm._client
@@ -138,11 +144,18 @@ def main():
 
     print(f"Wallet: {wallet}")
     print(f"Balance: ${pm.get_balance():.2f}")
+    if days_limit is not None:
+        print(f"Filter: only trades within last {days_limit} days")
 
     # ── 1. Собираем все трейды ─────────────────────────────────────────
     print("\n[1/3] Загружаю трейды из CLOB...", flush=True)
     trades = fetch_clob_trades(client)
     print(f"  Confirmed trades: {len(trades)}")
+    if days_limit is not None:
+        cutoff = time.time() - days_limit * 86400
+        before = len(trades)
+        trades = [t for t in trades if int(t.get("match_time", 0) or 0) >= cutoff]
+        print(f"  After --days {days_limit}: {len(trades)} (dropped {before - len(trades)})")
 
     # Группируем по asset_id
     by_asset: dict[str, dict] = {}

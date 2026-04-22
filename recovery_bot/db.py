@@ -115,6 +115,22 @@ class RecoveryDB:
             "CREATE INDEX IF NOT EXISTS idx_price_probes_ref "
             "ON price_probes(market_id, strategy_name, side, ref_ts)"
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS market_price_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                ts TEXT NOT NULL,
+                price REAL NOT NULL
+            )
+            """
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mph_market_side_ts "
+            "ON market_price_history(market_id, side, ts)"
+        )
         self._conn.commit()
 
     def _column_missing(self, table: str, column: str) -> bool:
@@ -125,7 +141,7 @@ class RecoveryDB:
         with self._lock:
             row = self._conn.execute(
                 "SELECT 1 FROM positions WHERE market_id=? AND strategy_name=? AND mode=? AND side=?"
-                " AND status != 'skipped_filter' LIMIT 1",
+                " AND status NOT IN ('skipped_filter', 'signal_only') LIMIT 1",
                 (market_id, strategy_name, mode, side),
             ).fetchone()
             return row is not None
@@ -433,6 +449,11 @@ class RecoveryDB:
     def stats_by_strategy(self, strategy_name: str) -> dict[str, float | int]:
         return self._stats_where("WHERE strategy_name=?", (strategy_name,))
 
+    def stats_by_symbol(self, symbol: str, mode: str = "real", interval_minutes: int | None = None) -> dict[str, float | int]:
+        if interval_minutes is not None:
+            return self._stats_where("WHERE symbol=? AND mode=? AND interval_minutes=?", (symbol, mode, interval_minutes))
+        return self._stats_where("WHERE symbol=? AND mode=?", (symbol, mode))
+
     def pnl_by_symbol_real(self, *, exclude_strategies: set[str] | None = None) -> dict[str, float]:
         """Real resolved PnL per symbol (всё время)."""
         where = "mode='real' AND status='resolved'"
@@ -470,7 +491,8 @@ class RecoveryDB:
                     SUM(CASE WHEN status='unfilled' THEN 1 ELSE 0 END) AS unfilled_count,
                     SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS error_count,
                     COALESCE(SUM(CASE WHEN status='resolved' THEN pnl ELSE 0 END), 0) AS realized_pnl,
-                    AVG(CASE WHEN status IN ('open','resolved') THEN entry_price END) AS avg_entry_price
+                    AVG(CASE WHEN status='resolved' AND filled_shares>0 THEN entry_price END) AS avg_entry_price,
+                    AVG(CASE WHEN status='resolved' AND filled_shares>0 THEN filled_shares END) AS avg_filled_shares
                 FROM positions
                 {where_sql}
                 """,
@@ -486,7 +508,25 @@ class RecoveryDB:
             "error_count": int(row["error_count"] or 0),
             "realized_pnl": float(row["realized_pnl"] or 0.0),
             "avg_entry_price": float(row["avg_entry_price"] or 0.0),
+            "avg_filled_shares": float(row["avg_filled_shares"] or 0.0),
         }
+
+    def insert_price_history(
+        self,
+        *,
+        market_id: str,
+        symbol: str,
+        side: str,
+        ts: datetime,
+        price: float,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO market_price_history (market_id, symbol, side, ts, price)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (market_id, symbol, side, _iso(ts), float(price)),
+            )
+            self._conn.commit()
 
     def insert_price_probe(
         self,

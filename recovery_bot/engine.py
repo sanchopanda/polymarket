@@ -42,6 +42,7 @@ class RecoveryEngine:
         self._real_stats_exclude: set[str] = set(self.strategy.get("real_stats_exclude") or [])
         self._real_disabled_intervals: set[int] = {int(i) for i in self.strategy.get("real_disabled_intervals") or []}
         self._latest_prices: dict[tuple[str, str], float] = {}
+        self._price_log_ts: dict[tuple[str, str], float] = {}
         self._meta_fetched: set[str] = set()
         self._depth_fetched: set[tuple[str, str]] = set()
         self._gamma_base_url = config["polymarket"]["gamma_base_url"]
@@ -216,11 +217,25 @@ class RecoveryEngine:
         if market.venue != "polymarket" or side not in ("yes", "no"):
             return
         self._latest_prices[(market.market_id, side)] = float(best_ask)
+        now_mono = time.monotonic()
+        now = datetime.utcnow()
+        seconds_left = (market.expiry - now).total_seconds()
+        log_key = (market.market_id, side)
+        if seconds_left <= 300 and now_mono - self._price_log_ts.get(log_key, 0.0) >= 1.0:
+            self._price_log_ts[log_key] = now_mono
+            try:
+                self.db.insert_price_history(
+                    market_id=market.market_id,
+                    symbol=market.symbol,
+                    side=side,
+                    ts=datetime.utcnow(),
+                    price=float(best_ask),
+                )
+            except Exception as exc:
+                print(f"[recovery] price_history insert failed ({market.symbol} {side}): {exc}")
         cfgs = self._configs_by_interval.get(market.interval_minutes)
         if not cfgs:
             return
-        now = datetime.utcnow()
-        seconds_left = (market.expiry - now).total_seconds()
         for cfg in cfgs:
             if cfg.max_seconds_to_expiry is None:
                 min_seconds = 90 if market.interval_minutes == 5 else 120
@@ -234,7 +249,8 @@ class RecoveryEngine:
             touch_price = None
             signal_to_log: tuple[datetime, float] | None = None
             reset_after_signal = False
-            reset_after_invalid = False
+            signal_only_data: dict | None = None
+            time_zone_skip_data: dict | None = None
             with self._lock:
                 state = self._states.get(state_key)
                 if state is None:
@@ -268,11 +284,15 @@ class RecoveryEngine:
                     reset_after_signal = True
                 state.last_ask_above_entry = now_above
                 if state.done:
+                    if reset_after_signal:
+                        self._reset_signal_cycle(state)
                     continue
                 # 2. Ждём восстановления в зону [entry_price, top_price] после задержки
                 if state.armed_ts is None:
                     elapsed = (now - state.touch_ts).total_seconds()
                     if elapsed < cfg.activation_delay_seconds:
+                        if reset_after_signal:
+                            self._reset_signal_cycle(state)
                         continue
                     if best_ask > cfg.top_price:
                         if best_ask >= 0.9:
@@ -287,10 +307,11 @@ class RecoveryEngine:
                                 f"[recovery] overshot {market.symbol} {market.interval_minutes}m {side.upper()}"
                                 f" [{cfg.name}] | ask={best_ask:.3f} > {cfg.top_price:.2f}"
                             )
-                        reset_after_invalid = True
+                        self._reset_signal_cycle(state)
                         continue
                     if best_ask >= cfg.entry_price:
                         time_blocks_order = False
+                        time_zone_skip_note: str | None = None
                         if cfg.max_seconds_to_expiry is not None and seconds_left > cfg.max_seconds_to_expiry:
                             time_blocks_order = True
                         if not time_blocks_order:
@@ -298,6 +319,36 @@ class RecoveryEngine:
                             min_expiry = min_expiry_by_sym.get(market.symbol)
                             if min_expiry is not None and seconds_left < float(min_expiry):
                                 time_blocks_order = True
+                        if not time_blocks_order:
+                            skip_zones = self.strategy.get("skip_seconds_to_expiry_zones_by_symbol") or {}
+                            zone = skip_zones.get(market.symbol)
+                            if zone and float(zone[0]) <= seconds_left < float(zone[1]):
+                                time_blocks_order = True
+                                time_zone_skip_note = (
+                                    f"reason=time_zone_filter secs_left={int(seconds_left)}"
+                                    f" zone=[{zone[0]},{zone[1]})"
+                                )
+                                if not self.db.has_market_record(market.market_id, cfg.name, "real", side=side):
+                                    time_zone_skip_data = dict(
+                                        market_id=market.market_id,
+                                        symbol=market.symbol,
+                                        title=market.title,
+                                        interval_minutes=market.interval_minutes,
+                                        market_start=market.market_start,
+                                        market_end=market.expiry,
+                                        side=side,
+                                        mode="real",
+                                        strategy_name=cfg.name,
+                                        touch_ts=state.touch_ts,
+                                        armed_ts=now,
+                                        touch_price=float(state.touch_price or best_ask),
+                                        trigger_price=cfg.entry_price,
+                                        entry_price=cfg.top_price,
+                                        requested_shares=self._compute_order_size(
+                                            self._scaled_stake_usd(market.symbol), cfg.top_price
+                                        ),
+                                        note=time_zone_skip_note,
+                                    )
                         if not time_blocks_order:
                             state.armed_ts = now
                             print(
@@ -309,6 +360,25 @@ class RecoveryEngine:
                                     f"[recovery] signal-only {market.symbol} {market.interval_minutes}m"
                                     f" {side.upper()} [{cfg.name}] — повторный цикл без нового ордера"
                                 )
+                                signal_only_data = dict(
+                                    market_id=market.market_id,
+                                    symbol=market.symbol,
+                                    title=market.title,
+                                    interval_minutes=market.interval_minutes,
+                                    market_start=market.market_start,
+                                    market_end=market.expiry,
+                                    side=side,
+                                    mode="real",
+                                    strategy_name=cfg.name,
+                                    touch_ts=state.touch_ts,
+                                    armed_ts=state.armed_ts,
+                                    touch_price=float(state.touch_price or best_ask),
+                                    trigger_price=cfg.entry_price,
+                                    entry_price=cfg.top_price,
+                                    requested_shares=self._compute_order_size(
+                                        self._scaled_stake_usd(market.symbol), cfg.top_price
+                                    ),
+                                )
                             elif not state.orders_placed:
                                 state.orders_placed = True
                                 self._placed_markets.add(market_key)
@@ -317,8 +387,6 @@ class RecoveryEngine:
                                 armed_ts = state.armed_ts
                                 touch_price = float(state.touch_price or best_ask)
                 if reset_after_signal:
-                    self._reset_signal_cycle(state)
-                elif reset_after_invalid:
                     self._reset_signal_cycle(state)
             if signal_to_log is not None:
                 ref_ts, _ = signal_to_log
@@ -329,6 +397,34 @@ class RecoveryEngine:
                     side=side,
                     ref_ts=ref_ts,
                 )
+            if signal_only_data is not None:
+                try:
+                    self.db.open_position(
+                        **signal_only_data,
+                        filled_shares=0.0,
+                        total_cost=0.0,
+                        fee=0.0,
+                        status="signal_only",
+                        pm_token_id=market.no_token_id if side == "no" else market.yes_token_id,
+                    )
+                except Exception as e:
+                    print(f"[recovery] signal_only insert failed ({market.symbol} {side}): {e}")
+            if time_zone_skip_data is not None:
+                try:
+                    self.db.open_position(
+                        **time_zone_skip_data,
+                        filled_shares=0.0,
+                        total_cost=0.0,
+                        fee=0.0,
+                        status="skipped_filter",
+                        pm_token_id=market.no_token_id if side == "no" else market.yes_token_id,
+                    )
+                    print(
+                        f"[recovery] time_zone skip {market.symbol} {market.interval_minutes}m {side.upper()}"
+                        f" [{cfg.name}] | {time_zone_skip_data['note']}"
+                    )
+                except Exception as e:
+                    print(f"[recovery] time_zone_skip insert failed ({market.symbol} {side}): {e}")
             if not should_place:
                 continue
             thread = threading.Thread(
@@ -1057,6 +1153,20 @@ class RecoveryEngine:
         if self.pm_trader is not None and self.strategy.get("real_enabled", False):
             lines.append(f"💳 CLOB: ${self.real_balance():.2f}")
             lines.append("")
+        btc = self.db.stats_by_symbol("BTC", mode="real", interval_minutes=5)
+        if btc["resolved_count"] > 0:
+            wr = btc["won_count"] / btc["resolved_count"]
+            avg_entry = float(btc["avg_entry_price"])
+            avg_shares = float(btc.get("avg_filled_shares") or 0.0)
+            pnl_per_fill = avg_shares * (wr * 0.98 - avg_entry) if avg_shares > 0 else 0.0
+            lines.append(
+                f"📊 BTC: {int(btc['resolved_count'])} ставок"
+                f" | WR={wr*100:.1f}%"
+                f" | entry={avg_entry:.3f}"
+                f" | PnL/fill=${pnl_per_fill:+.3f}"
+                f" | total=${float(btc['realized_pnl']):+.2f}"
+            )
+            lines.append("")
         # Показываем только активные real-extras (self._real_only_names).
         # real_stats_exclude держим отдельно — оно исключает исторические имена
         # из основной статистики, но отображать их в блоке extras не нужно.
@@ -1232,15 +1342,23 @@ class RecoveryEngine:
         + price≤top_price+0.02 + match_time в окне ±window_seconds от attempt."""
         if self.pm_trader is None:
             return None
-        time.sleep(wait_seconds)
-        try:
-            from py_clob_client.clob_types import TradeParams
-            resp = self.pm_trader._client.get_trades(TradeParams(asset_id=token_id))
-        except Exception as exc:
-            print(f"[recovery] recovery get_trades failed: {exc}")
-            return None
-        trades = resp.get("data", []) if isinstance(resp, dict) else resp
-        if not isinstance(trades, list):
+        from py_clob_client.clob_types import TradeParams
+        retry_delays = [wait_seconds, 2.0, 2.0]
+        trades: list = []
+        for attempt, delay in enumerate(retry_delays):
+            time.sleep(delay)
+            try:
+                resp = self.pm_trader._client.get_trades(TradeParams(asset_id=token_id))
+                trades = resp.get("data", []) if isinstance(resp, dict) else resp
+                if not isinstance(trades, list):
+                    trades = []
+            except Exception as exc:
+                print(f"[recovery] recovery get_trades failed (attempt {attempt + 1}): {exc}")
+                continue
+            if trades:
+                break
+            print(f"[recovery] recovery get_trades empty (attempt {attempt + 1}), retrying...")
+        if not trades:
             return None
         best: dict | None = None
         best_dt = None
