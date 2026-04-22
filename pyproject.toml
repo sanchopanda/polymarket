@@ -24,4 +24,4 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*", "arb_bot*", "cross_arb_bot*", "real_arb_bot*", "volatility_bot*", "oracle_arb_bot*"]
+include = ["src*", "arb_bot*", "cross_arb_bot*", "real_arb_bot*", "volatility_bot*", "oracle_arb_bot*", "jump_paper_bot*"]

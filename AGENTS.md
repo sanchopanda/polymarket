@@ -10,6 +10,7 @@
 - `real_arb_bot/` — реальный арбитражный бот (Polymarket ↔ Kalshi), **real trading**;
 - `momentum_bot/` — momentum-following бот (Polymarket ↔ Kalshi), **paper trading**;
 - `real_momentum_bot/` — momentum-following бот с реальными ордерами и виртуальным бюджетом;
+- `jump_paper_bot/` — отдельный paper-only бот по PM short crypto рынкам с сигналом `jump + avg10s`;
 - `arb_bot/` — общий WebSocket клиент для Polymarket (зависимость `cross_arb_bot` и тестов);
 - `weather_bot/` — погодный бот для Polymarket daily-temperature рынков, **read-only pipeline** (forecast + snapshots, торговля не включена);
 - `test_real_15m.py` — тестовый скрипт реальных ставок на Polymarket (сбор аналитики);
@@ -183,6 +184,41 @@
 - `WALLET_PRIVATE_KEY` — Polymarket кошелёк
 - `WALLET_PROXY` — прокси (опционально)
 - `KALSHI_API_KEY_ID` + `KALSHI_PRIVATE_KEY_PATH` — Kalshi API
+
+## Команды: `python3 -m jump_paper_bot`
+
+- `watch` — live monitoring PM short crypto рынков, signal detection и paper entry
+- `status` — сводка по сигналам, позициям, PnL и breakdown по symbol/bucket
+- `resolve` — резолюция истёкших paper-позиций
+
+Конфиг: `jump_paper_bot/config.yaml`
+База: `data/jump_paper_bot.db`
+
+Ключевые секции:
+
+- `strategy`
+- `market_filter`
+- `runtime`
+- `db`
+- `polymarket`
+- `telegram`
+
+Что важно про `jump_paper_bot`:
+
+- venue только `Polymarket`
+- universe только short crypto рынки по символам `BTC/ETH/SOL/XRP/DOGE/BNB`
+- интервалы только `5m` и `15m`
+- сигнал `jump + avg10s` срабатывает когда:
+  - текущий `best_ask` попадает в окно `(level, level + 0.05]`
+  - `avg(prev 10s)` той же стороны ниже текущей цены минимум на `$0.05`
+  - рынок находится внутри bucket `60s`, `40s` или `30s` до экспирации
+- дедупликация сигналов идёт по `(market_id, side, signal_bucket_seconds)`
+- один и тот же jump может открыть несколько paper-входов, если впервые попал в несколько buckets
+- перед paper fill бот всегда тянет стакан и требует глубину `>= 2 x stake` в диапазоне `<= signal_price + 0.05`
+- Telegram использует тот же binding, что `oracle_arb_bot`:
+  - `token_env: SIMPLE_BOT_TOKEN`
+  - `chat_id_file: data/.telegram_chat_id`
+  - status команда по умолчанию: `/jump_status`
 
 ## Тестовые скрипты
 

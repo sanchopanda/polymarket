@@ -7,6 +7,7 @@
 - `ev_bot/` — отдельный paper bot с EV-фильтром по историческим бакетам.
 - `momentum_bot/` — paper momentum bot по паре `Polymarket ↔ Kalshi`.
 - `real_momentum_bot/` — momentum bot с реальными ордерами и виртуальным бюджетом.
+- `jump_paper_bot/` — отдельный paper-only бот по PM short crypto рынкам с сигналом `jump + avg10s`.
 - `bybit-bot/` — отдельный Bybit futures bot.
 - корень репозитория — диагностические и backtest-скрипты.
 
@@ -521,6 +522,52 @@ python -m real_momentum_bot --config real_momentum_bot/config.yaml resolve
 
 Конфиг: `real_momentum_bot/config.yaml`.
 База: `data/real_momentum_bot.db`.
+
+## `jump_paper_bot`
+
+Отдельный paper-only бот для short crypto `Polymarket` рынков. Он использует
+тот же short-market discovery и PM websocket plumbing, что `oracle_arb_bot`,
+но сигнал у него другой:
+
+- стороны `yes` и `no`
+- уровни `0.60 / 0.65 / 0.70`
+- buckets `60s / 40s / 30s` до экспирации
+- best ask должен попасть в окно `(level, level + $0.05]`
+- средняя цена этой же стороны за предыдущие `10s` должна быть ниже текущей минимум на `$0.05`
+- на ключ `(market_id, side, bucket)` допускается только один сигнал
+
+При сигнале бот тянет CLOB стакан и открывает paper-позицию только если в
+диапазоне `<= signal_price + $0.05` есть глубина не меньше `2 x stake`. Fill
+симулируется проходом по реальным ask-уровням.
+
+Запуск:
+
+```bash
+python -m jump_paper_bot watch
+python -m jump_paper_bot status
+python -m jump_paper_bot resolve
+python -m jump_paper_bot --config jump_paper_bot/config.yaml status
+```
+
+Конфиг: `jump_paper_bot/config.yaml`.
+База: `data/jump_paper_bot.db`.
+
+Ключевые параметры:
+
+- `strategy.paper_stake_usd`
+- `strategy.required_depth_multiple`
+- `strategy.lookback_seconds`
+- `strategy.jump_cents`
+- `strategy.signal_levels`
+- `strategy.time_buckets_seconds`
+- `market_filter.symbols`
+- `market_filter.interval_minutes`
+- `telegram.token_env`
+- `telegram.chat_id_file`
+
+Telegram использует тот же binding, что `oracle_arb_bot`: по умолчанию
+`SIMPLE_BOT_TOKEN` + `data/.telegram_chat_id`. Чтобы не конфликтовать с чужим
+`/status`, бот использует namespaced команду `/jump_status`.
 
 Ключевые параметры:
 

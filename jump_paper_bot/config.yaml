@@ -1,0 +1,42 @@
+strategy:
+  paper_stake_usd: 5.0
+  required_depth_multiple: 2.0
+  lookback_seconds: 10
+  jump_cents: 0.05
+  depth_limit_offset: 0.05
+  signal_levels: [0.60, 0.65, 0.70]
+  time_buckets_seconds: [60, 40, 30]
+
+market_filter:
+  symbols: ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"]
+  interval_minutes: [5, 15]
+  fee_type: "crypto_fees"
+  min_days_to_expiry: 0
+  max_days_to_expiry: 0.02
+  min_volume: 0
+  min_liquidity: 0
+
+runtime:
+  universe_refresh_seconds: 60
+  status_interval_seconds: 15
+
+db:
+  path: "data/jump_paper_bot.db"
+
+polymarket:
+  paper: true
+  real: false
+  gamma_base_url: "https://gamma-api.polymarket.com"
+  clob_base_url: "https://clob.polymarket.com"
+  clob_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+  page_size: 500
+  request_delay_ms: 100
+
+kalshi:
+  paper: false
+  real: false
+
+telegram:
+  token_env: "SIMPLE_BOT_TOKEN"
+  chat_id_file: "data/.telegram_chat_id"
+
