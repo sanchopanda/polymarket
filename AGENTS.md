@@ -216,7 +216,7 @@
 - один и тот же jump может открыть несколько paper-входов, если впервые попал в несколько buckets
 - перед paper fill бот всегда тянет стакан и требует глубину `>= 2 x stake` в диапазоне `<= signal_price + 0.05`
 - Telegram использует тот же binding, что `oracle_arb_bot`:
-  - `token_env: SIMPLE_BOT_TOKEN`
+  - token env фиксированно: `SIMPLE_BOT_TOKEN`
   - `chat_id_file: data/.telegram_chat_id`
   - status команда по умолчанию: `/jump_status`
 

@@ -24,7 +24,7 @@ Telegram:
 
 - использует тот же binding, что `oracle_arb_bot`
 - по умолчанию:
-  - `token_env = SIMPLE_BOT_TOKEN`
+  - env token фиксированно берётся из `SIMPLE_BOT_TOKEN`
   - `chat_id_file = data/.telegram_chat_id`
 - команда статуса: `/jump_status`
 
@@ -45,4 +45,3 @@ python3 -m jump_paper_bot resolve
 - `positions` — paper-позиции
 - `signals` — один лог на bucket-сигнал
 - `price_history` — live history для диагностики
-

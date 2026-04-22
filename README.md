@@ -562,12 +562,12 @@ python -m jump_paper_bot --config jump_paper_bot/config.yaml status
 - `strategy.time_buckets_seconds`
 - `market_filter.symbols`
 - `market_filter.interval_minutes`
-- `telegram.token_env`
 - `telegram.chat_id_file`
 
-Telegram использует тот же binding, что `oracle_arb_bot`: по умолчанию
-`SIMPLE_BOT_TOKEN` + `data/.telegram_chat_id`. Чтобы не конфликтовать с чужим
-`/status`, бот использует namespaced команду `/jump_status`.
+Telegram использует тот же binding, что `oracle_arb_bot`: токен фиксированно
+читается из `SIMPLE_BOT_TOKEN`, chat id хранится в `data/.telegram_chat_id`.
+Чтобы не конфликтовать с чужим `/status`, бот использует namespaced команду
+`/jump_status`.
 
 Ключевые параметры:
 

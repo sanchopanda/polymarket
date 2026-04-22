@@ -37,6 +37,4 @@ kalshi:
   real: false
 
 telegram:
-  token_env: "SIMPLE_BOT_TOKEN"
   chat_id_file: "data/.telegram_chat_id"
-

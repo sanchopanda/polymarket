@@ -45,7 +45,7 @@ def main() -> None:
 
         notifier = JumpTelegramNotifier(
             get_status_fn=_status,
-            token_env=tg_cfg.get("token_env", "SIMPLE_BOT_TOKEN"),
+            token_env="SIMPLE_BOT_TOKEN",
             chat_id_file=tg_cfg.get("chat_id_file", "data/.telegram_chat_id"),
         )
         engine = JumpPaperEngine(config, db, notifier=notifier)
@@ -76,4 +76,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
