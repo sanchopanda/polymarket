@@ -37,6 +37,8 @@ class RecoveryEngine:
         self._lock = threading.Lock()
         self._states: dict[tuple[str, str, str], TrackedRecovery] = {}
         self._placed_markets: set[tuple[str, str]] = set()  # (market_id, cfg.name) — один ордер на рынок
+        self._placed_markets_ts: dict[tuple[str, str], datetime] = {}  # когда был первый armed
+        self._repeat_placed: set[tuple[str, str, str]] = set()  # (market_id, cfg.name, side) — repeat bet уже выставлен
         self._paper_only_names: set[str] = set()
         self._real_only_names: set[str] = set()
         self._real_stats_exclude: set[str] = set(self.strategy.get("real_stats_exclude") or [])
@@ -138,6 +140,10 @@ class RecoveryEngine:
         self._disabled_symbols: set[str] = self._load_disabled_symbols()
         self._symbol_pnl_baseline: dict[str, float] = self._load_or_init_baseline()
         self._symbol_pnl_current: dict[str, float] = self.db.pnl_by_symbol_real(exclude_strategies=self._real_stats_exclude or None)
+        _rb = self.strategy.get("repeat_bet") or {}
+        self._repeat_bet_enabled: bool = bool(_rb.get("enabled", False))
+        self._repeat_bet_touch_max: float = float(_rb.get("touch_max", 0.38))
+        self._repeat_bet_gap_min: float = float(_rb.get("gap_min_seconds", 30))
 
     def _load_disabled_symbols(self) -> set[str]:
         try:
@@ -356,10 +362,33 @@ class RecoveryEngine:
                                 f" [{cfg.name}] | ask={best_ask:.3f} (trigger>={cfg.entry_price:.2f})"
                             )
                             if market_key in self._placed_markets:
-                                print(
-                                    f"[recovery] signal-only {market.symbol} {market.interval_minutes}m"
-                                    f" {side.upper()} [{cfg.name}] — повторный цикл без нового ордера"
+                                repeat_key = (market.market_id, cfg.name, side)
+                                orig_armed_ts = self._placed_markets_ts.get(market_key)
+                                gap_seconds = (now - orig_armed_ts).total_seconds() if orig_armed_ts else None
+                                cur_touch = float(state.touch_price or best_ask)
+                                repeat_allowed = (
+                                    self._repeat_bet_enabled
+                                    and repeat_key not in self._repeat_placed
+                                    and cur_touch < self._repeat_bet_touch_max
+                                    and gap_seconds is not None
+                                    and gap_seconds >= self._repeat_bet_gap_min
                                 )
+                                if repeat_allowed:
+                                    self._repeat_placed.add(repeat_key)
+                                    should_place = True
+                                    touch_ts = state.touch_ts
+                                    armed_ts = state.armed_ts
+                                    touch_price = cur_touch
+                                    print(
+                                        f"[recovery] REPEAT BET {market.symbol} {market.interval_minutes}m"
+                                        f" {side.upper()} [{cfg.name}]"
+                                        f" | touch={cur_touch:.3f} gap={gap_seconds:.0f}s"
+                                    )
+                                else:
+                                    print(
+                                        f"[recovery] signal-only {market.symbol} {market.interval_minutes}m"
+                                        f" {side.upper()} [{cfg.name}] — повторный цикл без нового ордера"
+                                    )
                                 signal_only_data = dict(
                                     market_id=market.market_id,
                                     symbol=market.symbol,
@@ -372,7 +401,7 @@ class RecoveryEngine:
                                     strategy_name=cfg.name,
                                     touch_ts=state.touch_ts,
                                     armed_ts=state.armed_ts,
-                                    touch_price=float(state.touch_price or best_ask),
+                                    touch_price=cur_touch,
                                     trigger_price=cfg.entry_price,
                                     entry_price=cfg.top_price,
                                     requested_shares=self._compute_order_size(
@@ -382,6 +411,7 @@ class RecoveryEngine:
                             elif not state.orders_placed:
                                 state.orders_placed = True
                                 self._placed_markets.add(market_key)
+                                self._placed_markets_ts[market_key] = now
                                 should_place = True
                                 touch_ts = state.touch_ts
                                 armed_ts = state.armed_ts
@@ -447,6 +477,15 @@ class RecoveryEngine:
     ) -> None:
         token_id = market.no_token_id if side == "no" else market.yes_token_id
         side_upper = side.upper()
+        market_key = (market.market_id, cfg.name)
+
+        def _release() -> None:
+            # Убираем рынок из _placed_markets если реальный ордер так и не был выставлен.
+            # Следующий сигнал сможет попробовать снова.
+            with self._lock:
+                self._placed_markets.discard(market_key)
+                self._placed_markets_ts.pop(market_key, None)
+                self._repeat_placed.discard((market.market_id, cfg.name, side))
 
         real_allowed = (
             self.strategy.get("real_enabled", False)
@@ -458,12 +497,15 @@ class RecoveryEngine:
             print(f"[recovery] skip real {market.symbol} {market.interval_minutes}m {side_upper}: symbol disabled by drawdown")
         if real_allowed and not self.db.has_market_record(market.market_id, cfg.name, "real", side=side):
             if self.pm_trader is None:
+                _release()
                 return
             if not token_id:
                 print(f"[recovery] skip real {market.symbol} {market.interval_minutes}m {side_upper}: token_id missing")
+                _release()
                 return
             requested_shares = self._compute_order_size(self._scaled_stake_usd(market.symbol), cfg.top_price)
             if requested_shares <= 0:
+                _release()
                 return
             reserved_cost = requested_shares * cfg.entry_price
             if reserved_cost > self.real_balance():
@@ -471,6 +513,7 @@ class RecoveryEngine:
                     f"[recovery] skip real {market.symbol} {market.interval_minutes}m {side_upper}:"
                     f" reserve=${reserved_cost:.2f} > virtual=${self.real_balance():.2f}"
                 )
+                _release()
                 return
             confirm_delay = float(self.strategy.get("real_confirm_delay_seconds") or 0.0)
             delay_by_sym = self.strategy.get("real_confirm_delay_seconds_by_symbol") or {}
@@ -554,6 +597,7 @@ class RecoveryEngine:
                     pm_token_id=token_id,
                     note=note,
                 )
+                _release()
                 return
             attempt_start_ts = datetime.utcnow()
             try:
@@ -609,6 +653,7 @@ class RecoveryEngine:
                             f" our_notional=${our_notional:.2f} market_min={min_req}"
                         ),
                     )
+                    _release()
                     return
                 print(f"[recovery] order error {market.symbol} {market.interval_minutes}m {side_upper}: {exc}")
                 # Request exception / 500 — возможно ордер прошёл на биржу, но ответ потерян.
@@ -714,6 +759,7 @@ class RecoveryEngine:
                     pm_token_id=token_id,
                     note=exc_text,
                 )
+                _release()
                 return
             if not result.order_id:
                 self.db.open_position(
@@ -739,6 +785,7 @@ class RecoveryEngine:
                     pm_token_id=token_id,
                     note=result.status or "order_submit_failed",
                 )
+                _release()
                 return
             pos = self.db.open_position(
                 market_id=market.market_id,
@@ -1142,13 +1189,23 @@ class RecoveryEngine:
         _excl_real = (self._real_only_names | self._real_stats_exclude) or None
         paper = self.db.stats_by_mode("paper", exclude_strategies=_excl_paper)
         real = self.db.stats_by_mode("real", exclude_strategies=_excl_real)
-        paper_recent = self.db.stats_by_mode_recent("paper", hours=12, exclude_strategies=_excl_paper)
-        real_recent = self.db.stats_by_mode_recent("real", hours=12, exclude_strategies=_excl_real)
+        paper_windows = [
+            ("6h",  self.db.stats_by_mode_recent("paper", hours=6,  exclude_strategies=_excl_paper)),
+            ("12h", self.db.stats_by_mode_recent("paper", hours=12, exclude_strategies=_excl_paper)),
+            ("24h", self.db.stats_by_mode_recent("paper", hours=24, exclude_strategies=_excl_paper)),
+            ("48h", self.db.stats_by_mode_recent("paper", hours=48, exclude_strategies=_excl_paper)),
+        ]
+        real_windows = [
+            ("6h",  self.db.stats_by_mode_recent("real", hours=6,  exclude_strategies=_excl_real)),
+            ("12h", self.db.stats_by_mode_recent("real", hours=12, exclude_strategies=_excl_real)),
+            ("24h", self.db.stats_by_mode_recent("real", hours=24, exclude_strategies=_excl_real)),
+            ("48h", self.db.stats_by_mode_recent("real", hours=48, exclude_strategies=_excl_real)),
+        ]
         active = self._active_state_counts()
         lines = ["<b>Recovery Bot</b>", ""]
-        lines.append(self._format_mode_status("PAPER", paper, recent=paper_recent))
+        lines.append(self._format_mode_status("PAPER", paper, recent_windows=paper_windows))
         lines.append("")
-        lines.append(self._format_mode_status("REAL", real, recent=real_recent))
+        lines.append(self._format_mode_status("REAL", real, recent_windows=real_windows))
         lines.append("")
         if self.pm_trader is not None and self.strategy.get("real_enabled", False):
             lines.append(f"💳 CLOB: ${self.real_balance():.2f}")
@@ -1474,6 +1531,7 @@ class RecoveryEngine:
         stats: dict[str, float | int],
         *,
         recent: dict[str, float | int] | None = None,
+        recent_windows: list[tuple[str, dict[str, float | int]]] | None = None,
     ) -> str:
         resolved = int(stats["resolved_count"])
         won = int(stats["won_count"])
@@ -1486,7 +1544,15 @@ class RecoveryEngine:
             f"unfilled={int(stats['unfilled_count'])} | avg_entry={float(stats.get('avg_entry_price', 0.0)):.3f} | "
             f"wr={wr:.1f}%"
         )
-        if recent is not None:
+        if recent_windows is not None:
+            parts = []
+            for lbl, ws in recent_windows:
+                ws_resolved = int(ws["resolved_count"])
+                ws_won = int(ws["won_count"])
+                ws_wr = (ws_won / ws_resolved * 100.0) if ws_resolved else 0.0
+                parts.append(f"{lbl}={ws_wr:.1f}%/{ws_resolved}")
+            line += "\n  wr: " + " | ".join(parts)
+        elif recent is not None:
             recent_resolved = int(recent["resolved_count"])
             recent_won = int(recent["won_count"])
             recent_wr = (recent_won / recent_resolved * 100.0) if recent_resolved else 0.0
