@@ -144,6 +144,7 @@ class RecoveryEngine:
         self._repeat_bet_enabled: bool = bool(_rb.get("enabled", False))
         self._repeat_bet_touch_max: float = float(_rb.get("touch_max", 0.38))
         self._repeat_bet_gap_min: float = float(_rb.get("gap_min_seconds", 30))
+        self._repeat_bet_top_price: float = float(_rb.get("top_price", 0.70))
 
     def _load_disabled_symbols(self) -> set[str]:
         try:
@@ -257,6 +258,7 @@ class RecoveryEngine:
             reset_after_signal = False
             signal_only_data: dict | None = None
             time_zone_skip_data: dict | None = None
+            is_repeat_place: bool = False
             with self._lock:
                 state = self._states.get(state_key)
                 if state is None:
@@ -376,6 +378,7 @@ class RecoveryEngine:
                                 if repeat_allowed:
                                     self._repeat_placed.add(repeat_key)
                                     should_place = True
+                                    is_repeat_place = True
                                     touch_ts = state.touch_ts
                                     armed_ts = state.armed_ts
                                     touch_price = cur_touch
@@ -459,7 +462,7 @@ class RecoveryEngine:
                 continue
             thread = threading.Thread(
                 target=self._place_orders,
-                args=(market, cfg, touch_ts, armed_ts, touch_price, best_ask, side),
+                args=(market, cfg, touch_ts, armed_ts, touch_price, best_ask, side, is_repeat_place),
                 daemon=True,
                 name=f"recovery-open-{market.symbol}-{market.interval_minutes}-{cfg.name}-{side}",
             )
@@ -474,6 +477,7 @@ class RecoveryEngine:
         touch_price: float,
         trigger_price: float,
         side: str,
+        is_repeat: bool = False,
     ) -> None:
         token_id = market.no_token_id if side == "no" else market.yes_token_id
         side_upper = side.upper()
@@ -495,6 +499,8 @@ class RecoveryEngine:
         )
         if self.strategy.get("real_enabled", False) and market.symbol in self._disabled_symbols:
             print(f"[recovery] skip real {market.symbol} {market.interval_minutes}m {side_upper}: symbol disabled by drawdown")
+        effective_top_price = self._repeat_bet_top_price if is_repeat else cfg.top_price
+
         if real_allowed and not self.db.has_market_record(market.market_id, cfg.name, "real", side=side):
             if self.pm_trader is None:
                 _release()
@@ -503,7 +509,7 @@ class RecoveryEngine:
                 print(f"[recovery] skip real {market.symbol} {market.interval_minutes}m {side_upper}: token_id missing")
                 _release()
                 return
-            requested_shares = self._compute_order_size(self._scaled_stake_usd(market.symbol), cfg.top_price)
+            requested_shares = self._compute_order_size(self._scaled_stake_usd(market.symbol), effective_top_price)
             if requested_shares <= 0:
                 _release()
                 return
@@ -515,15 +521,17 @@ class RecoveryEngine:
                 )
                 _release()
                 return
-            confirm_delay = float(self.strategy.get("real_confirm_delay_seconds") or 0.0)
-            delay_by_sym = self.strategy.get("real_confirm_delay_seconds_by_symbol") or {}
-            if market.symbol in delay_by_sym:
-                confirm_delay = float(delay_by_sym[market.symbol])
-            confirm_min = self.strategy.get("real_confirm_min_price")
-            by_symbol = self.strategy.get("real_confirm_min_price_by_symbol") or {}
-            if market.symbol in by_symbol:
-                confirm_min = by_symbol[market.symbol]
-            hold_cfg = (self.strategy.get("real_hold_test_by_symbol") or {}).get(market.symbol)
+            confirm_delay = 0.0 if is_repeat else float(self.strategy.get("real_confirm_delay_seconds") or 0.0)
+            if not is_repeat:
+                delay_by_sym = self.strategy.get("real_confirm_delay_seconds_by_symbol") or {}
+                if market.symbol in delay_by_sym:
+                    confirm_delay = float(delay_by_sym[market.symbol])
+            confirm_min = None if is_repeat else self.strategy.get("real_confirm_min_price")
+            if not is_repeat:
+                by_symbol = self.strategy.get("real_confirm_min_price_by_symbol") or {}
+                if market.symbol in by_symbol:
+                    confirm_min = by_symbol[market.symbol]
+            hold_cfg = None if is_repeat else (self.strategy.get("real_hold_test_by_symbol") or {}).get(market.symbol)
             skip_reason = None
             note = None
 
@@ -603,7 +611,7 @@ class RecoveryEngine:
             try:
                 result = self.pm_trader.place_limit_buy_order(
                     token_id=token_id,
-                    price=cfg.top_price,
+                    price=effective_top_price,
                     size=requested_shares,
                     wait_seconds=float(self.strategy.get("real_order_wait_seconds", 0.5)),
                 )
@@ -613,16 +621,16 @@ class RecoveryEngine:
                     import re as _re
                     m = _re.search(r"minimum[^0-9]*([0-9]+(?:\.[0-9]+)?)", exc_text)
                     min_req = m.group(1) if m else "?"
-                    our_notional = requested_shares * cfg.top_price
+                    our_notional = requested_shares * effective_top_price
                     print(
                         f"[recovery] skip real {market.symbol} {market.interval_minutes}m {side_upper}:"
-                        f" min size слишком большой (our={requested_shares:.2f} shares @ {cfg.top_price:.2f} = ${our_notional:.2f}, min={min_req}) | err={exc_text}"
+                        f" min size слишком большой (our={requested_shares:.2f} shares @ {effective_top_price:.2f} = ${our_notional:.2f}, min={min_req}) | err={exc_text}"
                     )
                     if self.notifier is not None:
                         try:
                             self.notifier.send(
                                 f"⚠️ <b>skip min</b> {market.symbol} {market.interval_minutes}m {side_upper}\n"
-                                f"our={requested_shares:.2f}sh @ {cfg.top_price:.2f} = ${our_notional:.2f}\n"
+                                f"our={requested_shares:.2f}sh @ {effective_top_price:.2f} = ${our_notional:.2f}\n"
                                 f"market min = {min_req}"
                             )
                         except Exception:
@@ -669,7 +677,7 @@ class RecoveryEngine:
                         recovered = self._recover_orphan_trade(
                             token_id=token_id,
                             requested_shares=requested_shares,
-                            top_price=cfg.top_price,
+                            top_price=effective_top_price,
                             attempt_start_ts=attempt_start_ts,
                         )
                     except Exception as rec_exc:
@@ -801,7 +809,7 @@ class RecoveryEngine:
                 armed_ts=armed_ts,
                 touch_price=touch_price,
                 trigger_price=trigger_price,
-                entry_price=cfg.top_price,
+                entry_price=effective_top_price,
                 requested_shares=requested_shares,
                 filled_shares=0.0,
                 total_cost=reserved_cost,
@@ -820,8 +828,9 @@ class RecoveryEngine:
             )
             print(
                 f"[recovery] REAL WORKING {market.symbol} {market.interval_minutes}m {side_upper}"
-                f" [{cfg.name}] | touch={touch_price:.3f} | trigger={trigger_price:.3f}"
-                f" | limit={cfg.top_price:.3f} | reserve=${reserved_cost:.2f}"
+                f" [{cfg.name}]{' [REPEAT]' if is_repeat else ''}"
+                f" | touch={touch_price:.3f} | trigger={trigger_price:.3f}"
+                f" | limit={effective_top_price:.3f} | reserve=${reserved_cost:.2f}"
             )
             self._sync_working_position(pos, cancel_if_partial=False)
 
@@ -844,7 +853,7 @@ class RecoveryEngine:
 
         # После всех ордеров — фоновый фетч volume/liquidity и снэпшот стакана.
         self._fetch_market_meta_async(market.market_id)
-        self._fetch_depth_async(market.market_id, token_id, side, cfg.top_price)
+        self._fetch_depth_async(market.market_id, token_id, side, effective_top_price)
 
     def _fetch_market_meta_async(self, market_id: str) -> None:
         """Фоново тянем volume/liquidity из Gamma и сохраняем в positions.

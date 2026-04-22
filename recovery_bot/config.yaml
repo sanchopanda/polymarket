@@ -55,6 +55,7 @@ strategy:
     enabled: true
     touch_max: 0.38        # touch_price < этого порога
     gap_min_seconds: 30    # минимальный gap между оригинальным и повторным armed
+    top_price: 0.70        # лимит repeat-ставки (выше чем основной 0.68, без delay-проверки)
 
   real_stats_exclude:
     - "real_v2"
