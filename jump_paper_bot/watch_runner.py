@@ -25,7 +25,6 @@ class JumpPaperWatchRunner:
                     last_scan = now
                 if now - last_status >= status_seconds:
                     self.engine.resolve()
-                    print(self.engine.get_status_text())
                     last_status = now
                 time.sleep(1)
         except KeyboardInterrupt:

@@ -260,18 +260,6 @@ class JumpPaperEngine:
                     f"{row['symbol']}: total={int(row['total_count'])} resolved={row_resolved} "
                     f"wr={row_wr:.1f}% pnl=${float(row['pnl'] or 0.0):+.2f}"
                 )
-        bucket_rows = self.db.breakdown_by_bucket()
-        if bucket_rows:
-            lines.append("")
-            lines.append("По bucket:")
-            for row in bucket_rows:
-                row_resolved = int(row["resolved_count"] or 0)
-                row_won = int(row["won_count"] or 0)
-                row_wr = row_won / row_resolved * 100.0 if row_resolved else 0.0
-                lines.append(
-                    f"{int(row['signal_bucket_seconds'])}s: total={int(row['total_count'])} resolved={row_resolved} "
-                    f"wr={row_wr:.1f}% pnl=${float(row['pnl'] or 0.0):+.2f}"
-                )
         recent = self.db.get_recent_positions(limit=5)
         if recent:
             lines.append("")

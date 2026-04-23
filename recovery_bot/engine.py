@@ -145,6 +145,8 @@ class RecoveryEngine:
         self._repeat_bet_touch_max: float = float(_rb.get("touch_max", 0.38))
         self._repeat_bet_gap_min: float = float(_rb.get("gap_min_seconds", 30))
         self._repeat_bet_top_price: float = float(_rb.get("top_price", 0.70))
+        self._repeat_bet_top_price_final: float | None = float(_rb["top_price_final"]) if "top_price_final" in _rb else None
+        self._repeat_bet_top_price_final_window: float = float(_rb.get("top_price_final_window", 20))
 
     def _load_disabled_symbols(self) -> set[str]:
         try:
@@ -325,7 +327,8 @@ class RecoveryEngine:
                         if not time_blocks_order:
                             min_expiry_by_sym = self.strategy.get("min_seconds_to_expiry_by_symbol") or {}
                             min_expiry = min_expiry_by_sym.get(market.symbol)
-                            if min_expiry is not None and seconds_left < float(min_expiry):
+                            is_potential_repeat = market_key in self._placed_markets
+                            if min_expiry is not None and seconds_left < float(min_expiry) and not is_potential_repeat:
                                 time_blocks_order = True
                         if not time_blocks_order:
                             skip_zones = self.strategy.get("skip_seconds_to_expiry_zones_by_symbol") or {}
@@ -388,9 +391,21 @@ class RecoveryEngine:
                                         f" | touch={cur_touch:.3f} gap={gap_seconds:.0f}s"
                                     )
                                 else:
+                                    _why = []
+                                    if not self._repeat_bet_enabled:
+                                        _why.append("disabled")
+                                    if repeat_key in self._repeat_placed:
+                                        _why.append("already_placed")
+                                    if cur_touch >= self._repeat_bet_touch_max:
+                                        _why.append(f"touch={cur_touch:.3f}>={self._repeat_bet_touch_max}")
+                                    if gap_seconds is None:
+                                        _why.append("no_gap_ts")
+                                    elif gap_seconds < self._repeat_bet_gap_min:
+                                        _why.append(f"gap={gap_seconds:.0f}s<{self._repeat_bet_gap_min:.0f}s")
                                     print(
                                         f"[recovery] signal-only {market.symbol} {market.interval_minutes}m"
                                         f" {side.upper()} [{cfg.name}] — повторный цикл без нового ордера"
+                                        f" | why={','.join(_why) or 'unknown'}"
                                     )
                                 signal_only_data = dict(
                                     market_id=market.market_id,
@@ -499,7 +514,17 @@ class RecoveryEngine:
         )
         if self.strategy.get("real_enabled", False) and market.symbol in self._disabled_symbols:
             print(f"[recovery] skip real {market.symbol} {market.interval_minutes}m {side_upper}: symbol disabled by drawdown")
-        effective_top_price = self._repeat_bet_top_price if is_repeat else cfg.top_price
+        if is_repeat:
+            secs_left = (market.expiry - datetime.now(timezone.utc)).total_seconds()
+            if (
+                self._repeat_bet_top_price_final is not None
+                and secs_left <= self._repeat_bet_top_price_final_window
+            ):
+                effective_top_price = self._repeat_bet_top_price_final
+            else:
+                effective_top_price = self._repeat_bet_top_price
+        else:
+            effective_top_price = cfg.top_price
 
         if real_allowed and not self.db.has_market_record(market.market_id, cfg.name, "real", side=side):
             if self.pm_trader is None:

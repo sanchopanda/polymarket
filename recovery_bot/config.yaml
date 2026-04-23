@@ -41,7 +41,7 @@ strategy:
   real_hold_test_by_symbol: {}       # XRP: точечная fake_drop @2s min=0.66 (заменил hold_test — он резал выигрышные)
   min_seconds_to_expiry_by_symbol:  # per-symbol минимум времени до экспирации (ETH: rem<120s WR=47% $-4.29)
     ETH: 120
-    BTC: 30   # 2026-04-20: бот зашёл NO за 5с до экспирации на позднем флаше — ставим нижний порог
+    BTC: 20   # 2026-04-20: бот зашёл NO за 5с до экспирации на позднем флаше — ставим нижний порог
   skip_seconds_to_expiry_zones_by_symbol: {}  # [lo, hi) зоны со слабым WR — пока не активно, мало данных
   # ran_away фильтр убран 2026-04-19: симуляция показала что лимит 0.68 сам отсеивает
   # «улетевшие» сделки (ордер просто висит и либо дождётся возврата, либо отменится
@@ -53,9 +53,11 @@ strategy:
 
   repeat_bet:
     enabled: true
-    touch_max: 0.38        # touch_price < этого порога
-    gap_min_seconds: 30    # минимальный gap между оригинальным и повторным armed
+    touch_max: 0.39        # touch_price < этого порога (bottom_price=0.38 включительно)
+    gap_min_seconds: 10    # минимальный gap между оригинальным и повторным armed
     top_price: 0.70        # лимит repeat-ставки (выше чем основной 0.68, без delay-проверки)
+    top_price_final: 0.80          # лимит для последних top_price_final_window секунд рынка
+    top_price_final_window: 20     # если до экспирации ≤ N секунд — используем top_price_final
 
   real_stats_exclude:
     - "real_v2"
