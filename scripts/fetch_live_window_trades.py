@@ -176,8 +176,8 @@ def main():
                 errors += 1
             elif trades:
                 conn.executemany(
-                    "INSERT INTO pm_trades (market_id, ts, outcome, price) VALUES (?,?,?,?)",
-                    [(mid, ts, outcome, price) for ts, outcome, price in trades],
+                    "INSERT INTO pm_trades (market_id, ts, outcome, price, size) VALUES (?,?,?,?,?)",
+                    [(mid, ts, outcome, price, size) for ts, outcome, price, size in trades],
                 )
                 saved += 1
             else:

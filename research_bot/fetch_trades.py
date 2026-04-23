@@ -66,15 +66,19 @@ def enrich_condition_ids(conn, http: httpx.Client) -> int:
     return fetched
 
 
-def fetch_market_trades(condition_id: str, market_start_ts: int, market_end_ts: int,
-                        http: httpx.Client) -> list[tuple[int, str, float]]:
+def fetch_market_trades(
+    condition_id: str,
+    market_start_ts: int,
+    market_end_ts: int,
+    http: httpx.Client,
+) -> list[tuple[int, str, float, float | None]]:
     """
     Fetch trades in window [market_start - 120s, market_end + 30s].
-    Returns sorted list of (timestamp, outcome, price).
+    Returns sorted list of (timestamp, outcome, price, size).
     """
     cutoff_lo = market_start_ts - 120
     cutoff_hi = market_end_ts + 30
-    trades: list[tuple[int, str, float]] = []
+    trades: list[tuple[int, str, float, float | None]] = []
     offset = 0
 
     while True:
@@ -106,7 +110,12 @@ def fetch_market_trades(condition_id: str, market_start_ts: int, market_end_ts: 
             if ts is None:
                 continue
             if cutoff_lo <= ts <= cutoff_hi:
-                trades.append((int(ts), t["outcome"], float(t["price"])))
+                raw_size = t.get("size")
+                try:
+                    size = float(raw_size) if raw_size is not None else None
+                except (TypeError, ValueError):
+                    size = None
+                trades.append((int(ts), t["outcome"], float(t["price"]), size))
 
         oldest_ts = min((t["timestamp"] for t in batch if t.get("timestamp")), default=0)
         if oldest_ts < cutoff_lo:
@@ -170,8 +179,8 @@ def main() -> None:
 
             if trades:
                 conn.executemany(
-                    "INSERT INTO pm_trades (market_id, ts, outcome, price) VALUES (?,?,?,?)",
-                    [(mid, ts, outcome, price) for ts, outcome, price in trades],
+                    "INSERT INTO pm_trades (market_id, ts, outcome, price, size) VALUES (?,?,?,?,?)",
+                    [(mid, ts, outcome, price, size) for ts, outcome, price, size in trades],
                 )
                 conn.commit()
 

@@ -44,6 +44,7 @@ class RecoveryEngine:
         self._real_stats_exclude: set[str] = set(self.strategy.get("real_stats_exclude") or [])
         self._real_disabled_intervals: set[int] = {int(i) for i in self.strategy.get("real_disabled_intervals") or []}
         self._latest_prices: dict[tuple[str, str], float] = {}
+        self._latest_trade_prices: dict[tuple[str, str], float] = {}
         self._price_log_ts: dict[tuple[str, str], float] = {}
         self._meta_fetched: set[str] = set()
         self._depth_fetched: set[tuple[str, str]] = set()
@@ -148,6 +149,9 @@ class RecoveryEngine:
         self._repeat_bet_top_price: float = float(_rb.get("top_price", 0.70))
         self._repeat_bet_top_price_final: float | None = float(_rb["top_price_final"]) if "top_price_final" in _rb else None
         self._repeat_bet_top_price_final_window: float = float(_rb.get("top_price_final_window", 20))
+        self._signal_source: str = str(self.strategy.get("signal_source", "best_ask")).strip().lower()
+        if self._signal_source not in {"best_ask", "trade"}:
+            raise ValueError(f"unsupported strategy.signal_source={self._signal_source!r}")
 
     def _load_disabled_symbols(self) -> set[str]:
         try:
@@ -220,32 +224,29 @@ class RecoveryEngine:
         state.touch_price = None
         state.armed_ts = None
         state.orders_placed = False
+        state.last_price_above_entry = False
         state.done = False
         state.note = None
 
-    def on_pm_price(self, market: OracleMarket, side: str, best_ask: float) -> None:
+    def _latest_signal_price(self, market_id: str, side: str) -> float | None:
+        if self._signal_source == "trade":
+            return self._latest_trade_prices.get((market_id, side))
+        return self._latest_prices.get((market_id, side))
+
+    def _process_signal_tick(
+        self,
+        market: OracleMarket,
+        side: str,
+        signal_price: float,
+        ts: datetime,
+        source_kind: str,
+    ) -> None:
         if market.venue != "polymarket" or side not in ("yes", "no"):
             return
-        self._latest_prices[(market.market_id, side)] = float(best_ask)
-        now_mono = time.monotonic()
-        now = datetime.utcnow()
-        seconds_left = (market.expiry - now).total_seconds()
-        log_key = (market.market_id, side)
-        if seconds_left <= 300 and now_mono - self._price_log_ts.get(log_key, 0.0) >= 1.0:
-            self._price_log_ts[log_key] = now_mono
-            try:
-                self.db.insert_price_history(
-                    market_id=market.market_id,
-                    symbol=market.symbol,
-                    side=side,
-                    ts=datetime.utcnow(),
-                    price=float(best_ask),
-                )
-            except Exception as exc:
-                print(f"[recovery] price_history insert failed ({market.symbol} {side}): {exc}")
         cfgs = self._configs_by_interval.get(market.interval_minutes)
         if not cfgs:
             return
+        seconds_left = (market.expiry - ts).total_seconds()
         for cfg in cfgs:
             if cfg.max_seconds_to_expiry is None:
                 min_seconds = 90 if market.interval_minutes == 5 else 120
@@ -273,54 +274,47 @@ class RecoveryEngine:
                         side=side,
                     )
                     self._states[state_key] = state
-                # 1. Ждём касания дна (touch ловится только пока нет done и нет touch)
-                if not state.done and state.touch_ts is None and best_ask <= cfg.bottom_price:
-                    state.touch_ts = now
-                    state.touch_price = best_ask
+                if not state.done and state.touch_ts is None and signal_price <= cfg.bottom_price:
+                    state.touch_ts = ts
+                    state.touch_price = signal_price
                     print(
                         f"[recovery] touch {market.symbol} {market.interval_minutes}m {side.upper()}"
-                        f" | ask={best_ask:.3f} <= {cfg.bottom_price:.2f}"
+                        f" | {source_kind}={signal_price:.3f} <= {cfg.bottom_price:.2f}"
                         f" [{cfg.name}] | {int(seconds_left)}s left"
                     )
                 if state.touch_ts is None:
                     continue
-                # Signal detection — upward crossing entry_price после touch.
-                # Работает ВСЕГДА (armed/done неважно), чтобы ловить все сигналы включая
-                # повторные и реверс на противоположной стороне для аналитики.
-                # После каждого сигнала цикл touch->signal сбрасывается: следующий сигнал
-                # должен иметь собственный новый touch.
-                now_above = best_ask >= cfg.entry_price
-                if now_above and not state.last_ask_above_entry:
-                    signal_to_log = (now, float(best_ask))
+                now_above = signal_price >= cfg.entry_price
+                if now_above and not state.last_price_above_entry:
+                    signal_to_log = (ts, float(signal_price))
                     reset_after_signal = True
-                state.last_ask_above_entry = now_above
+                state.last_price_above_entry = now_above
                 if state.done:
                     if reset_after_signal:
                         self._reset_signal_cycle(state)
                     continue
-                # 2. Ждём восстановления в зону [entry_price, top_price] после задержки
                 if state.armed_ts is None:
-                    elapsed = (now - state.touch_ts).total_seconds()
+                    elapsed = (ts - state.touch_ts).total_seconds()
                     if elapsed < cfg.activation_delay_seconds:
                         if reset_after_signal:
                             self._reset_signal_cycle(state)
                         continue
-                    if best_ask > cfg.top_price:
-                        if best_ask >= 0.9:
+                    if signal_price > cfg.top_price:
+                        if signal_price >= 0.9:
                             state.note = "resolved_spike"
                             print(
                                 f"[recovery] resolved {market.symbol} {market.interval_minutes}m {side.upper()}"
-                                f" | ask={best_ask:.3f} (resolution spike)"
+                                f" | {source_kind}={signal_price:.3f} (resolution spike)"
                             )
                         else:
                             state.note = "overshot_top_price"
                             print(
                                 f"[recovery] overshot {market.symbol} {market.interval_minutes}m {side.upper()}"
-                                f" [{cfg.name}] | ask={best_ask:.3f} > {cfg.top_price:.2f}"
+                                f" [{cfg.name}] | {source_kind}={signal_price:.3f} > {cfg.top_price:.2f}"
                             )
                         self._reset_signal_cycle(state)
                         continue
-                    if best_ask >= cfg.entry_price:
+                    if signal_price >= cfg.entry_price:
                         time_blocks_order = False
                         time_zone_skip_note: str | None = None
                         if cfg.max_seconds_to_expiry is not None and seconds_left > cfg.max_seconds_to_expiry:
@@ -352,8 +346,8 @@ class RecoveryEngine:
                                         mode="real",
                                         strategy_name=cfg.name,
                                         touch_ts=state.touch_ts,
-                                        armed_ts=now,
-                                        touch_price=float(state.touch_price or best_ask),
+                                        armed_ts=ts,
+                                        touch_price=float(state.touch_price or signal_price),
                                         trigger_price=cfg.entry_price,
                                         entry_price=cfg.top_price,
                                         requested_shares=self._compute_order_size(
@@ -362,16 +356,16 @@ class RecoveryEngine:
                                         note=time_zone_skip_note,
                                     )
                         if not time_blocks_order:
-                            state.armed_ts = now
+                            state.armed_ts = ts
                             print(
                                 f"[recovery] armed {market.symbol} {market.interval_minutes}m {side.upper()}"
-                                f" [{cfg.name}] | ask={best_ask:.3f} (trigger>={cfg.entry_price:.2f})"
+                                f" [{cfg.name}] | {source_kind}={signal_price:.3f} (trigger>={cfg.entry_price:.2f})"
                             )
                             if market_key in self._placed_markets:
                                 repeat_key = (market.market_id, cfg.name, side)
                                 orig_armed_ts = self._placed_markets_ts.get(market_key)
-                                gap_seconds = (now - orig_armed_ts).total_seconds() if orig_armed_ts else None
-                                cur_touch = float(state.touch_price or best_ask)
+                                gap_seconds = (ts - orig_armed_ts).total_seconds() if orig_armed_ts else None
+                                cur_touch = float(state.touch_price or signal_price)
                                 repeat_allowed = (
                                     self._repeat_bet_enabled
                                     and repeat_key not in self._repeat_placed
@@ -392,21 +386,21 @@ class RecoveryEngine:
                                         f" | touch={cur_touch:.3f} gap={gap_seconds:.0f}s"
                                     )
                                 else:
-                                    _why = []
+                                    why = []
                                     if not self._repeat_bet_enabled:
-                                        _why.append("disabled")
+                                        why.append("disabled")
                                     if repeat_key in self._repeat_placed:
-                                        _why.append("already_placed")
+                                        why.append("already_placed")
                                     if cur_touch >= self._repeat_bet_touch_max:
-                                        _why.append(f"touch={cur_touch:.3f}>={self._repeat_bet_touch_max}")
+                                        why.append(f"touch={cur_touch:.3f}>={self._repeat_bet_touch_max}")
                                     if gap_seconds is None:
-                                        _why.append("no_gap_ts")
+                                        why.append("no_gap_ts")
                                     elif gap_seconds < self._repeat_bet_gap_min:
-                                        _why.append(f"gap={gap_seconds:.0f}s<{self._repeat_bet_gap_min:.0f}s")
+                                        why.append(f"gap={gap_seconds:.0f}s<{self._repeat_bet_gap_min:.0f}s")
                                     print(
                                         f"[recovery] signal-only {market.symbol} {market.interval_minutes}m"
                                         f" {side.upper()} [{cfg.name}] — повторный цикл без нового ордера"
-                                        f" | why={','.join(_why) or 'unknown'}"
+                                        f" | why={','.join(why) or 'unknown'}"
                                     )
                                 signal_only_data = dict(
                                     market_id=market.market_id,
@@ -420,7 +414,7 @@ class RecoveryEngine:
                                     strategy_name=cfg.name,
                                     touch_ts=state.touch_ts,
                                     armed_ts=state.armed_ts,
-                                    touch_price=cur_touch,
+                                    touch_price=float(state.touch_price or signal_price),
                                     trigger_price=cfg.entry_price,
                                     entry_price=cfg.top_price,
                                     requested_shares=self._compute_order_size(
@@ -430,11 +424,11 @@ class RecoveryEngine:
                             elif not state.orders_placed:
                                 state.orders_placed = True
                                 self._placed_markets.add(market_key)
-                                self._placed_markets_ts[market_key] = now
+                                self._placed_markets_ts[market_key] = ts
                                 should_place = True
                                 touch_ts = state.touch_ts
                                 armed_ts = state.armed_ts
-                                touch_price = float(state.touch_price or best_ask)
+                                touch_price = float(state.touch_price or signal_price)
                 if reset_after_signal:
                     self._reset_signal_cycle(state)
             if signal_to_log is not None:
@@ -456,8 +450,8 @@ class RecoveryEngine:
                         status="signal_only",
                         pm_token_id=market.no_token_id if side == "no" else market.yes_token_id,
                     )
-                except Exception as e:
-                    print(f"[recovery] signal_only insert failed ({market.symbol} {side}): {e}")
+                except Exception as exc:
+                    print(f"[recovery] signal_only insert failed ({market.symbol} {side}): {exc}")
             if time_zone_skip_data is not None:
                 try:
                     self.db.open_position(
@@ -472,24 +466,60 @@ class RecoveryEngine:
                         f"[recovery] time_zone skip {market.symbol} {market.interval_minutes}m {side.upper()}"
                         f" [{cfg.name}] | {time_zone_skip_data['note']}"
                     )
-                except Exception as e:
-                    print(f"[recovery] time_zone_skip insert failed ({market.symbol} {side}): {e}")
+                except Exception as exc:
+                    print(f"[recovery] time_zone_skip insert failed ({market.symbol} {side}): {exc}")
             if not should_place:
                 continue
             thread = threading.Thread(
                 target=self._place_orders,
-                args=(market, cfg, touch_ts, armed_ts, touch_price, best_ask, side, is_repeat_place),
+                args=(market, cfg, touch_ts, armed_ts, touch_price, signal_price, side, is_repeat_place),
                 daemon=True,
                 name=f"recovery-open-{market.symbol}-{market.interval_minutes}-{cfg.name}-{side}",
             )
             thread.start()
 
-    def on_pm_trade(self, market: OracleMarket, side: str, trade_price: float) -> None:
+    def on_pm_price(self, market: OracleMarket, side: str, best_ask: float) -> None:
+        if market.venue != "polymarket" or side not in ("yes", "no"):
+            return
+        self._latest_prices[(market.market_id, side)] = float(best_ask)
+        now_mono = time.monotonic()
+        now = datetime.utcnow()
+        seconds_left = (market.expiry - now).total_seconds()
+        log_key = (market.market_id, side)
+        if seconds_left <= 300 and now_mono - self._price_log_ts.get(log_key, 0.0) >= 1.0:
+            self._price_log_ts[log_key] = now_mono
+            try:
+                self.db.insert_price_history(
+                    market_id=market.market_id,
+                    symbol=market.symbol,
+                    side=side,
+                    ts=datetime.utcnow(),
+                    price=float(best_ask),
+                )
+            except Exception as exc:
+                print(f"[recovery] price_history insert failed ({market.symbol} {side}): {exc}")
+        if self._signal_source == "best_ask":
+            self._process_signal_tick(
+                market=market,
+                side=side,
+                signal_price=float(best_ask),
+                ts=now,
+                source_kind="ask",
+            )
+
+    def on_pm_trade(
+        self,
+        market: OracleMarket,
+        side: str,
+        trade_price: float,
+        trade_size: float | None = None,
+    ) -> None:
         if market.venue != "polymarket" or side not in ("yes", "no"):
             return
         if trade_price <= 0:
             return
         now = datetime.utcnow()
+        self._latest_trade_prices[(market.market_id, side)] = float(trade_price)
         seconds_left = (market.expiry - now).total_seconds()
         if seconds_left > 300:
             return
@@ -500,9 +530,18 @@ class RecoveryEngine:
                 side=side,
                 ts=now,
                 price=float(trade_price),
+                size=trade_size,
             )
         except Exception as exc:
             print(f"[recovery] trade_history insert failed ({market.symbol} {side}): {exc}")
+        if self._signal_source == "trade":
+            self._process_signal_tick(
+                market=market,
+                side=side,
+                signal_price=float(trade_price),
+                ts=now,
+                source_kind="trade",
+            )
 
     def _place_orders(
         self,
@@ -591,39 +630,41 @@ class RecoveryEngine:
                     step = min(interval_ms, window_ms - elapsed)
                     time.sleep(step / 1000.0)
                     elapsed += step
-                    px = self._latest_prices.get((market.market_id, side))
+                    px = self._latest_signal_price(market.market_id, side)
                     if px is not None:
                         samples.append(float(px))
-                current_ask = samples[-1] if samples else None
-                min_ask = min(samples) if samples else None
-                ask_text = "none" if current_ask is None else f"{current_ask:.3f}"
-                min_text = "none" if min_ask is None else f"{min_ask:.3f}"
-                if min_ask is None or min_ask < hold_min:
+                current_signal = samples[-1] if samples else None
+                min_signal = min(samples) if samples else None
+                signal_label = "trade" if self._signal_source == "trade" else "ask"
+                signal_text = "none" if current_signal is None else f"{current_signal:.3f}"
+                min_text = "none" if min_signal is None else f"{min_signal:.3f}"
+                if min_signal is None or min_signal < hold_min:
                     skip_reason = "hold_test_fail"
                     print(
                         f"[recovery] HOLD TEST FAIL skip real {market.symbol} {market.interval_minutes}m"
-                        f" {side_upper} [{cfg.name}] | min_ask over {window_ms:.0f}ms ="
-                        f" {min_text} < {hold_min:.2f} (last={ask_text}, n={len(samples)})"
+                        f" {side_upper} [{cfg.name}] | min_{signal_label} over {window_ms:.0f}ms ="
+                        f" {min_text} < {hold_min:.2f} (last={signal_text}, n={len(samples)})"
                     )
                 if skip_reason is not None:
                     note = (
-                        f"reason={skip_reason} min_ask_{window_ms:.0f}ms={min_text}"
-                        f" last={ask_text} hold_min={hold_min:.2f}"
+                        f"reason={skip_reason} min_{signal_label}_{window_ms:.0f}ms={min_text}"
+                        f" last={signal_text} hold_min={hold_min:.2f}"
                     )
             elif confirm_delay > 0.0 and confirm_min is not None:
                 time.sleep(confirm_delay)
-                current_ask = self._latest_prices.get((market.market_id, side))
-                ask_text = "none" if current_ask is None else f"{current_ask:.3f}"
-                if current_ask is None or current_ask < float(confirm_min):
+                current_signal = self._latest_signal_price(market.market_id, side)
+                signal_label = "trade" if self._signal_source == "trade" else "ask"
+                signal_text = "none" if current_signal is None else f"{current_signal:.3f}"
+                if current_signal is None or current_signal < float(confirm_min):
                     skip_reason = "fake_drop"
                     print(
                         f"[recovery] FAKE SIGNAL skip real {market.symbol} {market.interval_minutes}m"
-                        f" {side_upper} [{cfg.name}] | ask after {confirm_delay:.1f}s ="
-                        f" {ask_text} < {float(confirm_min):.2f}"
+                        f" {side_upper} [{cfg.name}] | {signal_label} after {confirm_delay:.1f}s ="
+                        f" {signal_text} < {float(confirm_min):.2f}"
                     )
                 if skip_reason is not None:
                     note = (
-                        f"reason={skip_reason} ask_after_{confirm_delay:.1f}s={ask_text}"
+                        f"reason={skip_reason} {signal_label}_after_{confirm_delay:.1f}s={signal_text}"
                         f" min={float(confirm_min):.2f}"
                     )
 

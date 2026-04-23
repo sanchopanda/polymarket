@@ -277,7 +277,7 @@ def step_trades(conn, http: httpx.Client, market_ids: list[str], force: bool) ->
 
             if trades:
                 batch_rows.extend(
-                    (mid, ts, outcome, price) for ts, outcome, price in trades
+                    (mid, ts, outcome, price, size) for ts, outcome, price, size in trades
                 )
             saved += 1
 
@@ -288,7 +288,7 @@ def step_trades(conn, http: httpx.Client, market_ids: list[str], force: bool) ->
                     for m in mids_batch:
                         conn.execute("DELETE FROM pm_trades WHERE market_id = ?", (m,))
                 conn.executemany(
-                    "INSERT INTO pm_trades (market_id, ts, outcome, price) VALUES (?,?,?,?)",
+                    "INSERT INTO pm_trades (market_id, ts, outcome, price, size) VALUES (?,?,?,?,?)",
                     batch_rows,
                 )
                 conn.commit()
@@ -309,7 +309,7 @@ def step_trades(conn, http: httpx.Client, market_ids: list[str], force: bool) ->
             for m in mids_batch:
                 conn.execute("DELETE FROM pm_trades WHERE market_id = ?", (m,))
         conn.executemany(
-            "INSERT INTO pm_trades (market_id, ts, outcome, price) VALUES (?,?,?,?)",
+            "INSERT INTO pm_trades (market_id, ts, outcome, price, size) VALUES (?,?,?,?,?)",
             batch_rows,
         )
         conn.commit()

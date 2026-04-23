@@ -103,12 +103,14 @@ def migrate_trades(conn):
                 batch = []
                 for r in reader:
                     try:
-                        batch.append((market_id, int(r["timestamp"]), r["outcome"], float(r["price"])))
+                        raw_size = r.get("size")
+                        size = float(raw_size) if raw_size not in (None, "") else None
+                        batch.append((market_id, int(r["timestamp"]), r["outcome"], float(r["price"]), size))
                     except (ValueError, KeyError):
                         continue
                 if batch:
                     conn.executemany(
-                        "INSERT INTO pm_trades (market_id, ts, outcome, price) VALUES (?,?,?,?)",
+                        "INSERT INTO pm_trades (market_id, ts, outcome, price, size) VALUES (?,?,?,?,?)",
                         batch,
                     )
                     total += len(batch)

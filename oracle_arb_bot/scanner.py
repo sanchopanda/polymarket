@@ -307,6 +307,7 @@ class OracleScanner:
         elif event_type == "last_trade_price":
             if self._pm_trade_callback is not None:
                 trade_price = None
+                trade_size = None
                 for key in ("price", "last_trade_price"):
                     raw = item.get(key)
                     if raw is None:
@@ -316,8 +317,14 @@ class OracleScanner:
                         break
                     except (TypeError, ValueError):
                         continue
+                raw_size = item.get("size")
+                if raw_size is not None:
+                    try:
+                        trade_size = float(raw_size)
+                    except (TypeError, ValueError):
+                        trade_size = None
                 if trade_price is not None and trade_price > 0:
-                    self._pm_trade_callback(market, side, trade_price)
+                    self._pm_trade_callback(market, side, trade_price, trade_size)
             return  # цена последней сделки — не цена спроса, signal-логика живёт на best_ask
         else:
             # Неизвестный тип — берём только если есть явный best_ask, не price

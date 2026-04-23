@@ -40,7 +40,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             market_id TEXT    NOT NULL,
             ts        INTEGER NOT NULL,
             outcome   TEXT    NOT NULL,
-            price     REAL    NOT NULL
+            price     REAL    NOT NULL,
+            size      REAL
         );
         CREATE INDEX IF NOT EXISTS idx_pm_trades_market
             ON pm_trades(market_id, ts);
@@ -62,6 +63,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             winning_side     TEXT
         );
     """)
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(pm_trades)").fetchall()}
+    if "size" not in cols:
+        conn.execute("ALTER TABLE pm_trades ADD COLUMN size REAL")
 
 
 class BacktestDB:
@@ -103,9 +107,16 @@ class BacktestDB:
 
     # ── PM trades ─────────────────────────────────────────────────────
 
-    def write_trade(self, market_id: str, ts: int, outcome: str, price: float) -> None:
+    def write_trade(
+        self,
+        market_id: str,
+        ts: int,
+        outcome: str,
+        price: float,
+        size: float | None = None,
+    ) -> None:
         with self._lock:
-            self._batch_trades.append((market_id, ts, outcome, price))
+            self._batch_trades.append((market_id, ts, outcome, price, size))
             if len(self._batch_trades) >= 50:
                 self._flush_trades()
 
@@ -113,7 +124,7 @@ class BacktestDB:
         if not self._batch_trades:
             return
         self._conn.executemany(
-            "INSERT INTO pm_trades (market_id, ts, outcome, price) VALUES (?,?,?,?)",
+            "INSERT INTO pm_trades (market_id, ts, outcome, price, size) VALUES (?,?,?,?,?)",
             self._batch_trades,
         )
         self._conn.commit()

@@ -64,6 +64,6 @@ class TrackedRecovery:
     touch_price: Optional[float] = None
     armed_ts: Optional[datetime] = None
     orders_placed: bool = False
-    last_ask_above_entry: bool = False
+    last_price_above_entry: bool = False
     done: bool = False
     note: Optional[str] = None

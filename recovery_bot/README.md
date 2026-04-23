@@ -31,6 +31,15 @@ python3 -m recovery_bot resolve   # добить истёкшие в фоне
 - `five_minute.{bottom=0.38, entry=0.65, top=0.68}`
 - `fifteen_minute.{bottom=0.38, entry=0.65, top=0.68, activation_delay=30s}`
 - `real_disabled_intervals: [15]` — 15m отключён в real (убыточен при этом entry/top)
+- `signal_source: "trade"` — источник сигнала для `touch/armed/confirm`:
+  - `best_ask` — старая логика
+  - `trade` — полностью trade-based signal pipeline
+- `repeat_bet.enabled: false` — repeat/opposite repeat-беты в рабочем режиме отключены; бот ставит только first-signal
+
+Важно:
+
+- `signal_source` переключает именно signal-логику (`touch`, `overshoot`, `armed`, `confirm`)
+- исполнение ордера и контроль working-ордера по-прежнему идут через стакан / `best_ask`
 
 ### Фильтр фейк-сигналов (post-armed, pre-order)
 
@@ -110,6 +119,17 @@ min_liquidity: 0
 - если хотим приблизить live к backtest, сначала собираем `market_trade_history`,
   а уже потом сравниваем signal-level статистику `best_ask vs trades`
 
+Что теперь сохраняется:
+
+- в `market_trade_history` для новых live prints пишутся `price` и `size`
+- в `backtest.db.pm_trades` `size` сохраняется для новых догрузок historical trades
+
+Отдельный backfill historical `size` по уже существующим рынкам:
+
+```bash
+PYTHONPATH=. venv/bin/python scripts/backfill_pm_trade_sizes.py --symbol BTC --interval 5 --only-missing-size
+```
+
 ## Телеграм-статус
 
 Рендерит engine.get_status_text:
@@ -170,3 +190,44 @@ min_liquidity: 0
    - оставить signal только по `best_ask`
    - перейти на signal по `last_trade_price`
    - сделать гибрид: `touch` по `best_ask`, а `signal` подтверждать trade-print'ом
+
+## Повторяемый анализ live vs backtest
+
+Для регулярного сравнения:
+
+- `real live WR`
+- `live trade-based WR`
+- `backtest trade-based WR`
+
+на одном и том же наборе `BTC 5m` рынков добавлен отдельный скрипт:
+
+```bash
+venv/bin/python scripts/recovery_live_vs_backtest_analysis.py
+```
+
+Что он делает:
+
+1. Находит в `data/recovery_bot.db` рынки с полной `market_trade_history`
+2. При необходимости догружает недостающие рынки и `pm_trades` в `data/backtest.db`
+3. Считает на одной и той же выборке рынков:
+- `live trade-based WR`
+- `backtest trade-based WR`
+- `real live WR`
+4. Печатает breakdown:
+- `same_signal`
+- `different_side`
+- `live_only`
+- `backtest_only`
+
+Сейчас скрипт считает по всем `BTC 5m` рынкам, где вообще есть `market_trade_history`, без strict-отсечения по "полностью записанному" рынку.
+
+Полное описание pipeline и критериев eligible-рынка:
+
+- [docs/recovery-live-vs-backtest-repeatable-analysis.md](/Users/sasha/Documents/code/polymarket/docs/recovery-live-vs-backtest-repeatable-analysis.md)
+
+Полезные флаги:
+
+```bash
+venv/bin/python scripts/recovery_live_vs_backtest_analysis.py --no-sync-backtest
+venv/bin/python scripts/recovery_live_vs_backtest_analysis.py --start-buffer-seconds 60 --end-buffer-seconds 10
+```

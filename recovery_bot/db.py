@@ -139,13 +139,18 @@ class RecoveryDB:
                 symbol TEXT NOT NULL,
                 side TEXT NOT NULL,
                 ts TEXT NOT NULL,
-                price REAL NOT NULL
+                price REAL NOT NULL,
+                size REAL
             )
             """
         )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_mth_market_side_ts "
             "ON market_trade_history(market_id, side, ts)"
+        )
+        self._conn.execute(
+            "ALTER TABLE market_trade_history ADD COLUMN size REAL"
+            if self._column_missing("market_trade_history", "size") else "SELECT 1"
         )
         self._conn.commit()
 
@@ -552,12 +557,13 @@ class RecoveryDB:
         side: str,
         ts: datetime,
         price: float,
+        size: float | None = None,
     ) -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT INTO market_trade_history (market_id, symbol, side, ts, price)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (market_id, symbol, side, _iso(ts), float(price)),
+                "INSERT INTO market_trade_history (market_id, symbol, side, ts, price, size)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (market_id, symbol, side, _iso(ts), float(price), None if size is None else float(size)),
             )
             self._conn.commit()
 
