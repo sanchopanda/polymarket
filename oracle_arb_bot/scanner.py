@@ -50,6 +50,7 @@ class OracleScanner:
         self._pm_subscribed_asset_ids: set[str] = set()
 
         self._pm_price_callback: Optional[Callable] = None
+        self._pm_trade_callback: Optional[Callable] = None
 
         # ── Kalshi ────────────────────────────────────────────────────────
         cfg_kalshi = config.get("kalshi", {})
@@ -84,6 +85,9 @@ class OracleScanner:
 
     def set_pm_price_callback(self, cb: Callable) -> None:
         self._pm_price_callback = cb
+
+    def set_pm_trade_callback(self, cb: Callable) -> None:
+        self._pm_trade_callback = cb
 
     def scan_and_subscribe(self) -> list[OracleMarket]:
         """Fetch markets from REST, evict expired, update WS. Returns newly added markets."""
@@ -271,7 +275,7 @@ class OracleScanner:
         self._dispatch_pm_change(payload)
 
     def _dispatch_pm_change(self, item: dict) -> None:
-        if not self._pm_price_callback:
+        if not self._pm_price_callback and not self._pm_trade_callback:
             return
 
         asset_id = item.get("asset_id") or item.get("token_id") or ""
@@ -301,7 +305,20 @@ class OracleScanner:
                 except (TypeError, ValueError, KeyError):
                     pass
         elif event_type == "last_trade_price":
-            return  # цена последней сделки — не цена спроса, игнорируем
+            if self._pm_trade_callback is not None:
+                trade_price = None
+                for key in ("price", "last_trade_price"):
+                    raw = item.get(key)
+                    if raw is None:
+                        continue
+                    try:
+                        trade_price = float(raw)
+                        break
+                    except (TypeError, ValueError):
+                        continue
+                if trade_price is not None and trade_price > 0:
+                    self._pm_trade_callback(market, side, trade_price)
+            return  # цена последней сделки — не цена спроса, signal-логика живёт на best_ask
         else:
             # Неизвестный тип — берём только если есть явный best_ask, не price
             raw = item.get("best_ask")
@@ -330,7 +347,8 @@ class OracleScanner:
                     self._active_markets[market.market_id].no_ask = best_ask
                 market = self._active_markets[market.market_id]
 
-        self._pm_price_callback(market, side, best_ask)
+        if self._pm_price_callback is not None:
+            self._pm_price_callback(market, side, best_ask)
 
     # ── Kalshi WebSocket ─────────────────────────────────────────────────
 

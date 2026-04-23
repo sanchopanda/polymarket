@@ -124,6 +124,7 @@ class RecoveryEngine:
         )
         self.scanner = OracleScanner(config)
         self.scanner.set_pm_price_callback(self.on_pm_price)
+        self.scanner.set_pm_trade_callback(self.on_pm_trade)
         self.pm_trader = PolymarketTrader() if self.strategy.get("real_enabled", False) else None
         self._clob = ClobClient(base_url=config["polymarket"]["clob_base_url"])
         if self.strategy.get("real_enabled", False):
@@ -482,6 +483,26 @@ class RecoveryEngine:
                 name=f"recovery-open-{market.symbol}-{market.interval_minutes}-{cfg.name}-{side}",
             )
             thread.start()
+
+    def on_pm_trade(self, market: OracleMarket, side: str, trade_price: float) -> None:
+        if market.venue != "polymarket" or side not in ("yes", "no"):
+            return
+        if trade_price <= 0:
+            return
+        now = datetime.utcnow()
+        seconds_left = (market.expiry - now).total_seconds()
+        if seconds_left > 300:
+            return
+        try:
+            self.db.insert_trade_history(
+                market_id=market.market_id,
+                symbol=market.symbol,
+                side=side,
+                ts=now,
+                price=float(trade_price),
+            )
+        except Exception as exc:
+            print(f"[recovery] trade_history insert failed ({market.symbol} {side}): {exc}")
 
     def _place_orders(
         self,

@@ -131,6 +131,22 @@ class RecoveryDB:
             "CREATE INDEX IF NOT EXISTS idx_mph_market_side_ts "
             "ON market_price_history(market_id, side, ts)"
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS market_trade_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                ts TEXT NOT NULL,
+                price REAL NOT NULL
+            )
+            """
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mth_market_side_ts "
+            "ON market_trade_history(market_id, side, ts)"
+        )
         self._conn.commit()
 
     def _column_missing(self, table: str, column: str) -> bool:
@@ -523,6 +539,23 @@ class RecoveryDB:
         with self._lock:
             self._conn.execute(
                 "INSERT INTO market_price_history (market_id, symbol, side, ts, price)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (market_id, symbol, side, _iso(ts), float(price)),
+            )
+            self._conn.commit()
+
+    def insert_trade_history(
+        self,
+        *,
+        market_id: str,
+        symbol: str,
+        side: str,
+        ts: datetime,
+        price: float,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO market_trade_history (market_id, symbol, side, ts, price)"
                 " VALUES (?, ?, ?, ?, ?)",
                 (market_id, symbol, side, _iso(ts), float(price)),
             )
