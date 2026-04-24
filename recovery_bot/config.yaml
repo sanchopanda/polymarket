@@ -50,7 +50,7 @@ strategy:
 
   symbol_drawdown_threshold_usd: 6.0   # default авто-отключение символа при просадке от baseline
   symbol_drawdown_threshold_usd_by_symbol: # per-symbol override (BTC — единственный со скейлом ставки, допускаем более глубокую просадку)
-    BTC: 50.0
+    BTC: 999999
 
   repeat_bet:
     enabled: false

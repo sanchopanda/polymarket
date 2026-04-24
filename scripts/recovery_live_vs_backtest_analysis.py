@@ -4,17 +4,20 @@ from __future__ import annotations
 import argparse
 import sqlite3
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Iterable
 
 import httpx
+import yaml
 
 from research_bot.fetch_markets import _parse_outcomes, _winning_side
 from research_bot.fetch_trades import fetch_market_trades
 
 RECOVERY_DB = "data/recovery_bot.db"
 BACKTEST_DB = "data/backtest.db"
+BOT_CONFIG = "recovery_bot/config.yaml"
 GAMMA_URL = "https://gamma-api.polymarket.com"
 
 
@@ -27,6 +30,41 @@ class StrategyConfig:
     confirm_min: float = 0.60
     min_seconds_to_expiry: float = 20.0
     max_seconds_to_expiry: float = 240.0
+
+
+def load_strategy_config(config_path: str, symbol: str, interval_minutes: int) -> StrategyConfig:
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    strategy = config["strategy"]
+    interval_key = {5: "five_minute", 15: "fifteen_minute"}[interval_minutes]
+    icfg = strategy[interval_key]
+
+    confirm_delay = float(strategy.get("real_confirm_delay_seconds") or 0)
+    delay_by_sym = strategy.get("real_confirm_delay_seconds_by_symbol") or {}
+    if symbol in delay_by_sym:
+        confirm_delay = float(delay_by_sym[symbol])
+
+    confirm_min = float(strategy.get("real_confirm_min_price") or 0)
+    min_by_sym = strategy.get("real_confirm_min_price_by_symbol") or {}
+    if symbol in min_by_sym:
+        confirm_min = float(min_by_sym[symbol])
+
+    min_expiry = 20.0
+    min_expiry_by_sym = strategy.get("min_seconds_to_expiry_by_symbol") or {}
+    if symbol in min_expiry_by_sym:
+        min_expiry = float(min_expiry_by_sym[symbol])
+
+    max_expiry = float(icfg.get("max_seconds_to_expiry", 240))
+
+    return StrategyConfig(
+        bottom=float(icfg["bottom_price"]),
+        entry=float(icfg["entry_price"]),
+        top=float(icfg["top_price"]),
+        confirm_delay=confirm_delay,
+        confirm_min=confirm_min,
+        min_seconds_to_expiry=min_expiry,
+        max_seconds_to_expiry=max_expiry,
+    )
 
 
 @dataclass(frozen=True)
@@ -517,15 +555,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--recovery-db", default=RECOVERY_DB)
     parser.add_argument("--backtest-db", default=BACKTEST_DB)
+    parser.add_argument("--config", default=BOT_CONFIG,
+                        help="path to recovery_bot config.yaml (source of truth for strategy params)")
     parser.add_argument("--symbol", default="BTC")
     parser.add_argument("--interval", type=int, default=5)
-    parser.add_argument("--bottom", type=float, default=0.38)
-    parser.add_argument("--entry", type=float, default=0.65)
-    parser.add_argument("--top", type=float, default=0.68)
-    parser.add_argument("--confirm-delay", type=float, default=0.2)
-    parser.add_argument("--confirm-min", type=float, default=0.60)
-    parser.add_argument("--min-seconds-to-expiry", type=float, default=20.0)
-    parser.add_argument("--max-seconds-to-expiry", type=float, default=240.0)
+    parser.add_argument("--bottom", type=float, default=None)
+    parser.add_argument("--entry", type=float, default=None)
+    parser.add_argument("--top", type=float, default=None)
+    parser.add_argument("--confirm-delay", type=float, default=None)
+    parser.add_argument("--confirm-min", type=float, default=None)
+    parser.add_argument("--min-seconds-to-expiry", type=float, default=None)
+    parser.add_argument("--max-seconds-to-expiry", type=float, default=None)
     parser.add_argument("--no-sync-backtest", action="store_true")
     parser.add_argument("--hours", type=float, default=None,
                         help="ограничить окно последними N часами")
@@ -534,15 +574,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    cfg = StrategyConfig(
-        bottom=args.bottom,
-        entry=args.entry,
-        top=args.top,
-        confirm_delay=args.confirm_delay,
-        confirm_min=args.confirm_min,
-        min_seconds_to_expiry=args.min_seconds_to_expiry,
-        max_seconds_to_expiry=args.max_seconds_to_expiry,
-    )
+    cfg = load_strategy_config(args.config, args.symbol, args.interval)
+    overrides = {}
+    if args.bottom is not None:
+        overrides["bottom"] = args.bottom
+    if args.entry is not None:
+        overrides["entry"] = args.entry
+    if args.top is not None:
+        overrides["top"] = args.top
+    if args.confirm_delay is not None:
+        overrides["confirm_delay"] = args.confirm_delay
+    if args.confirm_min is not None:
+        overrides["confirm_min"] = args.confirm_min
+    if args.min_seconds_to_expiry is not None:
+        overrides["min_seconds_to_expiry"] = args.min_seconds_to_expiry
+    if args.max_seconds_to_expiry is not None:
+        overrides["max_seconds_to_expiry"] = args.max_seconds_to_expiry
+    if overrides:
+        cfg = replace(cfg, **overrides)
 
     recovery = sqlite3.connect(args.recovery_db)
     recovery.row_factory = sqlite3.Row

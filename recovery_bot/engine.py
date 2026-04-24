@@ -587,16 +587,44 @@ class RecoveryEngine:
         else:
             effective_top_price = cfg.top_price
 
+        def _skip_record(reason: str, req_shares: float = 0.0) -> None:
+            self.db.open_position(
+                market_id=market.market_id,
+                symbol=market.symbol,
+                title=market.title,
+                interval_minutes=market.interval_minutes,
+                market_start=market.market_start,
+                market_end=market.expiry,
+                side=side,
+                mode="real",
+                strategy_name=cfg.name,
+                touch_ts=touch_ts,
+                armed_ts=armed_ts,
+                touch_price=touch_price,
+                trigger_price=trigger_price,
+                entry_price=effective_top_price,
+                requested_shares=req_shares,
+                filled_shares=0.0,
+                total_cost=0.0,
+                fee=0.0,
+                status="skipped_filter",
+                pm_token_id=token_id,
+                note=reason,
+            )
+
         if real_allowed and not self.db.has_market_record(market.market_id, cfg.name, "real", side=side):
             if self.pm_trader is None:
+                _skip_record("reason=no_trader")
                 _release()
                 return
             if not token_id:
                 print(f"[recovery] skip real {market.symbol} {market.interval_minutes}m {side_upper}: token_id missing")
+                _skip_record("reason=no_token_id")
                 _release()
                 return
             requested_shares = self._compute_order_size(self._scaled_stake_usd(market.symbol), effective_top_price)
             if requested_shares <= 0:
+                _skip_record("reason=zero_shares")
                 _release()
                 return
             reserved_cost = requested_shares * cfg.entry_price
@@ -604,6 +632,10 @@ class RecoveryEngine:
                 print(
                     f"[recovery] skip real {market.symbol} {market.interval_minutes}m {side_upper}:"
                     f" reserve=${reserved_cost:.2f} > virtual=${self.real_balance():.2f}"
+                )
+                _skip_record(
+                    f"reason=reserve_insufficient reserve=${reserved_cost:.2f} balance=${self.real_balance():.2f}",
+                    req_shares=requested_shares,
                 )
                 _release()
                 return
