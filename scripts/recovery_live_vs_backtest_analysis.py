@@ -123,22 +123,41 @@ def iter_live_markets(
     backtest: sqlite3.Connection,
     symbol: str,
     interval_minutes: int,
+    since_ts: int | None = None,
 ) -> list[AnalysisMarket]:
-    rows = recovery.execute(
-        """
-        SELECT
-            market_id,
-            symbol,
-            MIN(unixepoch(ts)) AS min_ts,
-            MAX(unixepoch(ts)) AS max_ts,
-            COUNT(*) AS trade_count
-        FROM market_trade_history
-        WHERE symbol = ?
-        GROUP BY market_id, symbol
-        ORDER BY min_ts
-        """,
-        (symbol,),
-    ).fetchall()
+    if since_ts is not None:
+        since_str = datetime.utcfromtimestamp(since_ts).strftime("%Y-%m-%d %H:%M:%S")
+        rows = recovery.execute(
+            """
+            SELECT
+                market_id,
+                symbol,
+                MIN(CAST(strftime('%s', ts) AS INTEGER)) AS min_ts,
+                MAX(CAST(strftime('%s', ts) AS INTEGER)) AS max_ts,
+                COUNT(*) AS trade_count
+            FROM market_trade_history
+            WHERE symbol = ? AND ts >= ?
+            GROUP BY market_id, symbol
+            ORDER BY min_ts
+            """,
+            (symbol, since_str),
+        ).fetchall()
+    else:
+        rows = recovery.execute(
+            """
+            SELECT
+                market_id,
+                symbol,
+                MIN(CAST(strftime('%s', ts) AS INTEGER)) AS min_ts,
+                MAX(CAST(strftime('%s', ts) AS INTEGER)) AS max_ts,
+                COUNT(*) AS trade_count
+            FROM market_trade_history
+            WHERE symbol = ?
+            GROUP BY market_id, symbol
+            ORDER BY min_ts
+            """,
+            (symbol,),
+        ).fetchall()
     market_ids = [str(row["market_id"]) for row in rows]
     bounds = load_market_bounds(recovery, backtest, market_ids, symbol, interval_minutes)
 
@@ -154,6 +173,8 @@ def iter_live_markets(
             market_end_ts = market_start_ts + bucket_seconds
         else:
             market_start_ts, market_end_ts = bound
+        if since_ts is not None and market_end_ts < since_ts:
+            continue
         eligible.append(
             AnalysisMarket(
                 market_id=market_id,
@@ -346,7 +367,7 @@ def load_live_trade_signal(
     for side in ("yes", "no"):
         rows = recovery.execute(
             """
-            SELECT unixepoch(ts) AS ts, price
+            SELECT CAST(strftime('%s', ts) AS INTEGER) AS ts, price
             FROM market_trade_history
             WHERE market_id=? AND side=?
             ORDER BY ts
@@ -506,6 +527,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-seconds-to-expiry", type=float, default=20.0)
     parser.add_argument("--max-seconds-to-expiry", type=float, default=240.0)
     parser.add_argument("--no-sync-backtest", action="store_true")
+    parser.add_argument("--hours", type=float, default=None,
+                        help="ограничить окно последними N часами")
     return parser
 
 
@@ -527,11 +550,13 @@ def main() -> None:
     backtest.row_factory = sqlite3.Row
 
     try:
+        since_ts = int(datetime.utcnow().timestamp() - args.hours * 3600) if args.hours else None
         eligible = iter_live_markets(
             recovery,
             backtest,
             symbol=args.symbol,
             interval_minutes=args.interval,
+            since_ts=since_ts,
         )
         sync_stats = ensure_backtest_markets(
             backtest,

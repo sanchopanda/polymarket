@@ -160,8 +160,12 @@ def main() -> None:
             mid = row[0]
 
             if not args.force and has_trades(conn, mid):
-                skipped += 1
-                continue
+                null_count = conn.execute(
+                    "SELECT COUNT(*) FROM pm_trades WHERE market_id=? AND size IS NULL", (mid,)
+                ).fetchone()[0]
+                if null_count == 0:
+                    skipped += 1
+                    continue
 
             try:
                 ms = int(datetime.strptime(row[2], "%Y-%m-%d %H:%M:%S")

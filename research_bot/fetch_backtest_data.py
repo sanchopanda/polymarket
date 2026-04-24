@@ -219,7 +219,8 @@ def step_trades(conn, http: httpx.Client, market_ids: list[str], force: bool) ->
     existing_mids: set[str] = set()
     if not force:
         existing_mids = {r[0] for r in conn.execute(
-            "SELECT DISTINCT market_id FROM pm_trades"
+            "SELECT DISTINCT market_id FROM pm_trades WHERE market_id NOT IN "
+            "(SELECT DISTINCT market_id FROM pm_trades WHERE size IS NULL)"
         ).fetchall()}
         print(f"[trades] уже есть трейды для {len(existing_mids)} рынков")
 

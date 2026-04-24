@@ -280,7 +280,7 @@ class RecoveryDB:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM positions"
-                " WHERE status IN ('skipped_filter','skipped_min_size')"
+                " WHERE status IN ('skipped_filter','skipped_min_size','signal_only')"
                 " AND winning_side IS NULL ORDER BY opened_at DESC"
             ).fetchall()
         return [self._row_to_position(row) for row in rows]

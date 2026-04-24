@@ -388,7 +388,7 @@ class RecoveryEngine:
                                 else:
                                     why = []
                                     if not self._repeat_bet_enabled:
-                                        why.append("disabled")
+                                        why.append("repeat_bet=off")
                                     if repeat_key in self._repeat_placed:
                                         why.append("already_placed")
                                     if cur_touch >= self._repeat_bet_touch_max:
@@ -403,6 +403,7 @@ class RecoveryEngine:
                                         f" | why={','.join(why) or 'unknown'}"
                                     )
                                 signal_only_data = dict(
+                                    note=','.join(why) or 'unknown',
                                     market_id=market.market_id,
                                     symbol=market.symbol,
                                     title=market.title,
@@ -575,7 +576,7 @@ class RecoveryEngine:
         if self.strategy.get("real_enabled", False) and market.symbol in self._disabled_symbols:
             print(f"[recovery] skip real {market.symbol} {market.interval_minutes}m {side_upper}: symbol disabled by drawdown")
         if is_repeat:
-            secs_left = (market.expiry - datetime.now(timezone.utc)).total_seconds()
+            secs_left = (market.expiry - datetime.utcnow()).total_seconds()
             if (
                 self._repeat_bet_top_price_final is not None
                 and secs_left <= self._repeat_bet_top_price_final_window
@@ -1259,10 +1260,11 @@ class RecoveryEngine:
                 hypo_pnl = -cost
             self.db.resolve_skipped_position(skip.id, winning_side=winning_side, pnl=hypo_pnl)
             verdict = "AVOIDED LOSS" if hypo_pnl < 0 else "MISSED WIN"
+            reason = f" | reason={skip.note}" if skip.note else ""
             print(
                 f"[recovery] SKIP-RESOLVE {skip.symbol} {skip.interval_minutes}m"
                 f" {skip.side.upper()} [{skip.strategy_name}] | winner={winning_side}"
-                f" | hypo_pnl=${hypo_pnl:+.2f} | {verdict}"
+                f" | hypo_pnl=${hypo_pnl:+.2f} | {verdict}{reason}"
             )
 
     def _resolve_polymarket(self, market_id: str) -> str | None:
@@ -1646,7 +1648,8 @@ class RecoveryEngine:
                 ws_resolved = int(ws["resolved_count"])
                 ws_won = int(ws["won_count"])
                 ws_wr = (ws_won / ws_resolved * 100.0) if ws_resolved else 0.0
-                parts.append(f"{lbl}={ws_wr:.1f}%/{ws_resolved}")
+                ws_pnl = float(ws["realized_pnl"])
+                parts.append(f"{lbl}={ws_wr:.1f}%/{ws_resolved}/${ws_pnl:+.2f}")
             line += "\n  wr: " + " | ".join(parts)
         elif recent is not None:
             recent_resolved = int(recent["resolved_count"])
